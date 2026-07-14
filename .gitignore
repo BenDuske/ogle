@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials/
+
+# DataHub + Docker scratch state
+.datahub/
+datahub-storage/
+ogle-storage/
+*.log
+
+# Local demo memory stores
+.ogle-mem/
+.demo-mem/
+.dryrun-mem/
+
+# Backups
+.backup-*/

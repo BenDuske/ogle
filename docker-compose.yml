@@ -1,0 +1,23 @@
+# Ogle stack — DataHub + Ogle service.
+#
+# ⚠️ Skeleton only — W1 will splice in the official DataHub Quickstart
+# compose (docs.datahub.com) and layer Ogle on top. Do not `docker compose
+# up` this yet; use `datahub docker quickstart` for now.
+
+version: "3.9"
+
+services:
+  ogle:
+    build: .
+    image: ogle:dev
+    container_name: ogle
+    environment:
+      - DATAHUB_GMS_URL=http://datahub-gms:8080
+      - OGLE_MEMORY_DIR=/data/ogle-mem
+    volumes:
+      - ogle-storage:/data
+    depends_on: []   # populated in W1 once we import DataHub's compose
+    restart: unless-stopped
+
+volumes:
+  ogle-storage: {}
