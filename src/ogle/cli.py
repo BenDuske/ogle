@@ -88,7 +88,11 @@ def load_signatures_file(path: Path) -> Tuple[List[DatasetSignature], List[str]]
 
 
 def _walk_live(gms: str, models: Sequence[str], discover: bool):
-    """Run a live DataHub walk. Imported lazily so the SDK stays an optional extra."""
+    """Run a live DataHub walk. Imported lazily so the SDK stays an optional extra.
+
+    Returns (signatures, sorted_serving_urns, walk_result) — the full `WalkResult` rides
+    along so the caller can hand it to `writeback.plan_writeback` without re-walking.
+    """
     from .walker import DataHubBackend, walk_models
 
     backend = DataHubBackend(gms_server=gms)
@@ -103,7 +107,16 @@ def _walk_live(gms: str, models: Sequence[str], discover: bool):
     seen = set()
     ordered = [u for u in model_urns if not (u in seen or seen.add(u))]
     result = walk_models(backend, ordered)
-    return result.signatures, sorted(result.serving_dataset_urns)
+    return result.signatures, sorted(result.serving_dataset_urns), result
+
+
+def _do_writeback(findings, walk_result, gms: str):
+    """Live tag write-back. Imported lazily like the walker."""
+    from .writeback import DataHubWritebackBackend, apply, plan_writeback
+
+    backend = DataHubWritebackBackend(gms_server=gms)
+    plan = plan_writeback(findings, walk_result)
+    return plan, apply(plan, backend)
 
 
 # ---------------------------------------------------------------------------------------
@@ -134,11 +147,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     store = BaselineStore.load(store_path)
 
     # Gather the current signatures + which of them feed a serving model.
+    walk_result = None  # None in offline mode; a real WalkResult in live mode.
     try:
         if args.signatures:
             signatures, serving = load_signatures_file(Path(args.signatures))
         else:
-            signatures, serving = _walk_live(args.gms, args.models or [], args.discover)
+            signatures, serving, walk_result = _walk_live(
+                args.gms, args.models or [], args.discover
+            )
         # An explicit --serving on the command line augments whatever the source reported.
         serving = sorted(set(serving) | set(args.serving or []))
     except ValueError as exc:
@@ -164,7 +180,52 @@ def cmd_check(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"ogle check: warning — could not save store: {exc}", file=sys.stderr)
 
+    # Optional outbound tag write-back — only when THIS run fired a new incident, so a
+    # scheduler doesn't reapply the same tag on every tick.
+    if args.write_back:
+        if not report.should_alert:
+            _emit("_write-back skipped: no new incident this run._")
+        elif walk_result is None:
+            print(
+                "ogle check: --write-back requires a live walk (--gms/--models/--discover);"
+                " offline mode has no way to reach DataHub.",
+                file=sys.stderr,
+            )
+            return 2
+        else:
+            try:
+                plan, wb_result = _do_writeback(report.findings, walk_result, args.gms)
+            except Exception as exc:
+                print(f"ogle check: write-back failed: {exc}", file=sys.stderr)
+                # Alert still fires — the check itself succeeded; the write-back is an
+                # optional side-effect. Return 1 (new incident), not 2.
+                return 1
+            _render_writeback(plan, wb_result, as_json=args.json)
+
     return 1 if report.should_alert else 0
+
+
+def _render_writeback(plan, result, *, as_json: bool) -> None:
+    if as_json:
+        _emit(
+            json.dumps(
+                {"plan": plan.to_dict(), "result": result.to_dict()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    if not plan.actions:
+        _emit("_write-back: nothing to tag._")
+        return
+    lines = ["", f"**Tagged {len(result.tagged_entities)} entity(ies) in DataHub:**"]
+    for urn in result.tagged_entities:
+        lines.append(f"- `{urn}`")
+    if result.unchanged:
+        lines.append(f"_({len(result.unchanged)} already tagged, skipped)_")
+    if result.failed:
+        lines.append(f"_({len(result.failed)} failed — see logs)_")
+    _emit("\n".join(lines))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -221,6 +282,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the DriftReport as JSON instead of markdown.",
+    )
+    check.add_argument(
+        "--write-back",
+        action="store_true",
+        help=(
+            "On a new incident (exit 1), stamp affected datasets and their downstream "
+            "mlModels with `urn:li:tag:ogle-drift-flagged` in DataHub. Requires --gms."
+        ),
     )
     check.set_defaults(func=cmd_check)
     return parser

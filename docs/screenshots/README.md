@@ -20,6 +20,7 @@ show up in these same views.
 | 07 | `07-search-feature-tables.png` | All 3 `mlFeatureTable` entities |
 | 08 | `08-feature-table-customer-purchase.png` | `customer_purchase_features` — Features tab (5 features w/ types & descriptions) |
 | 09 | `09-feature-table-sources.png` | `customer_purchase_features` — Sources tab (4 upstream dbt datasets) |
+| **10** | **`10-churn-predictor-tagged.png`** | **W3 money shot** — after a simulated schema drift on `customers` + `ogle check --write-back`, the `ogle-drift-flagged` tag is visible on `churn_predictor` in the DataHub UI Summary panel. |
 
 ## Regenerating
 

@@ -393,6 +393,24 @@ def test_walk_result_merge_first_signature_wins_on_dup_urn():
     assert merged.signatures[0].row_count == 1000  # first-seen
 
 
+# ---- dataset_to_models reverse index (feeds W3 writeback) -----------------------------
+def test_walk_model_populates_dataset_to_models():
+    result = walk_model(_task2_backend(), MODEL_CHURN)
+    # Every upstream dataset lists the walked model as a downstream consumer.
+    assert result.dataset_to_models[DS_CUSTOMERS] == [MODEL_CHURN]
+    assert result.dataset_to_models[DS_ORDERS] == [MODEL_CHURN]
+
+
+def test_walk_models_dataset_to_models_unions_across_walks():
+    """Orders feeds churn AND demand -> reverse index lists both, dedup'd, order stable."""
+    b = _two_model_backend()
+    result = walk_models(b, [MODEL_CHURN, MODEL_DEMAND])
+    assert set(result.dataset_to_models[DS_ORDERS]) == {MODEL_CHURN, MODEL_DEMAND}
+    # Datasets fed by only one model list only that model.
+    assert result.dataset_to_models[DS_CUSTOMERS] == [MODEL_CHURN]
+    assert result.dataset_to_models[DS_PRODUCTS] == [MODEL_DEMAND]
+
+
 # =======================================================================================
 # End-to-end wiring with the pipeline — proves the output is drop-in
 # =======================================================================================

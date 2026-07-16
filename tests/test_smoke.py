@@ -12,7 +12,9 @@ def test_package_imports():
 
 
 def test_cli_runs_and_exits_zero(capsys):
-    rc = main()
+    # Explicit empty argv — otherwise argparse reads real sys.argv, which includes
+    # pytest's own flags (e.g. -q from pyproject addopts) and confuses the CLI.
+    rc = main([])
     assert rc == 0
     captured = capsys.readouterr()
     assert "ogle" in captured.out.lower()

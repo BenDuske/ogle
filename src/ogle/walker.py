@@ -201,18 +201,38 @@ class WalkResult:
 
     signatures: List[DatasetSignature] = field(default_factory=list)
     serving_dataset_urns: FrozenSet[str] = frozenset()
+    # Reverse index: dataset URN -> models that consume it (via mlFeatures). Populated
+    # during traversal — the walker already knows both directions and paying for it later
+    # would mean re-walking. Consumed by `ogle.writeback.plan_writeback` to decide which
+    # mlModel entities to tag when their upstream drifts.
+    dataset_to_models: Dict[str, List[str]] = field(default_factory=dict)
     # Diagnostics — populated for debugging live walks; ignored by the pipeline.
     skipped_urns: List[str] = field(default_factory=list)  # dataset URNs with no aspects
     walked_models: List[str] = field(default_factory=list)
 
     def merge(self, other: "WalkResult") -> "WalkResult":
-        """Union two walks, deduping datasets by URN (first-seen signature wins)."""
+        """Union two walks, deduping datasets by URN (first-seen signature wins).
+
+        `dataset_to_models` is set-unioned per dataset URN so a dataset feeding models from
+        both walks lists all of them (order stable and de-duplicated). This is exactly the
+        map W3 writeback needs — the "which downstream models to tag" answer.
+        """
         by_urn: Dict[str, DatasetSignature] = {s.urn: s for s in self.signatures}
         for sig in other.signatures:
             by_urn.setdefault(sig.urn, sig)
+
+        merged_ds_to_models: Dict[str, List[str]] = {}
+        for src in (self.dataset_to_models, other.dataset_to_models):
+            for ds_urn, models in src.items():
+                bucket = merged_ds_to_models.setdefault(ds_urn, [])
+                for m in models:
+                    if m not in bucket:
+                        bucket.append(m)
+
         return WalkResult(
             signatures=list(by_urn.values()),
             serving_dataset_urns=self.serving_dataset_urns | other.serving_dataset_urns,
+            dataset_to_models=merged_ds_to_models,
             skipped_urns=sorted(set(self.skipped_urns) | set(other.skipped_urns)),
             walked_models=sorted(set(self.walked_models) | set(other.walked_models)),
         )
@@ -246,6 +266,10 @@ def walk_model(
     return WalkResult(
         signatures=signatures,
         serving_dataset_urns=frozenset(dataset_urns) if serving else frozenset(),
+        # Every upstream dataset feeds this one model (including datasets that were skipped
+        # for lack of aspects — writeback should still be able to tag their downstream model
+        # if some *other* signal identifies them as drifted).
+        dataset_to_models={ds: [model_urn] for ds in dataset_urns},
         skipped_urns=skipped,
         walked_models=[model_urn],
     )
