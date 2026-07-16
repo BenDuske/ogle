@@ -292,6 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     check.set_defaults(func=cmd_check)
+
+    # `ogle watch` — one scheduler tick that pages once on a new incident.
+    from .watch import build_watch_args
+
+    build_watch_args(sub)
+
     return parser
 
 

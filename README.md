@@ -70,6 +70,33 @@ The signatures file is a JSON list of `DatasetSignature` dicts, or
 once per incident, not every tick. Add `--json` for machine output, `--no-update` for a
 read-only probe.
 
+### Running on a schedule (`ogle watch`)
+
+`ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —
+**page once on a new incident (1), stay quiet when healthy (0)**. The scheduler owns the
+loop (a cron line / a Windows Scheduled Task); because the pipeline debounces standing
+drift to `0`, you're paged once per incident, not on every tick. Put the flags for
+`ogle check` after `--`:
+
+```bash
+# stderr pager (default) — a PAGE: block is printed only on a new incident
+ogle watch -- --store baselines.json --signatures my-signatures.json
+
+# wire a real pager: the narrative is handed to your command on stdin
+ogle watch --notify-cmd mail -s "ogle drift" you@host \
+  -- --gms http://localhost:8080 --discover --write-back
+```
+
+`--page-on-error` also pages on exit 2 (input/live-walk failure); by default those are
+logged but not paged, so a transient GMS outage doesn't cry wolf. `ogle watch` preserves
+the underlying `ogle check` exit code, so a cron/Task can still branch on it. Example
+cron line (every 15 min):
+
+```cron
+*/15 * * * * cd /srv/ogle && ogle watch --notify-cmd /usr/local/bin/page-me -- \
+  --store /var/lib/ogle/baselines.json --gms http://localhost:8080 --discover
+```
+
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md).
