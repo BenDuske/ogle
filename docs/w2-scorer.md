@@ -62,9 +62,47 @@ joins). `tests/test_narrative.py` (20): short-name parsing, severity rollup, ser
 fingerprint order-independence + change-on-worsen, deterministic markdown, action dedup,
 grounded prompt, and the LLM seam (used / fallback-on-raise / fallback-on-empty).
 
+## W2b — Baseline store (`ogle.store`) + pipeline (`ogle.pipeline`)
+
+Drift detection is a diff, so Ogle needs memory between runs. `BaselineStore` is that memory
+and the concrete "Aegis memory" backing:
+
+- **Baselines** — the last `DatasetSignature` per URN, so the next run can diff against it.
+- **Seen incidents** — the set of incident fingerprints already reported, with an observation
+  count, so a scheduled loop pages Ben *once* per drift, not every 10 minutes.
+- **Durable** — a single JSON file written atomically (temp + `os.replace`), so a crash
+  mid-walk can't corrupt good baselines. Versioned on disk (refuses to misread a stale file).
+  Clock-free and diffable. When Aegis salience memory lands (W3), `BaselineStore` is the seam
+  that swaps a JSON path for an Aegis-backed KV without the scorer/pipeline changing.
+
+`run_drift_check(store, current, serving_urns, cfg, llm, update_baselines)` is the I/O-free
+end-to-end seam the live DataHub walk plugs into — it takes the freshly-pulled signatures and
+the store and returns a `DriftReport`:
+
+- **New datasets** (no baseline) are seeded, never scored — you can't diff against nothing.
+- **Scored datasets** are diffed via `score_dataset` (serving URNs escalated), findings merged
+  and ranked worst-first across all datasets.
+- **`should_alert`** is the single field a scheduled loop needs: true only on a *new* incident
+  (dedup runs against the store), so repeats debounce automatically.
+- **Baselines advance** to the current state after scoring (skippable with `update_baselines=False`
+  for a read-only probe); the advance happens only after scoring so a mid-batch failure can't
+  half-update state.
+
+```
+DataHub walk ──▶ build_signature() ──▶ BaselineStore.get_baseline()   [W2b ✅]
+                                    └─▶ run_drift_check() ──▶ score_dataset() ──▶ narrate()
+                                                          └─▶ DriftReport{should_alert}
+```
+
 ## Tests
 
 `tests/test_signature.py` (11) + `tests/test_scorer.py` (18): order-independent hashing,
 add-vs-remove-vs-retype severity, volume collapse + thresholds, null-spike vs improvement,
 serving escalation on/off, finding ordering, degrade-gracefully on missing profiles.
-Fault-injection verified (breaking escalation flips a test red). Run: `py -3.14 -m pytest -q`.
+`tests/test_store.py` (18): put/get/upsert, incident record+count+forget, save/load roundtrip,
+atomic write (no tmp leftover), missing-file→fresh store, version rejection, parent-dir creation.
+`tests/test_pipeline.py` (16): first-run seeding, unchanged→no drift, volume-collapse incident,
+serving escalation, cross-dataset merge+rank, alert-once-then-debounce, baseline advance vs
+read-only probe, LLM seam used/fallback-on-raise, serializable report, empty-batch heartbeat.
+Fault-injection verified (breaking escalation *and* the debounce each flip a test red). 80 tests
+green. Run: `py -3.14 -m pytest -q`.
