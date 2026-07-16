@@ -34,23 +34,41 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
 
 ## Quickstart
 
+### Against a live DataHub (Docker)
+
 ```bash
-# 1. Bring up a local DataHub + Ogle stack (Docker required)
+# 1. Bring up a local DataHub quickstart (Docker required)
 docker compose up -d
 
 # 2. Seed the demo dataset (3 tables → 2 features → 1 model)
 python scripts/seed_demo_dataset.py
 
-# 3. Run one lineage-walk cycle
-python -m ogle walk --model demo.recommender.v1
+# 3. Run one drift-check cycle (walks lineage, seeds baselines on first run)
+ogle check --gms http://localhost:8080 --discover
 
-# 4. Simulate a drift event and re-walk
+# 4. Simulate a drift event and re-check — now it alerts
 python scripts/simulate_drift.py
-python -m ogle walk --model demo.recommender.v1
+ogle check --gms http://localhost:8080 --discover
 ```
 
-Expected: on the second walk, Ogle flags the drifted upstream table, writes a narrative
-alert (see `examples/alerts/`), and tags the asset in DataHub.
+Expected: on the second check, Ogle flags the drifted upstream table, writes a narrative
+alert (see `examples/alerts/`), and exits non-zero so a scheduler pages you.
+
+### Without Docker (offline signatures)
+
+`ogle check` also runs against pre-computed signatures — no SDK, no quickstart — which is
+how it's unit-tested and how a scheduled job can feed signatures it pulled elsewhere:
+
+```bash
+ogle check --store baselines.json --signatures my-signatures.json
+```
+
+The signatures file is a JSON list of `DatasetSignature` dicts, or
+`{"signatures": [...], "serving_urns": [...]}`. Exit codes let a cron/Task wrapper branch:
+**0** = healthy (may include first-run seeding), **1** = a *new* incident fired (alert),
+**2** = usage/input error. Re-running an unchanged drift is debounced to **0** — you're paged
+once per incident, not every tick. Add `--json` for machine output, `--no-update` for a
+read-only probe.
 
 ## Architecture
 

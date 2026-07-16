@@ -1,11 +1,238 @@
-"""Ogle CLI entrypoint. Filled in during W1."""
+"""Ogle CLI — the operator-facing entrypoint over the drift-check pipeline.
 
+`ogle check` is the whole loop in one command:
+
+    load baselines  ->  walk (live DataHub | offline signatures file)  ->  run_drift_check
+                                                                                |
+                                    save baselines  <-  render/alert  <---------+
+
+Two input modes so the command is useful with OR without a live DataHub quickstart:
+
+  * **Live walk** (`--gms` + `--models`/`--discover`) — pulls aspects through
+    `ogle.walker.DataHubBackend`. Needs the `datahub` extra + a reachable GMS.
+  * **Offline signatures** (`--signatures FILE`) — feeds pre-computed `DatasetSignature`s
+    from JSON. No SDK, no Docker. This is how a scheduled job can hand Ogle signatures it
+    pulled elsewhere, and how the CLI is unit-tested end-to-end.
+
+Exit codes are chosen so a cron/Task wrapper can branch on them:
+    0  healthy — no *new* incident to alert on (may include seeded/first-run datasets)
+    1  a NEW incident fired (`DriftReport.should_alert`) — page Ben
+    2  usage / input error
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
 import sys
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+from . import __version__
+from .pipeline import DriftReport, run_drift_check
+from .signature import DatasetSignature
+from .store import BaselineStore
+
+DEFAULT_STORE = "ogle-baselines.json"
 
 
-def main() -> int:
-    print("ogle v0.1.0 — CLI scaffolded, walk/scan commands land in W1.")
-    return 0
+def _emit(text: str, *, stream=None) -> None:
+    """Print `text` without crashing on a legacy console encoding.
+
+    The narrative carries emoji severity markers; a Windows cp1252 terminal raises
+    UnicodeEncodeError on those. Encode to the stream's own encoding with errors="replace"
+    so the command still runs (and its exit code stays trustworthy) on any console.
+    """
+    stream = stream or sys.stdout
+    enc = getattr(stream, "encoding", None) or "utf-8"
+    stream.write(text.encode(enc, errors="replace").decode(enc) + "\n")
+
+
+# ---------------------------------------------------------------------------------------
+# Input loading
+# ---------------------------------------------------------------------------------------
+def load_signatures_file(path: Path) -> Tuple[List[DatasetSignature], List[str]]:
+    """Read signatures (and optional serving URNs) from a JSON file.
+
+    Accepts either shape:
+      * a bare list  ``[ <sig.to_dict()>, ... ]``  (no serving URNs), or
+      * an object    ``{"signatures": [...], "serving_urns": [...]}``.
+
+    Returns (signatures, serving_urns). Raises ``ValueError`` with an operator-readable
+    message on any malformed input — the CLI turns that into exit code 2.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"signatures file not found: {path}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"signatures file is not valid JSON ({path}): {exc}")
+
+    if isinstance(data, list):
+        raw_sigs, serving = data, []
+    elif isinstance(data, dict):
+        raw_sigs = data.get("signatures", [])
+        serving = list(data.get("serving_urns", []))
+    else:
+        raise ValueError("signatures file must be a JSON list or object")
+
+    if not isinstance(raw_sigs, list):
+        raise ValueError('"signatures" must be a JSON list')
+
+    signatures: List[DatasetSignature] = []
+    for i, item in enumerate(raw_sigs):
+        if not isinstance(item, dict) or "urn" not in item:
+            raise ValueError(f"signature #{i} is missing a urn / is not an object")
+        signatures.append(DatasetSignature.from_dict(item))
+    return signatures, serving
+
+
+def _walk_live(gms: str, models: Sequence[str], discover: bool):
+    """Run a live DataHub walk. Imported lazily so the SDK stays an optional extra."""
+    from .walker import DataHubBackend, walk_models
+
+    backend = DataHubBackend(gms_server=gms)
+    model_urns: List[str] = list(models)
+    if discover:
+        model_urns.extend(backend.discover_deployed_models())
+    if not model_urns:
+        raise ValueError(
+            "no models to walk — pass --models URN [URN ...] or --discover"
+        )
+    # Dedup while preserving order so diagnostics list each model once.
+    seen = set()
+    ordered = [u for u in model_urns if not (u in seen or seen.add(u))]
+    result = walk_models(backend, ordered)
+    return result.signatures, sorted(result.serving_dataset_urns)
+
+
+# ---------------------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------------------
+def render_report(report: DriftReport, *, as_json: bool) -> str:
+    """Human markdown by default; machine JSON with --json."""
+    if as_json:
+        return json.dumps(report.to_dict(), indent=2, sort_keys=True)
+
+    lines = [report.narrative.rstrip()]
+    tail = []
+    if report.new_urns:
+        tail.append(f"seeded {len(report.new_urns)} new dataset(s) (first sighting)")
+    if report.scored_urns:
+        tail.append(f"checked {len(report.scored_urns)} dataset(s)")
+    if tail:
+        lines.append("")
+        lines.append("_" + "; ".join(tail) + "._")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------------------
+def cmd_check(args: argparse.Namespace) -> int:
+    store_path = Path(args.store)
+    store = BaselineStore.load(store_path)
+
+    # Gather the current signatures + which of them feed a serving model.
+    try:
+        if args.signatures:
+            signatures, serving = load_signatures_file(Path(args.signatures))
+        else:
+            signatures, serving = _walk_live(args.gms, args.models or [], args.discover)
+        # An explicit --serving on the command line augments whatever the source reported.
+        serving = sorted(set(serving) | set(args.serving or []))
+    except ValueError as exc:
+        print(f"ogle check: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # live-walk failure (SDK/network) — report, don't traceback
+        print(f"ogle check: live walk failed: {exc}", file=sys.stderr)
+        return 2
+
+    report = run_drift_check(
+        store,
+        signatures,
+        serving_urns=serving,
+        update_baselines=not args.no_update,
+    )
+
+    _emit(render_report(report, as_json=args.json))
+
+    # Persist advanced baselines/incident memory unless asked for a read-only probe.
+    if not args.no_update:
+        try:
+            store.save(store_path)
+        except Exception as exc:
+            print(f"ogle check: warning — could not save store: {exc}", file=sys.stderr)
+
+    return 1 if report.should_alert else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ogle",
+        description="Ogle — ML-lineage drift agent for DataHub.",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"ogle {__version__}")
+    sub = parser.add_subparsers(dest="command")
+
+    check = sub.add_parser(
+        "check",
+        help="Run a drift check: walk lineage, diff against baselines, alert on new drift.",
+    )
+    check.add_argument(
+        "--store",
+        default=DEFAULT_STORE,
+        help=f"Baseline/incident store JSON (default: {DEFAULT_STORE}).",
+    )
+    src = check.add_argument_group("input (choose live walk OR an offline signatures file)")
+    src.add_argument(
+        "--signatures",
+        metavar="FILE",
+        help="Offline: read DatasetSignatures from JSON instead of a live DataHub walk.",
+    )
+    src.add_argument(
+        "--gms",
+        default="http://localhost:8080",
+        help="Live: DataHub GMS server URL (default: http://localhost:8080).",
+    )
+    src.add_argument(
+        "--models",
+        nargs="*",
+        metavar="URN",
+        help="Live: explicit mlModel URNs to walk.",
+    )
+    src.add_argument(
+        "--discover",
+        action="store_true",
+        help="Live: also auto-discover every IN_SERVICE model and walk it.",
+    )
+    check.add_argument(
+        "--serving",
+        nargs="*",
+        metavar="URN",
+        help="Extra dataset URNs to treat as serving (severity-escalated).",
+    )
+    check.add_argument(
+        "--no-update",
+        action="store_true",
+        help="Read-only probe: do not advance baselines or incident memory.",
+    )
+    check.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the DriftReport as JSON instead of markdown.",
+    )
+    check.set_defaults(func=cmd_check)
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 0
+    return args.func(args)
 
 
 if __name__ == "__main__":
