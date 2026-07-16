@@ -31,6 +31,12 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
 ]
+# Live DataHub walk (ogle.walker.DataHubBackend, scripts/live-drift-check.py). The pure
+# pipeline (signature/scorer/store/narrative/pipeline) works WITHOUT this — users can feed
+# their own DatasetSignatures. Only install when driving a live DataHub GMS.
+datahub = [
+    "acryl-datahub>=1.6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/BenDuske/ogle"

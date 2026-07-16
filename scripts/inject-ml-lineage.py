@@ -273,6 +273,13 @@ def build_mcps() -> List[MetadataChangeProposalWrapper]:
             MetadataChangeProposalWrapper(entityUrn=table_urn, aspect=_owner_aspect(ft.owner))
         )
 
+    # Invert DEPLOYMENTS into model_urn -> [deployment_urn] so `MLModelProperties.deployments`
+    # can be populated. Without this back-reference the Ogle walker can't tell that a model
+    # is IN_SERVICE (bit us during Ogle W2c live-walk).
+    deployments_by_model: Dict[str, List[str]] = {}
+    for d in DEPLOYMENTS:
+        deployments_by_model.setdefault(d.model_urn, []).append(deployment_urn(d.name))
+
     for m in MODELS:
         m_urn = model_urn(m.name)
         mcps.append(
@@ -288,6 +295,7 @@ def build_mcps() -> List[MetadataChangeProposalWrapper]:
                         if feature_table_urn(ft.name) in m.upstream_feature_tables
                         for f in ft.features
                     ],
+                    deployments=deployments_by_model.get(m_urn, []),
                     trainingMetrics=[],
                     hyperParams=[],
                 ),
