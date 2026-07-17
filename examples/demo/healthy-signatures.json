@@ -1,0 +1,31 @@
+{
+  "_comment": "Ogle offline demo — HEALTHY baseline signatures for the churn serving path. Feed this first to seed baselines (exit 0), then feed drifted-signatures.json to fire the alert. URNs match scripts/inject-ml-lineage.py so the offline demo mirrors the live DataHub demo.",
+  "signatures": [
+    {
+      "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)",
+      "schema_fields": [
+        ["order_id", "BIGINT"],
+        ["customer_id", "BIGINT"],
+        ["order_total", "DOUBLE"],
+        ["status", "STRING"],
+        ["created_at", "TIMESTAMP"]
+      ],
+      "row_count": 1250000,
+      "field_null_fractions": {"order_total": 0.001, "status": 0.0}
+    },
+    {
+      "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.customers,PROD)",
+      "schema_fields": [
+        ["customer_id", "BIGINT"],
+        ["email", "STRING"],
+        ["signup_ts", "TIMESTAMP"],
+        ["country", "STRING"]
+      ],
+      "row_count": 312000,
+      "field_null_fractions": {"email": 0.0, "country": 0.02}
+    }
+  ],
+  "serving_urns": [
+    "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)"
+  ]
+}

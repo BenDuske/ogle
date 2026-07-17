@@ -45,21 +45,23 @@ publish the DataHub Skill contribution back upstream.)*
 ## Testing Instructions
 
 ```bash
-# 1. Bring up the stack (Docker required)
-docker compose up -d
-
-# 2. Seed the demo dataset
-python scripts/seed_demo_dataset.py
-
-# 3. Run tests (keyless — network calls monkeypatched)
+# 1. Run tests — no Docker, no keys (all network calls are monkeypatched)
 pip install -e ".[dev]"
 pytest -q
 
-# 4. Live demo — run one walk cycle end-to-end
-python -m ogle walk --model demo.recommender.v1
+# 2. Offline demo — reproduces the sample drift alert end-to-end
+ogle check --store demo.json --signatures examples/demo/healthy-signatures.json   # seeds, exit 0
+ogle check --store demo.json --signatures examples/demo/drifted-signatures.json   # alerts, exit 1
+
+# 3. (optional) Live demo against a real DataHub quickstart
+datahub docker quickstart
+python scripts/inject-ml-lineage.py --gms http://localhost:8080
+ogle check --gms http://localhost:8080 --discover --store live.json
 ```
 
-Optional live-LLM path documented in `docs/DEPLOY.md`.
+The offline demo in step 2 needs no DataHub and no API key; its captured output is
+`examples/alerts/churn-orders-drift.md`. See `docs/live-verification.md` for a full
+transcript of the live path against the DataHub quickstart.
 
 ---
 
@@ -72,7 +74,7 @@ Optional live-LLM path documented in `docs/DEPLOY.md`.
 | Demo video (< 3 min, YouTube public/unlisted) | 🟡 W3 |
 | Text description | 🟡 W3 (this file) |
 | Setup instructions in README | 🟡 W1 → refined W3 |
-| Sample outputs in `examples/` | 🟡 W2 |
+| Sample outputs in `examples/` | ✅ `examples/alerts/` + runnable `examples/demo/` fixtures |
 | Live demo URL or Docker Compose one-liner | 🟡 W1 |
 | Optional: OSS contribution back to DataHub | 🟡 W2–W3 stretch |
 

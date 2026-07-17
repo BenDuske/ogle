@@ -38,21 +38,23 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
 
 ```bash
 # 1. Bring up a local DataHub quickstart (Docker required)
-docker compose up -d
+datahub docker quickstart
 
-# 2. Seed the demo dataset (3 tables → 2 features → 1 model)
-python scripts/seed_demo_dataset.py
+# 2. Seed the demo ML lineage (source tables → feature tables → serving models)
+python scripts/inject-ml-lineage.py --gms http://localhost:8080
 
-# 3. Run one drift-check cycle (walks lineage, seeds baselines on first run)
-ogle check --gms http://localhost:8080 --discover
+# 3. Run one drift-check cycle (walks lineage, seeds baselines on first run, exit 0)
+ogle check --gms http://localhost:8080 --discover --store live.json
 
-# 4. Simulate a drift event and re-check — now it alerts
-python scripts/simulate_drift.py
-ogle check --gms http://localhost:8080 --discover
+# 4. Re-check the unchanged graph — no false drift (exit 0)
+ogle check --gms http://localhost:8080 --discover --store live.json
 ```
 
-Expected: on the second check, Ogle flags the drifted upstream table, writes a narrative
-alert (see `examples/alerts/`), and exits non-zero so a scheduler pages you.
+Steps 3–4 prove Ogle seeds baselines then reports **no false drift** on a stable graph
+(both exit 0). To watch the alert path actually fire — schema/volume/quality drift on a
+serving-path table — run the offline demo below; it's the same drift-check code path,
+fully reproducible without Docker, and its captured alert lives in
+[`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md).
 
 ### Without Docker (offline signatures)
 
@@ -60,8 +62,15 @@ alert (see `examples/alerts/`), and exits non-zero so a scheduler pages you.
 how it's unit-tested and how a scheduled job can feed signatures it pulled elsewhere:
 
 ```bash
-ogle check --store baselines.json --signatures my-signatures.json
+# Seed baselines from the healthy demo fixture (exit 0)
+ogle check --store demo.json --signatures examples/demo/healthy-signatures.json
+
+# Re-check against the drifted fixture — fires a HIGH serving-path alert (exit 1)
+ogle check --store demo.json --signatures examples/demo/drifted-signatures.json
 ```
+
+The second command reproduces [`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md)
+verbatim. Point `--signatures` at your own file to feed signatures pulled elsewhere.
 
 The signatures file is a JSON list of `DatasetSignature` dicts, or
 `{"signatures": [...], "serving_urns": [...]}`. Exit codes let a cron/Task wrapper branch:
