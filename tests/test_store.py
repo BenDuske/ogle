@@ -83,6 +83,65 @@ def test_forget_incident():
     store.forget_incident("never")
 
 
+# ---- muting (known false positives) -----------------------------------------------
+def test_empty_store_mutes_nothing():
+    store = BaselineStore()
+    assert store.is_muted(CUSTOMERS_URN) is False
+    assert store.muted() == []
+
+
+def test_mute_marks_and_reports_newly():
+    store = BaselineStore()
+    assert store.mute(CUSTOMERS_URN) is True
+    assert store.is_muted(CUSTOMERS_URN) is True
+    # muting again is a no-op that reports "not newly muted"
+    assert store.mute(CUSTOMERS_URN) is False
+
+
+def test_unmute_reverses_and_reports():
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN)
+    assert store.unmute(CUSTOMERS_URN) is True
+    assert store.is_muted(CUSTOMERS_URN) is False
+    # un-muting something never muted reports False, not an error
+    assert store.unmute(ORDERS_URN) is False
+
+
+def test_muted_list_sorted_and_stable():
+    store = BaselineStore()
+    store.mute(ORDERS_URN)
+    store.mute(CUSTOMERS_URN)
+    assert store.muted() == sorted([ORDERS_URN, CUSTOMERS_URN])
+
+
+def test_muted_urns_survive_save_load(tmp_path):
+    p = tmp_path / "store.json"
+    store = BaselineStore(path=p)
+    store.mute(CUSTOMERS_URN)
+    store.save()
+    assert BaselineStore.load(p).is_muted(CUSTOMERS_URN) is True
+
+
+def test_muted_urns_in_on_disk_shape(tmp_path):
+    p = tmp_path / "store.json"
+    s = BaselineStore(path=p)
+    s.mute(CUSTOMERS_URN)
+    s.save()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["muted_urns"] == [CUSTOMERS_URN]
+
+
+def test_load_old_store_without_muted_key_is_empty(tmp_path):
+    # A file written by an older Ogle (no muted_urns key) must still load — additive field.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps({"version": STORE_VERSION, "baselines": {}, "seen_incidents": {}}),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.muted() == []
+
+
 # ---- persistence ------------------------------------------------------------------
 def test_save_and_load_roundtrip(tmp_path):
     p = tmp_path / "store.json"

@@ -42,6 +42,7 @@ class DriftReport:
     # URNs seen this run, split by how they were handled.
     scored_urns: List[str] = field(default_factory=list)      # had a baseline -> diffed
     new_urns: List[str] = field(default_factory=list)         # first sighting -> seeded only
+    suppressed_urns: List[str] = field(default_factory=list)  # drifted but muted -> not paged
     # True when there IS an incident AND it wasn't reported on an earlier run.
     is_new_incident: bool = False
     # Running observation count of this incident (1 = first time). 0 when no incident.
@@ -58,6 +59,7 @@ class DriftReport:
             "incident": self.incident.to_dict() if self.incident else None,
             "scored_urns": list(self.scored_urns),
             "new_urns": list(self.new_urns),
+            "suppressed_urns": list(self.suppressed_urns),
             "is_new_incident": self.is_new_incident,
             "incident_count": self.incident_count,
             "should_alert": self.should_alert,
@@ -92,6 +94,7 @@ def run_drift_check(
     all_findings: List[DriftFinding] = []
     scored_urns: List[str] = []
     new_urns: List[str] = []
+    suppressed_urns: List[str] = []
 
     for sig in current:
         baseline = store.get_baseline(sig.urn)
@@ -101,6 +104,12 @@ def run_drift_check(
             continue
         findings = score_dataset(baseline, sig, cfg, serving=sig.urn in serving)
         scored_urns.append(sig.urn)
+        # A muted dataset is still diffed (so its baseline advances and it can be unmuted
+        # later against fresh state), but its findings are held out of the incident so a
+        # known-noisy asset never pages — even when it flaps with a brand-new fingerprint.
+        if findings and store.is_muted(sig.urn):
+            suppressed_urns.append(sig.urn)
+            continue
         all_findings.extend(findings)
 
     # Rank the merged findings so the narrative leads with the worst across all datasets.
@@ -125,6 +134,7 @@ def run_drift_check(
         narrative=text,
         scored_urns=sorted(scored_urns),
         new_urns=sorted(new_urns),
+        suppressed_urns=sorted(suppressed_urns),
         is_new_incident=is_new,
         incident_count=count,
     )

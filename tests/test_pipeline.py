@@ -107,6 +107,75 @@ def test_same_incident_alerts_once_then_debounces():
     assert second.incident_count == 2
 
 
+# ---- muting (known false positives) -----------------------------------------------
+def test_muted_dataset_drift_is_suppressed_not_paged():
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    report = run_drift_check(store, [_sig(row_count=0)], serving_urns=[CUSTOMERS_URN])
+    # the collapse is real, but the dataset is muted -> no incident, no page
+    assert report.suppressed_urns == [CUSTOMERS_URN]
+    assert report.findings == []
+    assert report.incident is None
+    assert report.should_alert is False
+    # still counted as scored (it WAS diffed) so the baseline can advance
+    assert report.scored_urns == [CUSTOMERS_URN]
+
+
+def test_muted_dataset_baseline_still_advances():
+    # Muting silences the alert but must NOT freeze tracking, or an un-mute later would
+    # diff against stale state.
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    run_drift_check(store, [_sig(row_count=0)])
+    assert store.get_baseline(CUSTOMERS_URN).row_count == 0
+
+
+def test_muting_one_dataset_still_pages_another():
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN, row_count=1000))
+    store.put_baseline(_sig(urn=ORDERS_URN, row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    report = run_drift_check(
+        store,
+        [_sig(urn=CUSTOMERS_URN, row_count=0), _sig(urn=ORDERS_URN, row_count=0)],
+    )
+    # customers muted -> suppressed; orders still fires the incident
+    assert report.suppressed_urns == [CUSTOMERS_URN]
+    assert report.incident is not None
+    assert report.incident.urns == [ORDERS_URN]
+    assert report.should_alert is True
+
+
+def test_muted_dataset_with_no_drift_is_not_listed_suppressed():
+    # Suppression only records a muted URN when it actually drifted — a quiet muted asset
+    # shouldn't show up as "silenced".
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    report = run_drift_check(store, [_sig(row_count=1000)])
+    assert report.suppressed_urns == []
+
+
+def test_unmuting_restores_paging():
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    store.unmute(CUSTOMERS_URN)
+    report = run_drift_check(store, [_sig(row_count=0)])
+    assert report.suppressed_urns == []
+    assert report.should_alert is True
+
+
+def test_suppressed_urns_in_report_dict():
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN)
+    report = run_drift_check(store, [_sig(row_count=0)])
+    assert report.to_dict()["suppressed_urns"] == [CUSTOMERS_URN]
+
+
 # ---- baseline advancement ---------------------------------------------------------
 def test_update_baselines_advances_state_by_default():
     store = BaselineStore()

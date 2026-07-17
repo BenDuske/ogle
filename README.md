@@ -113,6 +113,27 @@ Thresholds are validated up front — a nonsensical value (volume ≤ 0, or a nu
 outside `(0, 1]`) exits **2** before any walk. Schema drift (a removed/retyped column) is
 always flagged regardless of these knobs.
 
+### Muting known false positives (`ogle mute`)
+
+Some assets are chronically noisy — a dashboard that bounces every Monday, a staging table
+that gets truncated and reloaded nightly. Debounce alone won't help there: each flap is a
+*genuinely new* incident fingerprint, so it pages every time. Tell Ogle to remember it's a
+false positive instead:
+
+```bash
+# stop paging on a known-noisy dataset (persists into the store `ogle check` reads)
+ogle mute 'urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)'
+
+ogle muted            # list what's currently silenced
+ogle unmute '<urn>'   # let it page again
+```
+
+A muted dataset is **still tracked** — its baseline keeps advancing, so an `unmute` later
+diffs against fresh state, not stale — it just never contributes to an incident. `ogle check`
+reports how many muted datasets it silenced (`silenced N muted dataset(s)`) and lists them
+under `suppressed_urns` in `--json`, so the suppression is visible, never a silent black hole.
+This is feature #3 (memory of past false positives) as a first-class operator control.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

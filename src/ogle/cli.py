@@ -136,6 +136,8 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
         tail.append(f"seeded {len(report.new_urns)} new dataset(s) (first sighting)")
     if report.scored_urns:
         tail.append(f"checked {len(report.scored_urns)} dataset(s)")
+    if report.suppressed_urns:
+        tail.append(f"silenced {len(report.suppressed_urns)} muted dataset(s)")
     if tail:
         lines.append("")
         lines.append("_" + "; ".join(tail) + "._")
@@ -320,6 +322,58 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 1 if drift.should_alert else 0
 
 
+def cmd_mute(args: argparse.Namespace) -> int:
+    """Mark a dataset as a known false positive so its drift stops paging.
+
+    Persists into the same store `ogle check` reads, so the next scheduled run silences it.
+    Idempotent: muting an already-muted URN reports that rather than claiming a change.
+    """
+    store_path = Path(args.store)
+    store = BaselineStore.load(store_path)
+    newly = store.mute(args.urn)
+    try:
+        store.save(store_path)
+    except Exception as exc:
+        print(f"ogle mute: could not save store: {exc}", file=sys.stderr)
+        return 2
+    _emit(
+        f"🔇 muted {args.urn}" if newly else f"_already muted: {args.urn}_"
+    )
+    return 0
+
+
+def cmd_unmute(args: argparse.Namespace) -> int:
+    """Un-mute a dataset so its drift can page again."""
+    store_path = Path(args.store)
+    store = BaselineStore.load(store_path)
+    was = store.unmute(args.urn)
+    try:
+        store.save(store_path)
+    except Exception as exc:
+        print(f"ogle unmute: could not save store: {exc}", file=sys.stderr)
+        return 2
+    _emit(
+        f"🔔 unmuted {args.urn}" if was else f"_not muted: {args.urn}_"
+    )
+    return 0
+
+
+def cmd_muted(args: argparse.Namespace) -> int:
+    """List the datasets currently muted in the store."""
+    store = BaselineStore.load(Path(args.store))
+    urns = store.muted()
+    if args.json:
+        _emit(json.dumps({"muted_urns": urns}, indent=2, sort_keys=True))
+        return 0
+    if not urns:
+        _emit("_no muted datasets._")
+        return 0
+    _emit(f"**{len(urns)} muted dataset(s):**")
+    for urn in urns:
+        _emit(f"- `{urn}`")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ogle",
@@ -434,6 +488,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     demo.set_defaults(func=cmd_demo)
+
+    # `ogle mute|unmute|muted` — manage the known-false-positive list (feature #3). A muted
+    # dataset is still tracked but never pages, so a chronically-noisy asset stops crying wolf.
+    mute = sub.add_parser(
+        "mute",
+        help="Mark a dataset as a known false positive so its drift stops paging.",
+    )
+    mute.add_argument("urn", help="Dataset URN to mute.")
+    mute.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    mute.set_defaults(func=cmd_mute)
+
+    unmute = sub.add_parser("unmute", help="Un-mute a dataset so its drift can page again.")
+    unmute.add_argument("urn", help="Dataset URN to un-mute.")
+    unmute.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    unmute.set_defaults(func=cmd_unmute)
+
+    muted = sub.add_parser("muted", help="List datasets currently muted in the store.")
+    muted.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    muted.add_argument("--json", action="store_true", help="Emit the list as JSON.")
+    muted.set_defaults(func=cmd_muted)
 
     # `ogle watch` — one scheduler tick that pages once on a new incident.
     from .watch import build_watch_args

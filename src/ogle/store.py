@@ -8,6 +8,10 @@ it can tell what changed. This module is that memory. It persists two things:
   * SEEN INCIDENTS — the set of incident fingerprints Ogle has already reported, with an
                     observation count. Lets a scheduled run tell a *new* problem from one it
                     already alerted on, so Ben isn't paged every 10 minutes for the same drift.
+  * MUTED URNS     — datasets an operator has marked as known-noisy false positives ("this
+                    dashboard bounces every Monday, ignore"). Their drift is still tracked
+                    (baselines advance) but never pages — the difference from dedup is that a
+                    muted asset stays silent even when it flaps with a *fresh* fingerprint.
 
 The on-disk format is a single JSON file, written atomically (temp + replace) so a crash
 mid-write can't corrupt the baseline. That file is the concrete "Aegis memory" backing for
@@ -26,7 +30,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Set, Union
 
 from .signature import DatasetSignature
 
@@ -60,6 +64,7 @@ class BaselineStore:
     path: Optional[Path] = None
     baselines: Dict[str, DatasetSignature] = field(default_factory=dict)
     seen_incidents: Dict[str, _IncidentRecord] = field(default_factory=dict)
+    muted_urns: Set[str] = field(default_factory=set)
 
     # ---- baselines -----------------------------------------------------------------
     def get_baseline(self, urn: str) -> Optional[DatasetSignature]:
@@ -102,12 +107,40 @@ class BaselineStore:
         """Drop an incident from memory (e.g. once the underlying drift is resolved)."""
         self.seen_incidents.pop(fingerprint, None)
 
+    # ---- muting (known false positives) --------------------------------------------
+    def mute(self, urn: str) -> bool:
+        """Mark a dataset as a known false positive so its drift never pages.
+
+        Returns True if this newly muted the URN, False if it was already muted (so a CLI
+        can tell the operator "already muted" instead of falsely claiming an action).
+        """
+        if urn in self.muted_urns:
+            return False
+        self.muted_urns.add(urn)
+        return True
+
+    def unmute(self, urn: str) -> bool:
+        """Stop suppressing a dataset's drift. Returns True if it had been muted."""
+        if urn in self.muted_urns:
+            self.muted_urns.discard(urn)
+            return True
+        return False
+
+    def is_muted(self, urn: str) -> bool:
+        """True if drift on this dataset should be tracked but not alerted on."""
+        return urn in self.muted_urns
+
+    def muted(self) -> List[str]:
+        """All currently muted dataset URNs (sorted for stable output)."""
+        return sorted(self.muted_urns)
+
     # ---- persistence ---------------------------------------------------------------
     def to_dict(self) -> dict:
         return {
             "version": STORE_VERSION,
             "baselines": {urn: sig.to_dict() for urn, sig in self.baselines.items()},
             "seen_incidents": {fp: r.to_dict() for fp, r in self.seen_incidents.items()},
+            "muted_urns": sorted(self.muted_urns),
         }
 
     @classmethod
@@ -126,7 +159,10 @@ class BaselineStore:
             fp: _IncidentRecord.from_dict(raw)
             for fp, raw in data.get("seen_incidents", {}).items()
         }
-        return cls(path=path, baselines=baselines, seen_incidents=seen)
+        # muted_urns is additive (introduced after v1 shipped): a store written by an older
+        # Ogle simply lacks the key and loads with nothing muted, so no version bump is needed.
+        muted = set(data.get("muted_urns", []))
+        return cls(path=path, baselines=baselines, seen_incidents=seen, muted_urns=muted)
 
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         """Atomically write the store to disk. Returns the path written.

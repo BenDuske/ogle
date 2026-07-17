@@ -334,3 +334,79 @@ def test_demo_narrate_bad_spec_exits_two(capsys, monkeypatch):
 def test_parser_demo_narrate_defaults_to_ollama():
     args = build_parser().parse_args(["demo", "--narrate"])
     assert args.narrate == "ollama"
+
+
+# ---- mute / unmute / muted (known false positives) --------------------------------
+def test_mute_persists_and_reports(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "muted" in capsys.readouterr().out
+    assert BaselineStore.load(store).is_muted(CUSTOMERS_URN) is True
+
+
+def test_mute_is_idempotent(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "already muted" in capsys.readouterr().out
+
+
+def test_unmute_reverses(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["unmute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "unmuted" in capsys.readouterr().out
+    assert BaselineStore.load(store).is_muted(CUSTOMERS_URN) is False
+
+
+def test_unmute_not_muted_reports(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["unmute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "not muted" in capsys.readouterr().out
+
+
+def test_muted_lists_urns(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    main(["mute", ORDERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert CUSTOMERS_URN in out and ORDERS_URN in out
+    assert "2 muted" in out
+
+
+def test_muted_json_shape(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"muted_urns": [CUSTOMERS_URN]}
+
+
+def test_muted_empty_reports_none(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["muted", "--store", str(store)])
+    assert rc == 0
+    assert "no muted datasets" in capsys.readouterr().out.lower()
+
+
+def test_check_on_muted_dataset_stays_quiet_exit_zero(tmp_path, capsys):
+    """End-to-end: a muted dataset that collapses must NOT page (exit 0, 'silenced' tail)."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    drift = _write_sigs(tmp_path / "s.json", [_sig(row_count=0)])
+    rc = main(["check", "--store", str(store), "--signatures", str(drift)])
+    assert rc == 0  # muted -> no alert despite a real collapse
+    assert "silenced 1 muted dataset" in capsys.readouterr().out
