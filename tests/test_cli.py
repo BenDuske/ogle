@@ -135,6 +135,52 @@ def test_input_error_exits_two(tmp_path):
     assert rc == 2
 
 
+# ---- sensitivity flags: per-deployment threshold tuning ---------------------------
+def test_bad_volume_threshold_exits_two_before_any_io(tmp_path, capsys):
+    """An invalid threshold must fail fast (exit 2) and never seed a store."""
+    store = tmp_path / "baselines.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--volume-threshold", "0"])
+    assert rc == 2
+    assert "volume threshold must be > 0" in capsys.readouterr().err
+    assert not store.exists()  # bailed before touching disk
+
+
+def test_bad_null_threshold_exits_two(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--null-threshold", "2"])
+    assert rc == 2
+    assert "null threshold must be in (0, 1]" in capsys.readouterr().err
+
+
+def test_loose_volume_threshold_suppresses_incident(tmp_path):
+    """The same drift that fires at the default band must go quiet under a looser one."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={ORDERS_URN: _sig(ORDERS_URN, row_count=10_000)}).save()
+    drift = _write_sigs(tmp_path / "s.json", [_sig(ORDERS_URN, row_count=6_000)])  # -40%
+
+    # Default ±30% band: -40% is a new incident -> exit 1.
+    assert main(["check", "--store", str(store), "--signatures", str(drift),
+                 "--no-update"]) == 1
+    # ±50% band: -40% is within tolerance -> no drift -> exit 0.
+    assert main(["check", "--store", str(store), "--signatures", str(drift),
+                 "--no-update", "--volume-threshold", "0.5"]) == 0
+
+
+def test_sensitivity_flags_registered_in_help():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["check", "--signatures", "x", "--volume-threshold", "0.4",
+         "--null-threshold", "0.1", "--no-serving-escalation"]
+    )
+    assert ns.volume_threshold == 0.4
+    assert ns.null_threshold == 0.1
+    assert ns.no_serving_escalation is True
+
+
 # ---- persistence + --no-update ----------------------------------------------------
 def test_baselines_persist_across_runs(tmp_path):
     store = tmp_path / "baselines.json"

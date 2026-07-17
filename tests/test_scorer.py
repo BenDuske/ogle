@@ -12,6 +12,7 @@ from ogle.scorer import (
     DriftKind,
     ScoreConfig,
     Severity,
+    build_score_config,
     score_dataset,
 )
 from ogle.signature import build_signature
@@ -168,3 +169,62 @@ def test_config_threshold_is_respected():
     cur = _sig(row_count=10_800)  # +8%, over the tightened 5% threshold
     (finding,) = score_dataset(base, cur, cfg=cfg)
     assert finding.kind == DriftKind.VOLUME
+
+
+# ---- build_score_config: the validated CLI/config tuning seam ----------------------
+def test_build_config_defaults_match_dataclass():
+    cfg = build_score_config()
+    assert cfg == ScoreConfig()  # all-None keeps every default
+
+
+def test_build_config_none_keeps_each_default():
+    # A partial override must not disturb the untouched fields.
+    cfg = build_score_config(volume_threshold=0.5)
+    assert cfg.volume_rel_threshold == 0.5
+    assert cfg.null_fraction_abs_threshold == ScoreConfig.null_fraction_abs_threshold
+    assert cfg.escalate_when_serving is ScoreConfig.escalate_when_serving
+
+
+def test_build_config_overrides_all_fields():
+    cfg = build_score_config(
+        volume_threshold=0.1, null_threshold=0.05, escalate_when_serving=False
+    )
+    assert cfg.volume_rel_threshold == 0.1
+    assert cfg.null_fraction_abs_threshold == 0.05
+    assert cfg.escalate_when_serving is False
+
+
+def test_build_config_loose_threshold_actually_suppresses():
+    """A looser volume band must let a change through that the default would flag."""
+    base = _sig(row_count=10_000)
+    cur = _sig(row_count=13_000)  # +30% exactly at the default edge
+    assert score_dataset(base, cur, cfg=build_score_config())  # default flags it
+    loose = build_score_config(volume_threshold=0.5)  # ±50% band
+    assert score_dataset(base, cur, cfg=loose) == []  # now quiet
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, -5])
+def test_build_config_rejects_nonpositive_volume(bad):
+    with pytest.raises(ValueError, match="volume threshold must be > 0"):
+        build_score_config(volume_threshold=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, 1.5, 2])
+def test_build_config_rejects_out_of_range_null(bad):
+    with pytest.raises(ValueError, match=r"null threshold must be in \(0, 1\]"):
+        build_score_config(null_threshold=bad)
+
+
+def test_build_config_null_at_boundary_one_is_allowed():
+    assert build_score_config(null_threshold=1).null_fraction_abs_threshold == 1.0
+
+
+def test_build_config_escalation_toggle_changes_serving_severity():
+    """Turning escalation off must lower a serving-path finding by one band."""
+    base = _sig(row_count=10_000)
+    cur = _sig(row_count=5_000)  # -50%: MEDIUM by magnitude, escalates to HIGH on serving
+    on = score_dataset(base, cur, cfg=build_score_config(), serving=True)
+    off = score_dataset(
+        base, cur, cfg=build_score_config(escalate_when_serving=False), serving=True
+    )
+    assert on[0].severity.rank > off[0].severity.rank

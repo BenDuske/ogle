@@ -98,6 +98,21 @@ The signatures file is a JSON list of `DatasetSignature` dicts, or
 once per incident, not every tick. Add `--json` for machine output, `--no-update` for a
 read-only probe.
 
+**Tuning sensitivity per deployment.** Defaults are quiet-on-noise, loud-on-breakage
+(volume drift at ±30%, quality drift at a +0.20 null-fraction jump), but a noisy dimension
+table and a stable serving-path source don't want the same band. Override per run:
+
+```bash
+ogle check --signatures sigs.json \
+  --volume-threshold 0.15 \   # flag row-count moves past ±15%
+  --null-threshold 0.10 \     # flag a null-fraction jump of +0.10
+  --no-serving-escalation     # don't bump severity for serving-path sources
+```
+
+Thresholds are validated up front — a nonsensical value (volume ≤ 0, or a null band
+outside `(0, 1]`) exits **2** before any walk. Schema drift (a removed/retyped column) is
+always flagged regardless of these knobs.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

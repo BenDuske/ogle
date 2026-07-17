@@ -32,6 +32,7 @@ from . import __version__
 from .llm import build_narrator
 from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
+from .scorer import build_score_config
 from .signature import DatasetSignature
 from .store import BaselineStore
 
@@ -145,6 +146,20 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
 # Commands
 # ---------------------------------------------------------------------------------------
 def cmd_check(args: argparse.Namespace) -> int:
+    # Build (and validate) the sensitivity config before any I/O so a bad threshold
+    # fails fast with a usage error instead of after a live walk.
+    try:
+        cfg = build_score_config(
+            volume_threshold=getattr(args, "volume_threshold", None),
+            null_threshold=getattr(args, "null_threshold", None),
+            escalate_when_serving=(
+                False if getattr(args, "no_serving_escalation", False) else None
+            ),
+        )
+    except ValueError as exc:
+        print(f"ogle check: {exc}", file=sys.stderr)
+        return 2
+
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
 
@@ -170,6 +185,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         store,
         signatures,
         serving_urns=serving,
+        cfg=cfg,
         update_baselines=not args.no_update,
     )
 
@@ -348,6 +364,24 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         metavar="URN",
         help="Extra dataset URNs to treat as serving (severity-escalated).",
+    )
+    tune = check.add_argument_group("sensitivity (tune per deployment)")
+    tune.add_argument(
+        "--volume-threshold",
+        type=float,
+        metavar="FRAC",
+        help="Relative row-count change that counts as volume drift (default: 0.30 = ±30%%).",
+    )
+    tune.add_argument(
+        "--null-threshold",
+        type=float,
+        metavar="FRAC",
+        help="Absolute null-fraction increase that counts as quality drift (default: 0.20).",
+    )
+    tune.add_argument(
+        "--no-serving-escalation",
+        action="store_true",
+        help="Do not bump severity for sources feeding a deployed model (default: escalate).",
     )
     check.add_argument(
         "--no-update",

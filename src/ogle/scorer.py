@@ -69,6 +69,48 @@ class ScoreConfig:
     escalate_when_serving: bool = True
 
 
+def build_score_config(
+    volume_threshold: Optional[float] = None,
+    null_threshold: Optional[float] = None,
+    escalate_when_serving: Optional[bool] = None,
+) -> ScoreConfig:
+    """Validated `ScoreConfig` builder — the single place CLI/config tuning lands.
+
+    Each argument is optional; a `None` keeps the default. Sensitivity is a real
+    per-deployment knob (a noisy dimension table wants a looser volume band than a
+    stable serving-path source), so operators tune it — but a nonsensical threshold
+    would silently break scoring (a zero/negative band divides by ~0 in
+    `_severity_from_ratio`; a null band outside [0, 1] can never trip). Reject those
+    here, up front, rather than emit garbage findings.
+    """
+    vol = ScoreConfig.volume_rel_threshold if volume_threshold is None else volume_threshold
+    nul = (
+        ScoreConfig.null_fraction_abs_threshold
+        if null_threshold is None
+        else null_threshold
+    )
+    esc = (
+        ScoreConfig.escalate_when_serving
+        if escalate_when_serving is None
+        else bool(escalate_when_serving)
+    )
+
+    if not (vol > 0):
+        raise ValueError(
+            f"volume threshold must be > 0 (got {vol}); it is a relative row-count band."
+        )
+    if not (0 < nul <= 1):
+        raise ValueError(
+            f"null threshold must be in (0, 1] (got {nul}); it is an absolute "
+            "null-fraction increase."
+        )
+    return ScoreConfig(
+        volume_rel_threshold=float(vol),
+        null_fraction_abs_threshold=float(nul),
+        escalate_when_serving=esc,
+    )
+
+
 def _severity_from_ratio(ratio: float, threshold: float) -> Severity:
     """Map how far past the threshold a relative change is onto a severity band."""
     over = ratio / threshold if threshold > 0 else float("inf")
