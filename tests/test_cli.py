@@ -217,3 +217,27 @@ def test_parser_check_defaults():
     assert args.gms == "http://localhost:8080"
     assert args.no_update is False
     assert args.json is False
+
+
+# ---- `ogle demo` — one-command keyless judge repro ---------------------------------
+def test_demo_seeds_then_alerts_exit_one(capsys):
+    """`ogle demo` runs the bundled fixtures end-to-end: healthy seed -> HIGH alert."""
+    rc = main(["demo"])
+    out = capsys.readouterr().out
+    assert rc == 1  # second pass fires the serving-path incident
+    assert "Seed baselines" in out
+    assert "HIGH drift" in out
+    # Reproduces the captured alert's incident fingerprint, not a coincidental one.
+    assert "fd6f829c77ff9fb4" in out
+
+
+def test_demo_never_writes_to_cwd(tmp_path, monkeypatch):
+    """The in-memory demo store must not leave a baseline file behind."""
+    monkeypatch.chdir(tmp_path)
+    main(["demo"])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_parser_registers_demo():
+    args = build_parser().parse_args(["demo"])
+    assert args.func.__name__ == "cmd_demo"

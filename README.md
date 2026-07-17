@@ -58,6 +58,17 @@ fully reproducible without Docker, and its captured alert lives in
 
 ### Without Docker (offline signatures)
 
+**One command, zero setup, no API key** — run the whole loop over bundled fixtures:
+
+```bash
+ogle demo
+```
+
+It seeds healthy baselines (exit 0), then re-checks a drifted fixture and fires the HIGH
+serving-path alert (exit 1) — the same drift-check code path a live DataHub walk feeds,
+reproducing [`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md)
+verbatim. Nothing is written to your working directory.
+
 `ogle check` also runs against pre-computed signatures — no SDK, no quickstart — which is
 how it's unit-tested and how a scheduled job can feed signatures it pulled elsewhere:
 

@@ -114,7 +114,7 @@ transcript of the live path against the DataHub quickstart.
 | Text description | 🟢 drafted (technical story done; Inspiration awaits Ben's voice pass) |
 | Setup instructions in README | 🟡 W1 → refined W3 |
 | Sample outputs in `examples/` | ✅ `examples/alerts/` + runnable `examples/demo/` fixtures |
-| Live demo URL or Docker Compose one-liner | 🟡 W1 |
+| Live demo URL or Docker Compose one-liner | 🟢 `ogle demo` — one keyless command, zero setup |
 | Optional: OSS contribution back to DataHub | 🟡 W2–W3 stretch |
 
 ---

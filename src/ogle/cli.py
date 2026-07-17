@@ -243,6 +243,54 @@ def _render_writeback(plan, result, *, as_json: bool) -> None:
     _emit("\n".join(lines))
 
 
+# Repo-root examples/ (works from a clone: src/ogle/cli.py -> parents[2] == repo root).
+_DEMO_DIR = Path(__file__).resolve().parents[2] / "examples" / "demo"
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    """Zero-setup, keyless proof: seed healthy baselines, then re-check drifted fixtures.
+
+    Runs the *same* `run_drift_check` code path the live DataHub walk feeds — no SDK, no
+    Docker, no API key — against the bundled `examples/demo/*.json` fixtures. First pass
+    seeds and stays healthy (exit 0); second pass fires the HIGH serving-path incident that
+    `examples/alerts/churn-orders-drift.md` captured. Exit 1 on that alert, matching a real
+    `ogle check`, so a judge sees the whole loop in one command.
+    """
+    healthy = _DEMO_DIR / "healthy-signatures.json"
+    drifted = _DEMO_DIR / "drifted-signatures.json"
+    for f in (healthy, drifted):
+        if not f.exists():
+            print(f"ogle demo: bundled fixture not found: {f}", file=sys.stderr)
+            return 2
+
+    # In-memory store — the demo never touches the operator's cwd or a real baseline file.
+    store = BaselineStore.load(_DEMO_DIR / "__demo_never_written__.json")
+
+    try:
+        h_sigs, h_serving = load_signatures_file(healthy)
+        d_sigs, d_serving = load_signatures_file(drifted)
+    except ValueError as exc:  # a corrupted bundled fixture — treat as input error
+        print(f"ogle demo: {exc}", file=sys.stderr)
+        return 2
+
+    _emit("# Ogle offline demo — churn serving-path drift\n")
+    _emit("_Keyless, no DataHub required; same drift-check code path as a live walk._\n")
+
+    _emit("## 1. Seed baselines (healthy fixture)\n")
+    seed = run_drift_check(store, h_sigs, serving_urns=h_serving, update_baselines=True)
+    _emit(render_report(seed, as_json=False))
+
+    _emit("\n## 2. Re-check the drifted fixture\n")
+    drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
+    _emit(render_report(drift, as_json=False))
+
+    _emit(
+        "\n---\n_Reproduces `examples/alerts/churn-orders-drift.md`. "
+        "Run against DataHub: `ogle check --gms http://localhost:8080 --discover`._"
+    )
+    return 1 if drift.should_alert else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ogle",
@@ -320,6 +368,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     check.set_defaults(func=cmd_check)
+
+    # `ogle demo` — one-command, keyless judge repro over the bundled fixtures.
+    demo = sub.add_parser(
+        "demo",
+        help="Zero-setup offline drift demo (no DataHub/API key) — seeds, then alerts.",
+    )
+    demo.set_defaults(func=cmd_demo)
 
     # `ogle watch` — one scheduler tick that pages once on a new incident.
     from .watch import build_watch_args
