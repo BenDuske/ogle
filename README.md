@@ -177,6 +177,23 @@ it touches a **serving path**, and its stable fingerprint for cross-reference:
 It's read-only — it never advances baselines or pages — and the provenance is additive, so a
 store written by an older Ogle (which recorded only a recurrence count) still loads and lists.
 
+### Closing the loop (`ogle resolve`)
+
+Once the upstream drift is actually fixed in prod, tell Ogle to drop the incident from
+memory — it stops appearing in `ogle incidents`, and if the same drift shape reappears
+later Ogle pages **fresh** (resolve is not a mute — it doesn't suppress a *future* problem,
+it just retires the current one). Accepts the full 16-hex fingerprint from `ogle incidents`
+or an unambiguous prefix, like a git short SHA:
+
+```bash
+ogle resolve fd6f829c                              # short-prefix, like a git SHA
+ogle resolve fd6f829c77ff9fb4 a1b2c3d4e5f60718     # batch — hits and misses report per token
+```
+
+Ambiguous prefixes fail loud (exit 2) with the list of candidates so the operator retypes
+with more characters — Ogle never guesses which incident to drop. Unknown/already-forgotten
+tokens report `_not remembered_` but aren't an error (exit 0), so replaying a list is safe.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

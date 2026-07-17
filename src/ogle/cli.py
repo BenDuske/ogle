@@ -458,6 +458,72 @@ def _incident_sort_key(rec: dict) -> tuple:
     return (rank, int(rec.get("count", 0)), rec.get("fingerprint", ""))
 
 
+def _resolve_fingerprint(store: BaselineStore, needle: str) -> Tuple[Optional[str], List[str]]:
+    """Look up a full fingerprint from a user-supplied token.
+
+    Returns `(fp, candidates)`:
+      * `(fp, [])`        — exact match OR unambiguous prefix match; caller can resolve `fp`.
+      * `(None, [])`      — no match at all; caller reports the miss.
+      * `(None, [a, b…])` — an ambiguous prefix (≥2 candidates); caller must refuse and list them.
+
+    `ogle incidents` prints 16-hex fingerprints; typing all 16 is tedious. Accept any non-
+    empty prefix and disambiguate — like a git short SHA — so the operator can paste 8 chars
+    and move on. Prefix ambiguity is always an error (never a guess), so a partial match
+    with two open incidents can't silently drop the wrong one.
+    """
+    known = list(store.seen_incidents.keys())
+    if needle in store.seen_incidents:
+        return needle, []
+    if not needle:
+        return None, []
+    candidates = [fp for fp in known if fp.startswith(needle)]
+    if len(candidates) == 1:
+        return candidates[0], []
+    if len(candidates) > 1:
+        return None, sorted(candidates)
+    return None, []
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Mark one or more remembered incidents as resolved (drops them from cross-run memory).
+
+    The counterpart to `ogle incidents`: once the upstream drift is fixed in prod, the
+    operator tells Ogle to stop tracking it. Dropping the fingerprint means the *next* time
+    it appears (if the fix didn't hold), it pages as a fresh incident — resolve is not a
+    mute. Accepts full 16-hex fingerprints or an unambiguous prefix (like a git short SHA).
+
+    Reporting is per-token so a batch of resolves can partially succeed: hits print
+    `✅ resolved <fp>`, misses print `_not remembered: <token>_` (not an error — the caller
+    may be replaying a list). An ambiguous prefix is a usage error (exit 2): we refuse to
+    guess and list the candidates so the operator can retype with more characters.
+    """
+    store_path = Path(args.store)
+    store = BaselineStore.load(store_path)
+    resolved: List[str] = []
+    for token in args.fingerprint:
+        fp, candidates = _resolve_fingerprint(store, token)
+        if candidates:
+            print(
+                f"ogle resolve: '{token}' is ambiguous — matches "
+                f"{len(candidates)} incidents: {', '.join(candidates)}",
+                file=sys.stderr,
+            )
+            return 2
+        if fp is None:
+            _emit(f"_not remembered: {token}_")
+            continue
+        store.forget_incident(fp)
+        resolved.append(fp)
+        _emit(f"✅ resolved `{fp}`")
+    if resolved:
+        try:
+            store.save(store_path)
+        except Exception as exc:
+            print(f"ogle resolve: could not save store: {exc}", file=sys.stderr)
+            return 2
+    return 0
+
+
 def cmd_incidents(args: argparse.Namespace) -> int:
     """List the incidents Ogle currently remembers — its cross-run drift memory.
 
@@ -668,6 +734,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)
+
+    # `ogle resolve` — the operator's counterpart to `ogle incidents`: drop a fixed drift
+    # from cross-run memory so it stops appearing in `ogle incidents` and pages fresh if it
+    # recurs. Accepts full fingerprints or an unambiguous prefix (git-short-SHA style).
+    resolve = sub.add_parser(
+        "resolve",
+        help="Drop a remembered incident (its drift is fixed) — takes fingerprints or prefixes.",
+    )
+    resolve.add_argument(
+        "fingerprint",
+        nargs="+",
+        help="Incident fingerprint(s) from `ogle incidents` (full 16-hex or unambiguous prefix).",
+    )
+    resolve.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    resolve.set_defaults(func=cmd_resolve)
 
     # `ogle watch` — one scheduler tick that pages once on a new incident.
     from .watch import build_watch_args

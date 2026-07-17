@@ -639,3 +639,129 @@ def test_incidents_registered_in_help():
     ns = build_parser().parse_args(["incidents", "--json"])
     assert ns.func.__name__ == "cmd_incidents"
     assert ns.json is True
+
+
+# ---- `ogle resolve` ------------------------------------------------------------------
+# Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
+# from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.
+
+def test_resolve_drops_incident_from_memory_and_persists(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH drift", datasets=1)
+    s.record_incident("11112222", severity="low", title="LOW drift", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcdef1234567890", "--store", str(store_path)])
+    assert rc == 0
+    assert "resolved" in capsys.readouterr().out
+
+    reloaded = BaselineStore.load(store_path)
+    assert not reloaded.has_seen("abcdef1234567890")  # gone from memory
+    assert reloaded.has_seen("11112222")              # untouched
+
+
+def test_resolve_short_prefix_matches_like_a_git_sha(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH drift", datasets=1)
+    s.record_incident("beefcafe00000000", severity="low", title="LOW drift", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcd", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "abcdef1234567890" in out  # renders the full fingerprint it landed on
+    assert not BaselineStore.load(store_path).has_seen("abcdef1234567890")
+
+
+def test_resolve_ambiguous_prefix_refuses_and_lists_candidates(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH", datasets=1)
+    s.record_incident("abcdef9999999999", severity="low", title="LOW", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcd", "--store", str(store_path)])
+    assert rc == 2  # ambiguous prefix is a usage error, not a silent guess
+    err = capsys.readouterr().err
+    assert "ambiguous" in err
+    assert "abcdef1234567890" in err and "abcdef9999999999" in err
+    # nothing was resolved when we refused
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("abcdef1234567890")
+    assert reloaded.has_seen("abcdef9999999999")
+
+
+def test_resolve_unknown_fingerprint_is_a_reportable_miss_not_an_error(tmp_path, capsys):
+    # A batch replay may include already-forgotten fingerprints. Miss ≠ error: exit 0, print
+    # a "not remembered" line so the operator sees what didn't land.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("kept_fp", severity="low", title="LOW", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "not_a_real_fp", "--store", str(store_path)])
+    assert rc == 0
+    assert "not remembered" in capsys.readouterr().out
+    assert BaselineStore.load(store_path).has_seen("kept_fp")
+
+
+def test_resolve_batch_partial_success_persists_only_the_hits(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("real_fp_1", severity="high", title="HIGH", datasets=1)
+    s.record_incident("real_fp_2", severity="low", title="LOW", datasets=1)
+    s.save()
+
+    rc = main(
+        ["resolve", "real_fp_1", "missing_fp", "real_fp_2", "--store", str(store_path)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.count("resolved") == 2       # two hits reported
+    assert "not remembered" in out          # miss reported
+    reloaded = BaselineStore.load(store_path)
+    assert not reloaded.has_seen("real_fp_1")
+    assert not reloaded.has_seen("real_fp_2")
+
+
+def test_resolve_clears_fingerprint_so_a_recurrence_can_page_fresh(tmp_path, capsys):
+    # Contract: resolve drops the fingerprint from `has_seen()` — that's what lets the
+    # existing new-incident code path page again if the same drift shape reappears.
+    store_path = tmp_path / "baselines.json"
+    seed = _write_sigs(tmp_path / "seed.json", [_sig(row_count=1000)], serving=[CUSTOMERS_URN])
+    assert main(["check", "--store", str(store_path), "--signatures", str(seed)]) == 0
+    drift = _write_sigs(tmp_path / "drift.json", [_sig(row_count=0)], serving=[CUSTOMERS_URN])
+    assert main(["check", "--store", str(store_path), "--signatures", str(drift)]) == 1
+    capsys.readouterr()
+
+    fp = BaselineStore.load(store_path).incidents()[0]["fingerprint"]
+    assert BaselineStore.load(store_path).has_seen(fp)  # debounce is armed
+    assert main(["resolve", fp, "--store", str(store_path)]) == 0
+    capsys.readouterr()
+
+    # Debounce is cleared → the pipeline's new-incident branch would fire again on a
+    # recurring fingerprint. That path is covered by `test_new_incident_exits_one`.
+    assert not BaselineStore.load(store_path).has_seen(fp)
+
+
+def test_resolve_empty_prefix_is_a_reportable_miss_not_a_mass_wipe(tmp_path, capsys):
+    # Guard: an empty token prefix-matches every incident. Refuse to resolve on that — this
+    # command is targeted, not a nuke, so an empty arg must be a no-op miss.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("keep_a", severity="high", title="HIGH", datasets=1)
+    s.record_incident("keep_b", severity="low", title="LOW", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "", "--store", str(store_path)])
+    assert rc == 0
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("keep_a") and reloaded.has_seen("keep_b")
+
+
+def test_resolve_registered_in_help():
+    ns = build_parser().parse_args(["resolve", "abcd"])
+    assert ns.func.__name__ == "cmd_resolve"
+    assert ns.fingerprint == ["abcd"]
