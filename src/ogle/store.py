@@ -65,6 +65,10 @@ class BaselineStore:
     baselines: Dict[str, DatasetSignature] = field(default_factory=dict)
     seen_incidents: Dict[str, _IncidentRecord] = field(default_factory=dict)
     muted_urns: Set[str] = field(default_factory=set)
+    # Timed ("snoozed") mutes: urn -> epoch-seconds expiry. A snooze auto-expires so a
+    # "mute this for now" never silently becomes a permanent blind spot. Permanent mutes
+    # live in `muted_urns` and always win over a snooze for the same URN.
+    muted_until: Dict[str, float] = field(default_factory=dict)
 
     # ---- baselines -----------------------------------------------------------------
     def get_baseline(self, urn: str) -> Optional[DatasetSignature]:
@@ -108,31 +112,75 @@ class BaselineStore:
         self.seen_incidents.pop(fingerprint, None)
 
     # ---- muting (known false positives) --------------------------------------------
-    def mute(self, urn: str) -> bool:
+    def mute(self, urn: str, until: Optional[float] = None) -> bool:
         """Mark a dataset as a known false positive so its drift never pages.
 
-        Returns True if this newly muted the URN, False if it was already muted (so a CLI
-        can tell the operator "already muted" instead of falsely claiming an action).
+        `until` is an epoch-seconds expiry for a *snooze* (temporary mute); omit it for a
+        permanent mute. A permanent mute supersedes any existing snooze for the same URN,
+        and re-snoozing an already-permanent URN is a no-op (the stronger state stands).
+
+        Returns True if this changed the mute state, False if it was already covered by an
+        equal-or-stronger mute (so a CLI can say "already muted" rather than claim an action).
         """
+        if until is None:
+            # Permanent mute wins over any snooze.
+            self.muted_until.pop(urn, None)
+            if urn in self.muted_urns:
+                return False
+            self.muted_urns.add(urn)
+            return True
+        # Timed snooze. A permanent mute is stronger — leave it alone.
         if urn in self.muted_urns:
             return False
-        self.muted_urns.add(urn)
+        self.muted_until[urn] = until
         return True
 
     def unmute(self, urn: str) -> bool:
-        """Stop suppressing a dataset's drift. Returns True if it had been muted."""
+        """Stop suppressing a dataset's drift (clears both permanent and timed mutes).
+
+        Returns True if it had been muted in either form.
+        """
+        had = urn in self.muted_urns or urn in self.muted_until
+        self.muted_urns.discard(urn)
+        self.muted_until.pop(urn, None)
+        return had
+
+    def is_muted(self, urn: str, now: Optional[float] = None) -> bool:
+        """True if drift on this dataset should be tracked but not alerted on.
+
+        Permanent mutes always count. A snooze counts only until it expires: pass `now`
+        (epoch seconds) to enforce expiry — the paging path does this so a lapsed snooze
+        pages again automatically. With `now` omitted, a snooze reads as "configured muted"
+        (useful for `is this in the mute list at all`).
+        """
         if urn in self.muted_urns:
-            self.muted_urns.discard(urn)
             return True
-        return False
+        exp = self.muted_until.get(urn)
+        if exp is None:
+            return False
+        return True if now is None else exp > now
 
-    def is_muted(self, urn: str) -> bool:
-        """True if drift on this dataset should be tracked but not alerted on."""
-        return urn in self.muted_urns
+    def mute_expiry(self, urn: str) -> Optional[float]:
+        """The snooze expiry for `urn` (epoch seconds), or None if permanent / not muted."""
+        return self.muted_until.get(urn)
 
-    def muted(self) -> List[str]:
-        """All currently muted dataset URNs (sorted for stable output)."""
-        return sorted(self.muted_urns)
+    def purge_expired_mutes(self, now: float) -> List[str]:
+        """Drop snoozes that have expired as of `now`; return the URNs freed (sorted).
+
+        Keeps the on-disk store from accumulating dead snoozes. Permanent mutes are untouched.
+        """
+        expired = sorted(urn for urn, exp in self.muted_until.items() if exp <= now)
+        for urn in expired:
+            self.muted_until.pop(urn, None)
+        return expired
+
+    def muted(self, now: Optional[float] = None) -> List[str]:
+        """All currently muted dataset URNs (sorted). With `now`, expired snoozes are excluded."""
+        active = set(self.muted_urns)
+        for urn, exp in self.muted_until.items():
+            if now is None or exp > now:
+                active.add(urn)
+        return sorted(active)
 
     # ---- persistence ---------------------------------------------------------------
     def to_dict(self) -> dict:
@@ -141,6 +189,7 @@ class BaselineStore:
             "baselines": {urn: sig.to_dict() for urn, sig in self.baselines.items()},
             "seen_incidents": {fp: r.to_dict() for fp, r in self.seen_incidents.items()},
             "muted_urns": sorted(self.muted_urns),
+            "muted_until": {urn: self.muted_until[urn] for urn in sorted(self.muted_until)},
         }
 
     @classmethod
@@ -162,7 +211,20 @@ class BaselineStore:
         # muted_urns is additive (introduced after v1 shipped): a store written by an older
         # Ogle simply lacks the key and loads with nothing muted, so no version bump is needed.
         muted = set(data.get("muted_urns", []))
-        return cls(path=path, baselines=baselines, seen_incidents=seen, muted_urns=muted)
+        # muted_until (timed snoozes) is likewise additive; older files lack it. Guard against
+        # a URN being both permanent and snoozed (permanent wins) so state stays coherent.
+        muted_until = {
+            urn: float(exp)
+            for urn, exp in dict(data.get("muted_until", {})).items()
+            if urn not in muted
+        }
+        return cls(
+            path=path,
+            baselines=baselines,
+            seen_incidents=seen,
+            muted_urns=muted,
+            muted_until=muted_until,
+        )
 
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
         """Atomically write the store to disk. Returns the path written.

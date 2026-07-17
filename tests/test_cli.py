@@ -7,6 +7,7 @@ use the Task #2 shape where `customers` feeds the deployed `churn_predictor` (se
 """
 
 import json
+import time
 
 import pytest
 
@@ -390,7 +391,8 @@ def test_muted_json_shape(tmp_path, capsys):
     rc = main(["muted", "--store", str(store), "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload == {"muted_urns": [CUSTOMERS_URN]}
+    # A permanent mute carries a null expiry; snoozes carry an epoch `until`.
+    assert payload == {"muted": [{"urn": CUSTOMERS_URN, "until": None}]}
 
 
 def test_muted_empty_reports_none(tmp_path, capsys):
@@ -410,3 +412,66 @@ def test_check_on_muted_dataset_stays_quiet_exit_zero(tmp_path, capsys):
     rc = main(["check", "--store", str(store), "--signatures", str(drift)])
     assert rc == 0  # muted -> no alert despite a real collapse
     assert "silenced 1 muted dataset" in capsys.readouterr().out
+
+
+# ---- timed mutes / snooze (CLI) ---------------------------------------------------
+def test_mute_for_days_reports_snooze_and_persists_future_expiry(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--for", "7", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "snoozed" in out and "until" in out
+    exp = BaselineStore.load(store).mute_expiry(CUSTOMERS_URN)
+    assert exp is not None and exp > time.time()  # roughly a week out
+
+
+def test_mute_for_hours_snoozes(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--for-hours", "2", "--store", str(store)])
+    assert rc == 0
+    exp = BaselineStore.load(store).mute_expiry(CUSTOMERS_URN)
+    assert exp is not None and exp > time.time()
+
+
+def test_mute_for_and_for_hours_together_is_usage_error(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(
+        ["mute", CUSTOMERS_URN, "--for", "1", "--for-hours", "1", "--store", str(store)]
+    )
+    assert rc == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_mute_nonpositive_snooze_is_usage_error(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--for", "0", "--store", str(store)])
+    assert rc == 2
+    assert "positive" in capsys.readouterr().err
+    # nothing was written
+    assert not store.exists() or BaselineStore.load(store).muted() == []
+
+
+def test_muted_json_reports_snooze_expiry(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["muted"]) == 1
+    entry = payload["muted"][0]
+    assert entry["urn"] == ORDERS_URN
+    assert entry["until"] is not None and entry["until"] > time.time()
+
+
+def test_check_purges_lapsed_snooze_and_pages(tmp_path, capsys):
+    """A snooze in the past must not silence a real collapse — check pages AND self-cleans it."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path, baselines={CUSTOMERS_URN: _sig(row_count=1000)})
+    s.mute(CUSTOMERS_URN, until=time.time() - 3600)  # expired an hour ago
+    s.save()
+    drift = _write_sigs(tmp_path / "s.json", [_sig(row_count=0)])
+    rc = main(["check", "--store", str(store_path), "--signatures", str(drift)])
+    assert rc == 1  # lapsed snooze -> the collapse pages
+    # And the dead snooze is gone from the store afterward.
+    assert BaselineStore.load(store_path).muted() == []

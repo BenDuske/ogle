@@ -23,6 +23,7 @@ scheduled loop reports a drift once, not every tick.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional, Sequence
 
@@ -73,6 +74,7 @@ def run_drift_check(
     cfg: Optional[ScoreConfig] = None,
     llm: Optional[Callable[[str], str]] = None,
     update_baselines: bool = True,
+    now: Optional[float] = None,
 ) -> DriftReport:
     """Score a batch of fresh signatures against stored baselines and narrate the result.
 
@@ -84,12 +86,15 @@ def run_drift_check(
         llm: optional callable to phrase the incident; falls back to deterministic markdown.
         update_baselines: when True (default) the current signatures become the new baselines
             so the next run diffs against the latest state. Pass False for a read-only probe.
+        now: epoch seconds used to expire snoozed mutes (defaults to the wall clock). Inject a
+            fixed value in tests for deterministic snooze-expiry behaviour.
 
     Returns:
         A `DriftReport`. `should_alert` is the single field a scheduled loop needs.
     """
     serving = set(serving_urns)
     cfg = cfg or ScoreConfig()
+    now = time.time() if now is None else now
 
     all_findings: List[DriftFinding] = []
     scored_urns: List[str] = []
@@ -107,7 +112,7 @@ def run_drift_check(
         # A muted dataset is still diffed (so its baseline advances and it can be unmuted
         # later against fresh state), but its findings are held out of the incident so a
         # known-noisy asset never pages — even when it flaps with a brand-new fingerprint.
-        if findings and store.is_muted(sig.urn):
+        if findings and store.is_muted(sig.urn, now):
             suppressed_urns.append(sig.urn)
             continue
         all_findings.extend(findings)

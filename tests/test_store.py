@@ -142,6 +142,114 @@ def test_load_old_store_without_muted_key_is_empty(tmp_path):
     assert store.muted() == []
 
 
+# ---- timed mutes / snooze ---------------------------------------------------------
+def test_snooze_active_before_expiry_lapses_after():
+    store = BaselineStore()
+    assert store.mute(CUSTOMERS_URN, until=100.0) is True
+    # Active while now < expiry, gone once now >= expiry.
+    assert store.is_muted(CUSTOMERS_URN, now=50.0) is True
+    assert store.is_muted(CUSTOMERS_URN, now=100.0) is False
+    assert store.is_muted(CUSTOMERS_URN, now=150.0) is False
+
+
+def test_snooze_without_now_reads_as_configured_muted():
+    # No clock supplied -> "is it in the mute list at all" -> True even for a snooze.
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN, until=100.0)
+    assert store.is_muted(CUSTOMERS_URN) is True
+    assert store.mute_expiry(CUSTOMERS_URN) == 100.0
+
+
+def test_permanent_mute_supersedes_snooze():
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN, until=100.0)
+    assert store.mute(CUSTOMERS_URN) is True  # promote to permanent
+    assert store.mute_expiry(CUSTOMERS_URN) is None
+    assert store.is_muted(CUSTOMERS_URN, now=10_000.0) is True  # never expires now
+    # And a snooze can't downgrade an existing permanent mute.
+    assert store.mute(CUSTOMERS_URN, until=200.0) is False
+    assert store.mute_expiry(CUSTOMERS_URN) is None
+
+
+def test_muted_list_excludes_expired_snooze_with_now():
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN)                 # permanent
+    store.mute(ORDERS_URN, until=100.0)       # snooze
+    assert store.muted(now=50.0) == sorted([CUSTOMERS_URN, ORDERS_URN])
+    assert store.muted(now=150.0) == [CUSTOMERS_URN]  # snooze lapsed
+    # Without a clock, both count as configured.
+    assert store.muted() == sorted([CUSTOMERS_URN, ORDERS_URN])
+
+
+def test_unmute_clears_a_snooze():
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN, until=100.0)
+    assert store.unmute(CUSTOMERS_URN) is True
+    assert store.mute_expiry(CUSTOMERS_URN) is None
+    assert store.is_muted(CUSTOMERS_URN, now=50.0) is False
+
+
+def test_purge_expired_mutes_drops_only_lapsed():
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN)                 # permanent — never purged
+    store.mute(ORDERS_URN, until=100.0)       # expired by now=150
+    freed = store.purge_expired_mutes(now=150.0)
+    assert freed == [ORDERS_URN]
+    assert store.mute_expiry(ORDERS_URN) is None
+    assert store.is_muted(CUSTOMERS_URN) is True
+
+
+def test_snooze_survives_save_load_and_on_disk_shape(tmp_path):
+    p = tmp_path / "store.json"
+    s = BaselineStore(path=p)
+    s.mute(ORDERS_URN, until=12345.0)
+    s.save()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["muted_until"] == {ORDERS_URN: 12345.0}
+    reloaded = BaselineStore.load(p)
+    assert reloaded.mute_expiry(ORDERS_URN) == 12345.0
+    assert reloaded.is_muted(ORDERS_URN, now=1.0) is True
+
+
+def test_load_old_store_without_muted_until_key_is_empty(tmp_path):
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {},
+                "muted_urns": [CUSTOMERS_URN],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.muted() == [CUSTOMERS_URN]
+    assert store.mute_expiry(CUSTOMERS_URN) is None
+
+
+def test_load_coerces_permanent_over_conflicting_snooze(tmp_path):
+    # A hand-edited file listing a URN as BOTH permanent and snoozed: permanent wins,
+    # the snooze entry is dropped so state stays coherent.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {},
+                "muted_urns": [CUSTOMERS_URN],
+                "muted_until": {CUSTOMERS_URN: 100.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.mute_expiry(CUSTOMERS_URN) is None
+    assert store.is_muted(CUSTOMERS_URN, now=10_000.0) is True
+
+
 # ---- persistence ------------------------------------------------------------------
 def test_save_and_load_roundtrip(tmp_path):
     p = tmp_path / "store.json"

@@ -124,15 +124,23 @@ false positive instead:
 # stop paging on a known-noisy dataset (persists into the store `ogle check` reads)
 ogle mute 'urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)'
 
-ogle muted            # list what's currently silenced
+# ...or snooze it temporarily — auto-expires so "quiet it for now" never becomes a
+# permanent blind spot:
+ogle mute '<urn>' --for 7          # snooze 7 days
+ogle mute '<urn>' --for-hours 4    # snooze 4 hours
+
+ogle muted            # list what's currently silenced (snoozes show their expiry)
 ogle unmute '<urn>'   # let it page again
 ```
 
 A muted dataset is **still tracked** — its baseline keeps advancing, so an `unmute` later
-diffs against fresh state, not stale — it just never contributes to an incident. `ogle check`
-reports how many muted datasets it silenced (`silenced N muted dataset(s)`) and lists them
-under `suppressed_urns` in `--json`, so the suppression is visible, never a silent black hole.
-This is feature #3 (memory of past false positives) as a first-class operator control.
+diffs against fresh state, not stale — it just never contributes to an incident. A **snooze**
+(`--for` / `--for-hours`) is a mute that lapses on its own: once the expiry passes it pages
+again automatically, and `ogle check` self-cleans the dead entry from the store. A permanent
+mute always wins over a snooze for the same URN. `ogle check` reports how many muted datasets
+it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urns` in `--json`,
+so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
+false positives) as a first-class operator control.
 
 ### Running on a schedule (`ogle watch`)
 

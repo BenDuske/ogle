@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -208,6 +210,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # Persist advanced baselines/incident memory unless asked for a read-only probe.
     if not args.no_update:
+        # Self-clean the mute list: a lapsed snooze is dropped here so the store never
+        # accumulates dead entries (and `ogle muted` stays honest).
+        store.purge_expired_mutes(time.time())
         try:
             store.save(store_path)
         except Exception as exc:
@@ -322,23 +327,47 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 1 if drift.should_alert else 0
 
 
+def _fmt_expiry(exp: float) -> str:
+    """Human-readable UTC expiry for a snooze (stable, timezone-explicit for tests)."""
+    return datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def cmd_mute(args: argparse.Namespace) -> int:
     """Mark a dataset as a known false positive so its drift stops paging.
 
     Persists into the same store `ogle check` reads, so the next scheduled run silences it.
     Idempotent: muting an already-muted URN reports that rather than claiming a change.
+    With `--for`/`--for-hours` the mute is a *snooze* that auto-expires, so a "quiet it for
+    now" can never become a permanent blind spot.
     """
+    days = getattr(args, "for_days", None)
+    hours = getattr(args, "for_hours", None)
+    if days is not None and hours is not None:
+        print("ogle mute: use --for OR --for-hours, not both", file=sys.stderr)
+        return 2
+    until: Optional[float] = None
+    if days is not None or hours is not None:
+        amount = days if days is not None else hours
+        if amount <= 0:
+            print("ogle mute: snooze duration must be positive", file=sys.stderr)
+            return 2
+        seconds = amount * 86400 if days is not None else amount * 3600
+        until = time.time() + seconds
+
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
-    newly = store.mute(args.urn)
+    newly = store.mute(args.urn, until=until)
     try:
         store.save(store_path)
     except Exception as exc:
         print(f"ogle mute: could not save store: {exc}", file=sys.stderr)
         return 2
-    _emit(
-        f"🔇 muted {args.urn}" if newly else f"_already muted: {args.urn}_"
-    )
+    if not newly:
+        _emit(f"_already muted: {args.urn}_")
+    elif until is not None:
+        _emit(f"🔇 snoozed {args.urn} until {_fmt_expiry(until)}")
+    else:
+        _emit(f"🔇 muted {args.urn}")
     return 0
 
 
@@ -359,18 +388,25 @@ def cmd_unmute(args: argparse.Namespace) -> int:
 
 
 def cmd_muted(args: argparse.Namespace) -> int:
-    """List the datasets currently muted in the store."""
+    """List the datasets currently muted in the store (expired snoozes excluded)."""
     store = BaselineStore.load(Path(args.store))
-    urns = store.muted()
+    now = time.time()
+    urns = store.muted(now)
     if args.json:
-        _emit(json.dumps({"muted_urns": urns}, indent=2, sort_keys=True))
+        entries = []
+        for urn in urns:
+            exp = store.mute_expiry(urn)
+            entries.append({"urn": urn, "until": exp})  # until=None -> permanent
+        _emit(json.dumps({"muted": entries}, indent=2, sort_keys=True))
         return 0
     if not urns:
         _emit("_no muted datasets._")
         return 0
     _emit(f"**{len(urns)} muted dataset(s):**")
     for urn in urns:
-        _emit(f"- `{urn}`")
+        exp = store.mute_expiry(urn)
+        suffix = f" — snoozed until {_fmt_expiry(exp)}" if exp is not None else ""
+        _emit(f"- `{urn}`{suffix}")
     return 0
 
 
@@ -498,6 +534,21 @@ def build_parser() -> argparse.ArgumentParser:
     mute.add_argument("urn", help="Dataset URN to mute.")
     mute.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    mute.add_argument(
+        "--for",
+        dest="for_days",
+        type=float,
+        metavar="DAYS",
+        help="Snooze for DAYS instead of muting permanently — auto-expires so it can't "
+        "become a permanent blind spot.",
+    )
+    mute.add_argument(
+        "--for-hours",
+        dest="for_hours",
+        type=float,
+        metavar="HOURS",
+        help="Snooze for HOURS instead of DAYS (mutually exclusive with --for).",
     )
     mute.set_defaults(func=cmd_mute)
 

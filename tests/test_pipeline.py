@@ -176,6 +176,26 @@ def test_suppressed_urns_in_report_dict():
     assert report.to_dict()["suppressed_urns"] == [CUSTOMERS_URN]
 
 
+def test_active_snooze_suppresses_but_lapsed_snooze_pages():
+    # A snooze silences the alert while active; once it expires the same drift pages again,
+    # driven purely by the injected `now` so the test is deterministic.
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    store.mute(CUSTOMERS_URN, until=100.0)
+
+    # Read-only probe (no baseline advance) so the collapse is still on the table next run.
+    active = run_drift_check(
+        store, [_sig(row_count=0)], now=50.0, update_baselines=False
+    )
+    assert active.suppressed_urns == [CUSTOMERS_URN]
+    assert active.should_alert is False
+
+    # Same collapse, but the snooze has now lapsed -> it pages.
+    lapsed = run_drift_check(store, [_sig(row_count=0)], now=150.0)
+    assert lapsed.suppressed_urns == []
+    assert lapsed.should_alert is True
+
+
 # ---- baseline advancement ---------------------------------------------------------
 def test_update_baselines_advances_state_by_default():
     store = BaselineStore()
