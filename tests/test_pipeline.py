@@ -251,3 +251,22 @@ def test_empty_batch_is_clean_heartbeat():
     assert report.incident is None
     assert report.should_alert is False
     assert "No drift" in report.narrative
+
+
+# ---- incident memory provenance ---------------------------------------------------
+def test_incident_recorded_with_provenance_for_ogle_incidents():
+    # A real drift run must persist the incident's human context into store memory so
+    # `ogle incidents` can describe it, not just count an opaque fingerprint.
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    report = run_drift_check(
+        store, [_sig(row_count=0)], serving_urns=[CUSTOMERS_URN]
+    )
+    assert report.incident is not None
+    (rec,) = store.incidents()
+    assert rec["fingerprint"] == report.incident.fingerprint
+    assert rec["count"] == 1
+    assert rec["severity"] == report.incident.overall_severity.value
+    assert rec["title"] == report.incident.title
+    assert rec["datasets"] == len(report.incident.urns)
+    assert rec["serving"] is True  # customers is on the serving path

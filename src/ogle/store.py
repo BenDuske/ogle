@@ -40,16 +40,44 @@ STORE_VERSION = 1
 
 @dataclass
 class _IncidentRecord:
-    """What Ogle remembers about one incident fingerprint across runs."""
+    """What Ogle remembers about one incident fingerprint across runs.
+
+    `count` (recurrence) is the load-bearing dedup field. The rest is human-facing
+    provenance so `ogle incidents` can show WHAT the remembered drift was rather than an
+    opaque 16-hex fingerprint — it reflects the *latest* sighting, since a recurring
+    incident's shape can shift. All provenance is additive: a record written by an older
+    Ogle carries only `count` and loads with the rest as defaults (no STORE_VERSION bump).
+    """
 
     count: int = 0
+    severity: Optional[str] = None   # overall severity at last sighting ("high"/"medium"/"low")
+    title: Optional[str] = None      # incident headline at last sighting
+    datasets: int = 0                # number of datasets in the incident at last sighting
+    serving: bool = False            # whether a serving path was impacted at last sighting
 
     def to_dict(self) -> dict:
-        return {"count": self.count}
+        # Serialize provenance only when set so an old bare-count record round-trips
+        # unchanged and the on-disk file stays minimal/diffable.
+        d: dict = {"count": self.count}
+        if self.severity is not None:
+            d["severity"] = self.severity
+        if self.title is not None:
+            d["title"] = self.title
+        if self.datasets:
+            d["datasets"] = self.datasets
+        if self.serving:
+            d["serving"] = True
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "_IncidentRecord":
-        return cls(count=int(data.get("count", 0)))
+        return cls(
+            count=int(data.get("count", 0)),
+            severity=data.get("severity"),
+            title=data.get("title"),
+            datasets=int(data.get("datasets", 0)),
+            serving=bool(data.get("serving", False)),
+        )
 
 
 @dataclass
@@ -94,22 +122,55 @@ class BaselineStore:
         """True if this exact incident (fingerprint) was recorded on an earlier run."""
         return fingerprint in self.seen_incidents
 
-    def record_incident(self, fingerprint: str) -> int:
+    def record_incident(
+        self,
+        fingerprint: str,
+        *,
+        severity: Optional[str] = None,
+        title: Optional[str] = None,
+        datasets: int = 0,
+        serving: bool = False,
+    ) -> int:
         """Record one observation of an incident; return its running observation count.
 
         First sighting returns 1. Callers should check `has_seen()` *before* recording to
         decide whether an alert is new vs a repeat.
+
+        The optional provenance (severity/title/datasets/serving) is stored for later
+        display by `ogle incidents`. It's refreshed to the current sighting only when the
+        caller supplies it — a bare `record_incident(fp)` never blanks provenance an
+        earlier rich call captured, so a metadata-less dedup ping can't erase the record's
+        human context.
         """
         rec = self.seen_incidents.get(fingerprint)
         if rec is None:
             rec = _IncidentRecord(count=0)
             self.seen_incidents[fingerprint] = rec
         rec.count += 1
+        if severity is not None or title is not None:
+            rec.severity = severity
+            rec.title = title
+            rec.datasets = datasets
+            rec.serving = serving
         return rec.count
 
     def forget_incident(self, fingerprint: str) -> None:
         """Drop an incident from memory (e.g. once the underlying drift is resolved)."""
         self.seen_incidents.pop(fingerprint, None)
+
+    def incidents(self) -> List[dict]:
+        """Every remembered incident as a plain dict (its provenance + `fingerprint`).
+
+        The read-only view behind `ogle incidents` — Ogle's cross-run drift memory made
+        inspectable. Ordering and severity ranking are the caller's job so the store stays
+        free of the scorer's `Severity` enum (it only ever knows severity as a string).
+        """
+        out: List[dict] = []
+        for fp, rec in self.seen_incidents.items():
+            d = rec.to_dict()
+            d["fingerprint"] = fp
+            out.append(d)
+        return out
 
     # ---- muting (known false positives) --------------------------------------------
     def mute(self, urn: str, until: Optional[float] = None) -> bool:

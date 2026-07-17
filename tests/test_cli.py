@@ -550,3 +550,92 @@ def test_check_purges_lapsed_snooze_and_pages(tmp_path, capsys):
     assert rc == 1  # lapsed snooze -> the collapse pages
     # And the dead snooze is gone from the store afterward.
     assert BaselineStore.load(store_path).muted() == []
+
+
+# ---- `ogle incidents`: the cross-run incident-memory view -------------------------
+def test_incidents_empty_store_reports_none(tmp_path, capsys):
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["incidents", "--store", str(store)])
+    assert rc == 0
+    assert "no incidents remembered" in capsys.readouterr().out
+
+
+def test_incidents_lists_what_check_recorded(tmp_path, capsys):
+    # Drive a real drift through `ogle check`, then confirm `ogle incidents` surfaces it
+    # with severity, recurrence and serving provenance — not just an opaque fingerprint.
+    store_path = tmp_path / "baselines.json"
+    seed = _write_sigs(tmp_path / "seed.json", [_sig(row_count=1000)], serving=[CUSTOMERS_URN])
+    assert main(["check", "--store", str(store_path), "--signatures", str(seed)]) == 0
+    drift = _write_sigs(tmp_path / "drift.json", [_sig(row_count=0)], serving=[CUSTOMERS_URN])
+    assert main(["check", "--store", str(store_path), "--signatures", str(drift)]) == 1
+    capsys.readouterr()  # drop check output
+
+    rc = main(["incidents", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 remembered incident" in out
+    assert "high" in out
+    assert "seen 1×" in out
+    assert "serving" in out
+    # the store's fingerprint is shown for later cross-reference
+    fp = BaselineStore.load(store_path).incidents()[0]["fingerprint"]
+    assert fp in out
+
+
+def test_incidents_json_shape(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp1", severity="high", title="HIGH drift", datasets=2, serving=True)
+    s.save()
+    rc = main(["incidents", "--store", str(store_path), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["incidents"]) == 1
+    entry = payload["incidents"][0]
+    assert entry["fingerprint"] == "fp1"
+    assert entry["severity"] == "high"
+    assert entry["count"] == 1
+    assert entry["serving"] is True
+
+
+def test_incidents_sorted_worst_severity_first(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("low_fp", severity="low", title="LOW drift", datasets=1)
+    s.record_incident("high_fp", severity="high", title="HIGH drift", datasets=3)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--json"]) == 0
+    order = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert order == ["high_fp", "low_fp"]  # HIGH ranked above LOW
+
+
+def test_incidents_recurrence_count_surfaces(tmp_path, capsys):
+    # A recurring incident's climbing count is the "still happening" signal an operator
+    # wants — surface it verbatim.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("x", severity="high", title="HIGH drift", datasets=1)
+    s.record_incident("x", severity="high", title="HIGH drift", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    assert "seen 2×" in capsys.readouterr().out
+
+
+def test_incidents_legacy_bare_record_renders(tmp_path, capsys):
+    # An incident memory from an older Ogle (count only, no severity/title) must render
+    # with a safe fallback rather than crash on the missing provenance.
+    store_path = tmp_path / "baselines.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "seen_incidents": {"old": {"count": 4}}}),
+        encoding="utf-8",
+    )
+    rc = main(["incidents", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "unknown" in out and "seen 4×" in out and "old" in out
+
+
+def test_incidents_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--json"])
+    assert ns.func.__name__ == "cmd_incidents"
+    assert ns.json is True

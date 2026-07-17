@@ -443,6 +443,53 @@ def cmd_muted(args: argparse.Namespace) -> int:
     return 0
 
 
+# Severity marks for the incident-memory view, keyed by the string the store persists
+# (the store stays decoupled from the scorer's Severity enum, so the CLI maps here).
+_INCIDENT_SEV_MARK = {"high": "\U0001f534", "medium": "\U0001f7e0", "low": "\U0001f7e1"}
+
+
+def _incident_sort_key(rec: dict) -> tuple:
+    """Worst-severity-first, then most-recurred, then stable by fingerprint."""
+    sev = rec.get("severity")
+    try:
+        rank = Severity(sev).rank
+    except (ValueError, TypeError):
+        rank = -1  # unknown/legacy severity sorts last
+    return (rank, int(rec.get("count", 0)), rec.get("fingerprint", ""))
+
+
+def cmd_incidents(args: argparse.Namespace) -> int:
+    """List the incidents Ogle currently remembers — its cross-run drift memory.
+
+    Read-only: surfaces the same `seen_incidents` memory that debounces `ogle check` so an
+    operator can see what open drift Ogle is tracking, how often each has recurred, and
+    which touch a serving path — without re-walking DataHub. An incident stays remembered
+    until its drift resolves (its fingerprint stops recurring) or it is explicitly forgotten.
+    """
+    store = BaselineStore.load(Path(args.store))
+    records = sorted(store.incidents(), key=_incident_sort_key, reverse=True)
+
+    if args.json:
+        _emit(json.dumps({"incidents": records}, indent=2, sort_keys=True))
+        return 0
+    if not records:
+        _emit("_no incidents remembered yet._")
+        return 0
+
+    _emit(f"**{len(records)} remembered incident(s):**")
+    for r in records:
+        sev = r.get("severity") or "unknown"
+        mark = _INCIDENT_SEV_MARK.get(sev, "•")  # bullet for unknown/legacy
+        count = int(r.get("count", 0))
+        seen = f"seen {count}×"  # e.g. "seen 3×"
+        nd = int(r.get("datasets", 0))
+        dpart = f" · {nd} dataset(s)" if nd else ""
+        serv = " · ⚠️ serving" if r.get("serving") else ""
+        title = r.get("title") or "(drift)"
+        _emit(f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}  `{r['fingerprint']}`")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ogle",
@@ -608,6 +655,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     muted.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     muted.set_defaults(func=cmd_muted)
+
+    # `ogle incidents` — inspect Ogle's cross-run incident memory (read-only): what drift
+    # it's tracking, recurrence counts, serving impact. The visible side of the same
+    # `seen_incidents` memory that debounces `ogle check`.
+    incidents = sub.add_parser(
+        "incidents",
+        help="List the incidents Ogle remembers (its cross-run drift memory).",
+    )
+    incidents.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
+    incidents.set_defaults(func=cmd_incidents)
 
     # `ogle watch` — one scheduler tick that pages once on a new incident.
     from .watch import build_watch_args

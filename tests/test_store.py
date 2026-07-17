@@ -83,6 +83,92 @@ def test_forget_incident():
     store.forget_incident("never")
 
 
+# ---- incident memory (provenance for `ogle incidents`) ----------------------------
+def test_incidents_empty_store():
+    assert BaselineStore().incidents() == []
+
+
+def test_record_incident_stores_provenance():
+    store = BaselineStore()
+    store.record_incident(
+        "fp", severity="high", title="HIGH drift across 2 datasets", datasets=2, serving=True
+    )
+    (rec,) = store.incidents()
+    assert rec["fingerprint"] == "fp"
+    assert rec["count"] == 1
+    assert rec["severity"] == "high"
+    assert rec["title"] == "HIGH drift across 2 datasets"
+    assert rec["datasets"] == 2
+    assert rec["serving"] is True
+
+
+def test_record_incident_refreshes_provenance_to_latest_sighting():
+    store = BaselineStore()
+    store.record_incident("fp", severity="low", title="LOW drift", datasets=1)
+    store.record_incident("fp", severity="high", title="HIGH drift", datasets=3, serving=True)
+    (rec,) = store.incidents()
+    assert rec["count"] == 2          # recurrence still accrues
+    assert rec["severity"] == "high"  # latest sighting wins
+    assert rec["datasets"] == 3
+    assert rec["serving"] is True
+
+
+def test_bare_record_incident_does_not_blank_prior_provenance():
+    # A metadata-less dedup ping must not erase the human context an earlier rich call set.
+    store = BaselineStore()
+    store.record_incident("fp", severity="medium", title="MED drift", datasets=1)
+    store.record_incident("fp")  # bare ping (e.g. a caller that only dedups)
+    (rec,) = store.incidents()
+    assert rec["count"] == 2
+    assert rec["severity"] == "medium"
+    assert rec["title"] == "MED drift"
+
+
+def test_incident_provenance_roundtrips_through_disk(tmp_path):
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", title="HIGH drift", datasets=2, serving=True)
+    s1.save()
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec == {
+        "fingerprint": "fp",
+        "count": 1,
+        "severity": "high",
+        "title": "HIGH drift",
+        "datasets": 2,
+        "serving": True,
+    }
+
+
+def test_bare_incident_record_serializes_minimally(tmp_path):
+    # An incident recorded without provenance keeps the old on-disk shape (count only),
+    # so old and new Ogle round-trip the same bytes for a bare record.
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp")
+    s1.save()
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    assert raw["seen_incidents"]["fp"] == {"count": 1}
+
+
+def test_legacy_bare_count_record_loads(tmp_path):
+    # A store file written by an older Ogle (count only, no provenance keys) must load and
+    # surface as an incident with empty/defaulted provenance — never crash.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps({"version": STORE_VERSION, "seen_incidents": {"old": {"count": 5}}}),
+        encoding="utf-8",
+    )
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec["fingerprint"] == "old"
+    assert rec["count"] == 5
+    # provenance absent on a bare legacy record -> keys simply not present (to_dict omits
+    # None/zero/False), which the CLI reads with .get() defaults.
+    assert rec.get("severity") is None
+    assert rec.get("datasets", 0) == 0
+    assert rec.get("serving", False) is False
+
+
 # ---- muting (known false positives) -----------------------------------------------
 def test_empty_store_mutes_nothing():
     store = BaselineStore()

@@ -125,7 +125,15 @@ def run_drift_check(
     count = 0
     if incident is not None:
         is_new = not store.has_seen(incident.fingerprint)
-        count = store.record_incident(incident.fingerprint)
+        # Record with provenance so `ogle incidents` can describe what Ogle remembers,
+        # not just count opaque fingerprints.
+        count = store.record_incident(
+            incident.fingerprint,
+            severity=incident.overall_severity.value,
+            title=incident.title,
+            datasets=len(incident.urns),
+            serving=incident.serving_impacted,
+        )
 
     text = narrate(all_findings, llm=llm)
 

@@ -152,6 +152,31 @@ it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urn
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
 false positives) as a first-class operator control.
 
+### Inspecting what Ogle remembers (`ogle incidents`)
+
+Ogle keeps a cross-run memory of every incident it has seen — that's what lets it page
+*once* on a new problem instead of every tick. `ogle incidents` makes that memory
+inspectable, so an operator can see the open drift Ogle is tracking without re-walking
+DataHub:
+
+```bash
+ogle incidents          # what drift Ogle currently remembers, worst-severity first
+ogle incidents --json   # same, machine-readable
+```
+
+Each line shows the incident's **severity**, a human **headline**, how many times it has
+**recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether
+it touches a **serving path**, and its stable fingerprint for cross-reference:
+
+```
+**2 remembered incident(s):**
+- 🔴 **high** — HIGH drift across 1 dataset on a serving path · seen 3× · 1 dataset(s) · ⚠️ serving  `fd6f829c77ff9fb4`
+- 🟡 **low** — LOW drift across 1 dataset · seen 1× · 1 dataset(s)  `a1b2c3d4e5f60718`
+```
+
+It's read-only — it never advances baselines or pages — and the provenance is additive, so a
+store written by an older Ogle (which recorded only a recurrence count) still loads and lists.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —
