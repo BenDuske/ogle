@@ -125,6 +125,44 @@ def test_actions_deduped_one_per_kind():
     assert md.count("check the upstream transform") == 1
 
 
+# ---- summary_line (at-a-glance blast radius) ----
+
+def test_summary_line_counts_findings_and_datasets():
+    inc = build_incident([
+        _finding(urn=CUSTOMERS_URN, kind=DriftKind.SCHEMA, sev=Severity.HIGH),
+        _finding(urn=CUSTOMERS_URN, kind=DriftKind.QUALITY, sev=Severity.MEDIUM),
+        _finding(urn=ORDERS_URN, kind=DriftKind.VOLUME, sev=Severity.MEDIUM),
+    ])
+    line = inc.summary_line
+    assert "3 findings" in line
+    assert "2 datasets" in line
+    assert "1" in line and "high" in line
+    assert "2" in line and "medium" in line
+
+
+def test_summary_line_singular_grammar_and_no_serving_tag():
+    inc = build_incident([_finding(sev=Severity.LOW, kind=DriftKind.VOLUME, msg="x")])
+    line = inc.summary_line
+    assert "1 finding**" in line          # singular, not "findings"
+    assert "across 1 dataset —" in line   # singular, not "datasets"
+    assert "serving path impacted" not in line
+
+
+def test_summary_line_flags_serving_and_omits_absent_severities():
+    inc = build_incident([_finding(sev=Severity.HIGH, serving=True)])
+    line = inc.summary_line
+    assert "serving path impacted" in line
+    assert "medium" not in line and "low" not in line  # only the present band shows
+
+
+def test_summary_line_appears_in_markdown_under_title():
+    inc = build_incident([_finding(msg="schema changed: removed ['region']")])
+    md = render_markdown(inc)
+    assert inc.summary_line in md
+    # ordering: title line precedes the summary line
+    assert md.index(inc.title) < md.index("finding")
+
+
 # ---- build_llm_prompt ----
 
 def test_llm_prompt_grounds_on_facts_and_forbids_invention():
