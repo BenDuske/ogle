@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from . import __version__
+from .llm import build_narrator
+from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
 from .signature import DatasetSignature
 from .store import BaselineStore
@@ -173,6 +175,19 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     _emit(render_report(report, as_json=args.json))
 
+    # Optional LLM-phrased incident summary. Only when there is something to narrate and
+    # not in JSON mode (markdown prose would corrupt the JSON payload). `narrate` itself
+    # falls back to the deterministic report if the model is unreachable, so a build/parse
+    # error is the only thing we surface here.
+    if getattr(args, "narrate", None) and not args.json and report.findings:
+        try:
+            narrator = build_narrator(args.narrate)
+        except ValueError as exc:
+            print(f"ogle check: {exc}", file=sys.stderr)
+            return 2
+        _emit("\n---\n\n**Incident summary**\n")
+        _emit(narrate(report.findings, llm=narrator))
+
     # Persist advanced baselines/incident memory unless asked for a read-only probe.
     if not args.no_update:
         try:
@@ -289,6 +304,19 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "On a new incident (exit 1), stamp affected datasets and their downstream "
             "mlModels with `urn:li:tag:ogle-drift-flagged` in DataHub. Requires --gms."
+        ),
+    )
+    check.add_argument(
+        "--narrate",
+        nargs="?",
+        const="ollama",
+        metavar="SPEC",
+        help=(
+            "After the report, add an LLM-phrased incident summary grounded in the "
+            "computed facts. Optional SPEC picks the model (default: 'ollama' = local "
+            "qwen3:latest); also 'ollama:<model>' or '<...>@http://host:11434'. Falls "
+            "back to the deterministic report if the model is unreachable. Ignored with "
+            "--json."
         ),
     )
     check.set_defaults(func=cmd_check)
