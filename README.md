@@ -113,6 +113,16 @@ Thresholds are validated up front — a nonsensical value (volume ≤ 0, or a nu
 outside `(0, 1]`) exits **2** before any walk. Schema drift (a removed/retyped column) is
 always flagged regardless of these knobs.
 
+**Gating a CI pipeline on severity (`--fail-on`).** By default *any* new incident exits
+**1**. When you want a build to go red only on the worst drift, `--fail-on {low,medium,high}`
+raises the bar: a new incident below that floor is still reported (and still tagged with
+`--write-back`) but the process exits **0**, so a gate can page on HIGH while merely logging
+the rest. No new incident is always **0**.
+
+```bash
+ogle check --signatures sigs.json --fail-on high   # exit 1 only on a HIGH incident
+```
+
 ### Muting known false positives (`ogle mute`)
 
 Some assets are chronically noisy — a dashboard that bounces every Monday, a staging table

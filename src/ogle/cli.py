@@ -18,6 +18,8 @@ Exit codes are chosen so a cron/Task wrapper can branch on them:
     0  healthy — no *new* incident to alert on (may include seeded/first-run datasets)
     1  a NEW incident fired (`DriftReport.should_alert`) — page Ben
     2  usage / input error
+`--fail-on {low,medium,high}` tightens the 0/1 line for a CI gate: a new incident below
+that severity floor is still reported (and tagged) but exits 0 instead of 1.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from . import __version__
 from .llm import build_narrator
 from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
-from .scorer import build_score_config
+from .scorer import Severity, build_score_config
 from .signature import DatasetSignature
 from .store import BaselineStore
 
@@ -146,6 +148,27 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
     return "\n".join(lines)
 
 
+def gate_should_fail(report: DriftReport, fail_on: Optional[str]) -> bool:
+    """CI exit-code gate: should this run exit non-zero (1) instead of 0?
+
+    Pure — no I/O — so a wrapper's page/no-page decision is unit-testable on its own.
+
+    * No *new* incident -> always False (exit 0), regardless of `fail_on`.
+    * `fail_on is None` (default) -> any new incident fails the run: the page-on-drift
+      contract every existing caller relies on.
+    * `fail_on in {"low","medium","high"}` -> only a new incident whose OVERALL severity
+      meets or exceeds that floor fails. A lower-severity new incident is still reported
+      and still eligible for write-back, but the process exits 0 — so a CI gate can page
+      on HIGH while merely logging medium/low drift.
+    """
+    if not report.should_alert:
+        return False
+    if fail_on is None:
+        return True
+    # should_alert is True only when there is an incident, so this is safe.
+    return report.incident.overall_severity.rank >= Severity(fail_on).rank
+
+
 # ---------------------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------------------
@@ -240,7 +263,17 @@ def cmd_check(args: argparse.Namespace) -> int:
                 return 1
             _render_writeback(plan, wb_result, as_json=args.json)
 
-    return 1 if report.should_alert else 0
+    # CI exit-code gate. Without --fail-on this is exactly the old "fail on any new
+    # incident" contract; with it, a below-floor new incident is still reported (and
+    # tagged) but exits 0. Announce that suppression so it's never a silent pass —
+    # skipped in --json mode where prose would corrupt the payload.
+    fail = gate_should_fail(report, getattr(args, "fail_on", None))
+    if report.should_alert and not fail and not args.json:
+        _emit(
+            f"_new {report.incident.overall_severity.value} incident is below "
+            f"--fail-on {args.fail_on} — reported, exit 0._"
+        )
+    return 1 if fail else 0
 
 
 def _render_writeback(plan, result, *, as_json: bool) -> None:
@@ -472,6 +505,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-serving-escalation",
         action="store_true",
         help="Do not bump severity for sources feeding a deployed model (default: escalate).",
+    )
+    check.add_argument(
+        "--fail-on",
+        choices=["low", "medium", "high"],
+        metavar="SEV",
+        help=(
+            "CI gate: exit 1 only when a NEW incident's overall severity is at least SEV "
+            "(low|medium|high). Below-floor incidents are still reported and tagged but "
+            "exit 0. Default: any new incident exits 1."
+        ),
     )
     check.add_argument(
         "--no-update",

@@ -182,6 +182,81 @@ def test_sensitivity_flags_registered_in_help():
     assert ns.no_serving_escalation is True
 
 
+# ---- --fail-on: CI severity gate on the exit code ---------------------------------
+# Severity bands (see scorer._severity_from_ratio, default volume band 0.30):
+#   collapse 1000 -> 0        = HIGH
+#   1000 -> 500  (-50%, x1.67)= MEDIUM
+#   1000 -> 650  (-35%, x1.17)= LOW
+def _drift_run(tmp_path, cur_rows, extra_args, base_rows=1000, capsys=None):
+    """Seed a baseline, present a drifted signature, return the exit code."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=base_rows)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(row_count=cur_rows)])
+    return main(["check", "--store", str(store), "--signatures", str(sigs),
+                 "--no-update", *extra_args])
+
+
+def test_fail_on_high_passes_a_low_incident(tmp_path, capsys):
+    # -35% is a real new incident (exit 1 by default) but only LOW severity.
+    assert _drift_run(tmp_path, 650, []) == 1                       # control: default gate
+    assert _drift_run(tmp_path, 650, ["--fail-on", "high"]) == 0    # gated below the floor
+    out = capsys.readouterr().out
+    assert "below --fail-on high" in out  # never a silent pass
+
+
+def test_fail_on_high_still_fails_a_high_incident(tmp_path):
+    assert _drift_run(tmp_path, 0, ["--fail-on", "high"]) == 1  # collapse = HIGH >= high
+
+
+def test_fail_on_medium_gates_low_but_not_medium(tmp_path):
+    assert _drift_run(tmp_path, 650, ["--fail-on", "medium"]) == 0  # LOW  < medium
+    assert _drift_run(tmp_path, 500, ["--fail-on", "medium"]) == 1  # MEDIUM >= medium
+
+
+def test_fail_on_low_matches_default_for_any_incident(tmp_path):
+    # A floor of "low" is the loosest gate — it should behave like no --fail-on.
+    assert _drift_run(tmp_path, 650, ["--fail-on", "low"]) == 1
+
+
+def test_fail_on_never_fails_when_healthy(tmp_path, capsys):
+    # No new incident -> exit 0 regardless of the floor, and no gate note printed.
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig()}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])  # unchanged
+    assert main(["check", "--store", str(store), "--signatures", str(sigs),
+                 "--no-update", "--fail-on", "low"]) == 0
+    assert "below --fail-on" not in capsys.readouterr().out
+
+
+def test_fail_on_registered_and_validated():
+    parser = build_parser()
+    assert parser.parse_args(["check", "--signatures", "x", "--fail-on", "high"]).fail_on == "high"
+    with pytest.raises(SystemExit):  # not a valid severity
+        parser.parse_args(["check", "--signatures", "x", "--fail-on", "critical"])
+
+
+def test_gate_should_fail_pure_helper():
+    """Direct unit of the gate, independent of argparse/I-O (fault-injection anchor)."""
+    from ogle.cli import gate_should_fail
+    from ogle.narrative import build_incident
+    from ogle.pipeline import DriftReport
+    from ogle.scorer import DriftFinding, DriftKind, Severity
+
+    def _report(sev, is_new=True):
+        f = DriftFinding(urn=CUSTOMERS_URN, kind=DriftKind.VOLUME, severity=sev, message="x")
+        inc = build_incident([f])
+        return DriftReport(findings=[f], incident=inc, narrative="",
+                           is_new_incident=is_new, incident_count=1)
+
+    med = _report(Severity.MEDIUM)
+    assert gate_should_fail(med, None) is True              # default: any new incident
+    assert gate_should_fail(med, "low") is True             # MEDIUM >= low
+    assert gate_should_fail(med, "medium") is True          # MEDIUM >= medium
+    assert gate_should_fail(med, "high") is False           # MEDIUM < high
+    # A non-new (debounced) incident never fails, even at the loosest floor.
+    assert gate_should_fail(_report(Severity.HIGH, is_new=False), "low") is False
+
+
 # ---- persistence + --no-update ----------------------------------------------------
 def test_baselines_persist_across_runs(tmp_path):
     store = tmp_path / "baselines.json"
