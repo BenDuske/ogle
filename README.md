@@ -164,11 +164,13 @@ ogle incidents                          # what drift Ogle currently remembers, w
 ogle incidents --json                   # same, machine-readable
 ogle incidents --min-severity high      # triage: only high-severity incidents (drops unknown/legacy)
 ogle incidents --serving-only           # only incidents that touch a serving path
+ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ```
 
-The `--min-severity {low,medium,high}` and `--serving-only` filters mirror `check --fail-on`
-so a busy operator can focus on what pages first. When a filter empties a non-empty memory,
+The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
+`check --fail-on` so a busy operator can focus on what pages first — `--min-count` surfaces the
+chronic drift that keeps recurring despite being "seen." When a filter empties a non-empty memory,
 Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
 tracked.
 

@@ -458,15 +458,24 @@ def _incident_sort_key(rec: dict) -> tuple:
     return (rank, int(rec.get("count", 0)), rec.get("fingerprint", ""))
 
 
-def _incident_passes(rec: dict, min_rank: Optional[int], serving_only: bool) -> bool:
+def _incident_passes(
+    rec: dict,
+    min_rank: Optional[int],
+    serving_only: bool,
+    min_count: Optional[int] = None,
+) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
     `min_rank` is a `Severity.rank` floor (None = no floor). A record whose severity is
     unknown/legacy ranks -1, so ANY `--min-severity` floor drops it — asking for a floor
     is asking to hide the un-triageable. `serving_only` keeps only serving-path incidents.
-    Both filters are ANDed; passing neither keeps everything.
+    `min_count` is a recurrence floor (None = no floor): keeps only incidents seen at least
+    that many times, surfacing the chronic/flapping drift that keeps coming back. All filters
+    are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
+        return False
+    if min_count is not None and int(rec.get("count", 0)) < min_count:
         return False
     if min_rank is not None:
         try:
@@ -555,11 +564,19 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     store = BaselineStore.load(Path(args.store))
     all_records = sorted(store.incidents(), key=_incident_sort_key, reverse=True)
 
-    # Triage filters (mirror `check --fail-on`): a floor on severity and/or serving-only.
+    # Triage filters (mirror `check --fail-on`): a floor on severity, recurrence, and/or
+    # serving-only.
     min_rank = Severity(args.min_severity).rank if args.min_severity else None
     serving_only = getattr(args, "serving_only", False)
-    filtered = getattr(args, "min_severity", None) is not None or serving_only
-    records = [r for r in all_records if _incident_passes(r, min_rank, serving_only)]
+    min_count = getattr(args, "min_count", None)
+    filtered = (
+        getattr(args, "min_severity", None) is not None
+        or serving_only
+        or min_count is not None
+    )
+    records = [
+        r for r in all_records if _incident_passes(r, min_rank, serving_only, min_count)
+    ]
 
     if args.json:
         _emit(json.dumps({"incidents": records}, indent=2, sort_keys=True))
@@ -773,6 +790,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--serving-only",
         action="store_true",
         help="Only show incidents that touch a serving path.",
+    )
+    incidents.add_argument(
+        "--min-count",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Only show incidents seen at least N times (surfaces chronic/flapping drift).",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)

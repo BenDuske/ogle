@@ -721,10 +721,66 @@ def test_incidents_filter_empty_result_message(tmp_path, capsys):
     assert "no incidents remembered yet" not in out
 
 
+def _seed_recurring_incidents(store_path):
+    """A store with the same three incidents seen a different number of times each."""
+    s = BaselineStore(path=store_path)
+    for _ in range(5):
+        s.record_incident("chronic", severity="high", title="CHRONIC", datasets=2, serving=True)
+    for _ in range(2):
+        s.record_incident("twice", severity="medium", title="TWICE", datasets=1)
+    s.record_incident("once", severity="low", title="ONCE", datasets=1)
+    s.save()
+    return s
+
+
+def test_incidents_min_count_filters_below_floor(tmp_path, capsys):
+    # --min-count keeps only chronic/flapping incidents seen at least N times.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--min-count", "3", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["chronic"]  # twice (2×) and once (1×) drop below the floor of 3
+
+
+def test_incidents_min_count_boundary_is_inclusive(tmp_path, capsys):
+    # "at least N" — an incident seen exactly N times survives.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--min-count", "2", "--json"]) == 0
+    fps = {e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]}
+    assert fps == {"chronic", "twice"}  # 5× and 2× kept, the 1× drops
+
+
+def test_incidents_min_count_composes_with_serving_only(tmp_path, capsys):
+    # --min-count AND --serving-only: chronic is both flapping (5×) and serving; twice is
+    # neither serving nor frequent-enough → only chronic survives the AND.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    rc = main(["incidents", "--store", str(store_path),
+               "--min-count", "2", "--serving-only", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["chronic"]
+
+
+def test_incidents_min_count_empty_result_message(tmp_path, capsys):
+    # A count floor above every remembered incident yields the "no match" message + count,
+    # NOT the "none remembered" message (memory is non-empty; the filter hid it).
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--min-count", "99"]) == 0
+    out = capsys.readouterr().out
+    assert "no incidents match the filter" in out and "3 remembered" in out
+    assert "no incidents remembered yet" not in out
+
+
 def test_incidents_filter_flags_registered_in_help():
-    ns = build_parser().parse_args(["incidents", "--min-severity", "high", "--serving-only"])
+    ns = build_parser().parse_args(
+        ["incidents", "--min-severity", "high", "--serving-only", "--min-count", "4"]
+    )
     assert ns.min_severity == "high"
     assert ns.serving_only is True
+    assert ns.min_count == 4
 
 
 # ---- `ogle resolve` ------------------------------------------------------------------
