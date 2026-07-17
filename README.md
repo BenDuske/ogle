@@ -166,6 +166,7 @@ ogle incidents --min-severity high      # triage: only high-severity incidents (
 ogle incidents --serving-only           # only incidents that touch a serving path
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
+ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ```
 
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
@@ -173,6 +174,12 @@ The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` fi
 chronic drift that keeps recurring despite being "seen." When a filter empties a non-empty memory,
 Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
 tracked.
+
+`--summary` swaps the per-incident list for an at-a-glance rollup — total remembered, a count
+per severity, how many touch a serving path, how many are recurring (seen ≥2×), and the total
+sighting count. It describes the *filtered* set, so it composes with the triage flags (e.g.
+`ogle incidents --summary --serving-only` summarizes only the serving-path drift). Add `--json`
+for a machine-readable `{"summary": {...}}` shape.
 
 Each line shows the incident's **severity**, a human **headline**, how many times it has
 **recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether

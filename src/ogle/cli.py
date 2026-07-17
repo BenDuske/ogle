@@ -487,6 +487,39 @@ def _incident_passes(
     return True
 
 
+def _incident_summary(records: List[dict]) -> dict:
+    """Aggregate a set of remembered incidents into a triage rollup.
+
+    Summarizes exactly the records handed in — the caller passes the already-filtered set,
+    so `--summary` composes with `--min-severity`/`--serving-only`/`--min-count` (the rollup
+    describes what the filter kept, not the whole store). `recurring` counts incidents seen
+    at least twice (the flapping/chronic ones); `total_sightings` is the sum of every
+    incident's observation count. Legacy/unknown severities land in the `unknown` bucket so
+    the shape is stable regardless of what the store holds.
+    """
+    by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    serving = 0
+    recurring = 0
+    total_sightings = 0
+    for r in records:
+        sev = r.get("severity")
+        key = sev if sev in ("high", "medium", "low") else "unknown"
+        by_severity[key] += 1
+        if r.get("serving"):
+            serving += 1
+        count = int(r.get("count", 0))
+        total_sightings += count
+        if count >= 2:
+            recurring += 1
+    return {
+        "total": len(records),
+        "by_severity": by_severity,
+        "serving": serving,
+        "recurring": recurring,
+        "total_sightings": total_sightings,
+    }
+
+
 def _resolve_fingerprint(store: BaselineStore, needle: str) -> Tuple[Optional[str], List[str]]:
     """Look up a full fingerprint from a user-supplied token.
 
@@ -577,6 +610,31 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     records = [
         r for r in all_records if _incident_passes(r, min_rank, serving_only, min_count)
     ]
+
+    # `--summary`: an aggregate rollup of the (filtered) set instead of the per-incident list.
+    if getattr(args, "summary", False):
+        summary = _incident_summary(records)
+        if args.json:
+            _emit(json.dumps({"summary": summary}, indent=2, sort_keys=True))
+            return 0
+        if not records:
+            # Same empty-vs-filtered distinction as the list view so a hidden set never
+            # reads as an empty store.
+            if filtered and all_records:
+                _emit(f"_no incidents match the filter ({len(all_records)} remembered)._")
+            else:
+                _emit("_no incidents remembered yet._")
+            return 0
+        sev = summary["by_severity"]
+        _emit(f"**Incident memory summary — {summary['total']} remembered:**")
+        _emit(
+            f"- 🔴 high: {sev['high']} · 🟠 medium: {sev['medium']} · "
+            f"🟡 low: {sev['low']} · • unknown: {sev['unknown']}"
+        )
+        _emit(f"- ⚠️ serving-path: {summary['serving']}")
+        _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
+        _emit(f"- total sightings: {summary['total_sightings']}")
+        return 0
 
     if args.json:
         _emit(json.dumps({"incidents": records}, indent=2, sort_keys=True))
@@ -797,6 +855,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         default=None,
         help="Only show incidents seen at least N times (surfaces chronic/flapping drift).",
+    )
+    incidents.add_argument(
+        "--summary",
+        action="store_true",
+        help="Show an aggregate rollup (counts by severity, serving, recurring) instead of the list.",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)

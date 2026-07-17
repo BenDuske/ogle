@@ -783,6 +783,73 @@ def test_incidents_filter_flags_registered_in_help():
     assert ns.min_count == 4
 
 
+# ---- `ogle incidents --summary`: aggregate rollup of the memory ---------------------
+def test_incidents_summary_json_shape(tmp_path, capsys):
+    # The rollup counts by severity, serving-path, recurrence, and total sightings.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)  # chronic(high,serv,5×) twice(med,2×) once(low,1×)
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["total"] == 3
+    assert summary["by_severity"] == {"high": 1, "medium": 1, "low": 1, "unknown": 0}
+    assert summary["serving"] == 1          # only chronic touches a serving path
+    assert summary["recurring"] == 2        # chronic(5×) + twice(2×); once(1×) is not recurring
+    assert summary["total_sightings"] == 8  # 5 + 2 + 1
+
+
+def test_incidents_summary_respects_filters(tmp_path, capsys):
+    # --summary describes the FILTERED set, so it composes with the triage floors.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    rc = main(["incidents", "--store", str(store_path), "--summary", "--min-count", "3", "--json"])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["total"] == 1  # only chronic (5×) clears the count floor of 3
+    assert summary["by_severity"] == {"high": 1, "medium": 0, "low": 0, "unknown": 0}
+    assert summary["recurring"] == 1
+    assert summary["total_sightings"] == 5
+
+
+def test_incidents_summary_text_render(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "Incident memory summary — 3 remembered" in out
+    assert "recurring (seen ≥2×): 2" in out
+    assert "total sightings: 8" in out
+
+
+def test_incidents_summary_unknown_severity_bucket(tmp_path, capsys):
+    # A legacy bare-count record (no severity) lands in the `unknown` bucket, not dropped.
+    store_path = tmp_path / "baselines.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "seen_incidents": {"old": {"count": 3}}}),
+        encoding="utf-8",
+    )
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["total"] == 1
+    assert summary["by_severity"] == {"high": 0, "medium": 0, "low": 0, "unknown": 1}
+    assert summary["total_sightings"] == 3
+
+
+def test_incidents_summary_empty_store_message(tmp_path, capsys):
+    # Summarizing an empty store reuses the "none remembered" message, not a zeroed rollup.
+    store_path = tmp_path / "baselines.json"
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "no incidents remembered yet" in capsys.readouterr().out
+
+
+def test_incidents_summary_filtered_empty_message(tmp_path, capsys):
+    # A filter that hides everything gets the "no match" message, not the empty-store one.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary", "--min-count", "99"]) == 0
+    out = capsys.readouterr().out
+    assert "no incidents match the filter" in out and "3 remembered" in out
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.
