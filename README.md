@@ -69,6 +69,14 @@ serving-path alert (exit 1) — the same drift-check code path a live DataHub wa
 reproducing [`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md)
 verbatim. Nothing is written to your working directory.
 
+Add `--narrate` to also see the **LLM root-cause summary** (feature #2) in the same keyless
+command — it uses a local Ollama model (`qwen3:latest`) by default and falls back to the
+deterministic summary if none is reachable, so it stays zero-key:
+
+```bash
+ogle demo --narrate
+```
+
 `ogle check` also runs against pre-computed signatures — no SDK, no quickstart — which is
 how it's unit-tested and how a scheduled job can feed signatures it pulled elsewhere:
 

@@ -284,6 +284,19 @@ def cmd_demo(args: argparse.Namespace) -> int:
     drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
     _emit(render_report(drift, as_json=False))
 
+    # Optional feature-#2 showcase: the same LLM root-cause narrator `ogle check --narrate`
+    # exposes, so a judge sees BOTH flagship features from the one keyless command. `narrate`
+    # falls back to the deterministic summary when the model is unreachable, so a laptop with
+    # no local Ollama still gets a clean section instead of an error — the demo stays keyless.
+    if getattr(args, "narrate", None) and drift.findings:
+        try:
+            narrator = build_narrator(args.narrate)
+        except ValueError as exc:
+            print(f"ogle demo: {exc}", file=sys.stderr)
+            return 2
+        _emit("\n## 3. LLM root-cause summary\n")
+        _emit(narrate(drift.findings, llm=narrator))
+
     _emit(
         "\n---\n_Reproduces `examples/alerts/churn-orders-drift.md`. "
         "Run against DataHub: `ogle check --gms http://localhost:8080 --discover`._"
@@ -373,6 +386,18 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser(
         "demo",
         help="Zero-setup offline drift demo (no DataHub/API key) — seeds, then alerts.",
+    )
+    demo.add_argument(
+        "--narrate",
+        nargs="?",
+        const="ollama",
+        metavar="SPEC",
+        help=(
+            "Also show the LLM root-cause summary (feature #2) after the alert. Optional "
+            "SPEC picks the model (default: 'ollama' = local qwen3:latest); also "
+            "'ollama:<model>' or '<...>@http://host:11434'. Falls back to the deterministic "
+            "summary if the model is unreachable, so the demo stays keyless."
+        ),
     )
     demo.set_defaults(func=cmd_demo)
 

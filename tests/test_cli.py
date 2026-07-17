@@ -241,3 +241,50 @@ def test_demo_never_writes_to_cwd(tmp_path, monkeypatch):
 def test_parser_registers_demo():
     args = build_parser().parse_args(["demo"])
     assert args.func.__name__ == "cmd_demo"
+
+
+def test_demo_default_omits_llm_summary(capsys):
+    """Plain `demo` stays keyless — no feature-#2 section unless --narrate is asked for."""
+    main(["demo"])
+    out = capsys.readouterr().out
+    assert "LLM root-cause summary" not in out
+
+
+def test_demo_narrate_adds_llm_summary(capsys, monkeypatch):
+    """`demo --narrate` surfaces feature #2, using an injected narrator (no live Ollama)."""
+    monkeypatch.setattr(
+        "ogle.cli.build_narrator", lambda spec: (lambda prompt: "INJECTED-LLM-SUMMARY")
+    )
+    rc = main(["demo", "--narrate"])
+    out = capsys.readouterr().out
+    assert rc == 1  # the alert still governs the exit code
+    assert "LLM root-cause summary" in out
+    assert "INJECTED-LLM-SUMMARY" in out
+
+
+def test_demo_narrate_falls_back_when_model_unreachable(capsys, monkeypatch):
+    """An unreachable model must not break the demo — narrate falls back, exit code holds."""
+    def _broken(_prompt):
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr("ogle.cli.build_narrator", lambda spec: _broken)
+    rc = main(["demo", "--narrate"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "LLM root-cause summary" in out  # section renders via the deterministic fallback
+    assert "HIGH drift" in out
+
+
+def test_demo_narrate_bad_spec_exits_two(capsys, monkeypatch):
+    """A malformed --narrate SPEC is a usage error (exit 2), matching `ogle check`."""
+    def _reject(spec):
+        raise ValueError("unknown narrator spec")
+
+    monkeypatch.setattr("ogle.cli.build_narrator", _reject)
+    rc = main(["demo", "--narrate", "bogus"])
+    assert rc == 2
+
+
+def test_parser_demo_narrate_defaults_to_ollama():
+    args = build_parser().parse_args(["demo", "--narrate"])
+    assert args.narrate == "ollama"
