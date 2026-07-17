@@ -641,6 +641,92 @@ def test_incidents_registered_in_help():
     assert ns.json is True
 
 
+# ---- `ogle incidents` triage filters: --min-severity / --serving-only --------------
+def _seed_mixed_incidents(store_path):
+    """A store with one incident at each severity plus a serving/non-serving mix."""
+    s = BaselineStore(path=store_path)
+    s.record_incident("high_serv", severity="high", title="HIGH", datasets=3, serving=True)
+    s.record_incident("med_only", severity="medium", title="MED", datasets=2, serving=False)
+    s.record_incident("low_serv", severity="low", title="LOW", datasets=1, serving=True)
+    s.save()
+    return s
+
+
+def test_incidents_min_severity_filters_below_floor(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--min-severity", "high", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["high_serv"]  # medium + low dropped by the floor
+
+
+def test_incidents_min_severity_medium_keeps_medium_and_up(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--min-severity", "medium", "--json"]) == 0
+    fps = {e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]}
+    assert fps == {"high_serv", "med_only"}  # low dropped, medium+high kept
+
+
+def test_incidents_serving_only_filters_non_serving(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--serving-only", "--json"]) == 0
+    fps = {e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]}
+    assert fps == {"high_serv", "low_serv"}  # the medium non-serving one is hidden
+
+
+def test_incidents_filters_compose_and(tmp_path, capsys):
+    # --min-severity AND --serving-only together: only high-and-serving survives.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    rc = main(["incidents", "--store", str(store_path),
+               "--min-severity", "high", "--serving-only", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["high_serv"]
+
+
+def test_incidents_min_severity_drops_unknown_legacy(tmp_path, capsys):
+    # A legacy bare-count record (no severity) must NOT survive a severity floor —
+    # asking for a floor is asking to hide the un-triageable.
+    store_path = tmp_path / "baselines.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "seen_incidents": {"old": {"count": 4}}}),
+        encoding="utf-8",
+    )
+    assert main(["incidents", "--store", str(store_path), "--min-severity", "low", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+
+
+def test_incidents_no_filter_shows_everything(tmp_path, capsys):
+    # Sanity: without a filter all three remembered incidents are listed (no regression).
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["incidents"]) == 3
+
+
+def test_incidents_filter_empty_result_message(tmp_path, capsys):
+    # A floor above every remembered incident yields the "no match" message + count,
+    # NOT the "none remembered" message (memory is non-empty; the filter hid it).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("l1", severity="low", title="LOW", datasets=1)
+    s.record_incident("l2", severity="low", title="LOW", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--min-severity", "high"]) == 0
+    out = capsys.readouterr().out
+    assert "no incidents match the filter" in out and "2 remembered" in out
+    assert "no incidents remembered yet" not in out
+
+
+def test_incidents_filter_flags_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--min-severity", "high", "--serving-only"])
+    assert ns.min_severity == "high"
+    assert ns.serving_only is True
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.

@@ -160,9 +160,17 @@ inspectable, so an operator can see the open drift Ogle is tracking without re-w
 DataHub:
 
 ```bash
-ogle incidents          # what drift Ogle currently remembers, worst-severity first
-ogle incidents --json   # same, machine-readable
+ogle incidents                          # what drift Ogle currently remembers, worst-severity first
+ogle incidents --json                   # same, machine-readable
+ogle incidents --min-severity high      # triage: only high-severity incidents (drops unknown/legacy)
+ogle incidents --serving-only           # only incidents that touch a serving path
+ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ```
+
+The `--min-severity {low,medium,high}` and `--serving-only` filters mirror `check --fail-on`
+so a busy operator can focus on what pages first. When a filter empties a non-empty memory,
+Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
+tracked.
 
 Each line shows the incident's **severity**, a human **headline**, how many times it has
 **recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether

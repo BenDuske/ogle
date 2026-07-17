@@ -458,6 +458,26 @@ def _incident_sort_key(rec: dict) -> tuple:
     return (rank, int(rec.get("count", 0)), rec.get("fingerprint", ""))
 
 
+def _incident_passes(rec: dict, min_rank: Optional[int], serving_only: bool) -> bool:
+    """True if a remembered incident survives the `ogle incidents` triage filters.
+
+    `min_rank` is a `Severity.rank` floor (None = no floor). A record whose severity is
+    unknown/legacy ranks -1, so ANY `--min-severity` floor drops it — asking for a floor
+    is asking to hide the un-triageable. `serving_only` keeps only serving-path incidents.
+    Both filters are ANDed; passing neither keeps everything.
+    """
+    if serving_only and not rec.get("serving"):
+        return False
+    if min_rank is not None:
+        try:
+            rank = Severity(rec.get("severity")).rank
+        except (ValueError, TypeError):
+            rank = -1
+        if rank < min_rank:
+            return False
+    return True
+
+
 def _resolve_fingerprint(store: BaselineStore, needle: str) -> Tuple[Optional[str], List[str]]:
     """Look up a full fingerprint from a user-supplied token.
 
@@ -533,13 +553,24 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     until its drift resolves (its fingerprint stops recurring) or it is explicitly forgotten.
     """
     store = BaselineStore.load(Path(args.store))
-    records = sorted(store.incidents(), key=_incident_sort_key, reverse=True)
+    all_records = sorted(store.incidents(), key=_incident_sort_key, reverse=True)
+
+    # Triage filters (mirror `check --fail-on`): a floor on severity and/or serving-only.
+    min_rank = Severity(args.min_severity).rank if args.min_severity else None
+    serving_only = getattr(args, "serving_only", False)
+    filtered = getattr(args, "min_severity", None) is not None or serving_only
+    records = [r for r in all_records if _incident_passes(r, min_rank, serving_only)]
 
     if args.json:
         _emit(json.dumps({"incidents": records}, indent=2, sort_keys=True))
         return 0
     if not records:
-        _emit("_no incidents remembered yet._")
+        # Distinguish "memory is empty" from "filters hid everything" so the operator
+        # knows whether to widen the filter vs. that there's genuinely nothing tracked.
+        if filtered and all_records:
+            _emit(f"_no incidents match the filter ({len(all_records)} remembered)._")
+        else:
+            _emit("_no incidents remembered yet._")
         return 0
 
     _emit(f"**{len(records)} remembered incident(s):**")
@@ -731,6 +762,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     incidents.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    incidents.add_argument(
+        "--min-severity",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="Only show incidents at or above this severity (drops unknown/legacy severity).",
+    )
+    incidents.add_argument(
+        "--serving-only",
+        action="store_true",
+        help="Only show incidents that touch a serving path.",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)
