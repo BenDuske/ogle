@@ -1030,6 +1030,117 @@ def test_incidents_fail_on_registered_in_help():
     assert ns.fail_on == "high"
 
 
+# ---- `ogle incidents --sort` : pick the triage ordering axis --------------------------
+# Default stays worst-severity-first; --sort count/datasets re-orders the SAME set (and
+# redefines what --limit calls the "top N").
+
+def _seed_sortable_incidents(store_path):
+    # Deliberately anti-correlated axes so each --sort produces a DIFFERENT order:
+    #   low_recur   — low severity, seen 5×, 1 dataset   (wins on count)
+    #   high_narrow — high severity, seen 1×, 2 datasets (wins on severity)
+    #   med_broad   — medium severity, seen 2×, 9 datasets (wins on datasets)
+    s = BaselineStore(path=store_path)
+    for _ in range(5):
+        s.record_incident("low_recur", severity="low", title="LOW", datasets=1)
+    s.record_incident("high_narrow", severity="high", title="HIGH", datasets=2)
+    for _ in range(2):
+        s.record_incident("med_broad", severity="medium", title="MED", datasets=9)
+    s.save()
+
+
+def _incident_order(capsys):
+    return [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+
+
+def test_incidents_sort_default_is_severity(tmp_path, capsys):
+    # No --sort == worst-severity-first (unchanged behavior).
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--json"]) == 0
+    assert _incident_order(capsys) == ["high_narrow", "med_broad", "low_recur"]
+
+
+def test_incidents_sort_count_orders_most_recurring_first(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--sort", "count", "--json"]) == 0
+    # 5× beats 2× beats 1× regardless of severity.
+    assert _incident_order(capsys) == ["low_recur", "med_broad", "high_narrow"]
+
+
+def test_incidents_sort_datasets_orders_broadest_first(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)
+    assert (
+        main(["incidents", "--store", str(store_path), "--sort", "datasets", "--json"]) == 0
+    )
+    # 9 > 2 > 1 datasets regardless of severity/recurrence.
+    assert _incident_order(capsys) == ["med_broad", "high_narrow", "low_recur"]
+
+
+def test_incidents_sort_redefines_limit_top_n(tmp_path, capsys):
+    # --limit is "top N by the chosen sort": with --sort count the top 1 is the chronic
+    # one, NOT the highest-severity one.
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)
+    assert (
+        main(
+            ["incidents", "--store", str(store_path), "--sort", "count", "--limit", "1", "--json"]
+        )
+        == 0
+    )
+    assert _incident_order(capsys) == ["low_recur"]
+
+
+def test_incidents_sort_composes_with_filters(tmp_path, capsys):
+    # --sort orders only what the filters keep; a min-severity floor still drops the low one.
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)
+    assert (
+        main(
+            [
+                "incidents",
+                "--store",
+                str(store_path),
+                "--min-severity",
+                "medium",
+                "--sort",
+                "datasets",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    # low_recur filtered out; remaining two ordered by datasets.
+    assert _incident_order(capsys) == ["med_broad", "high_narrow"]
+
+
+def test_incidents_sort_tiebreak_is_stable_by_fingerprint(tmp_path, capsys):
+    # Two incidents identical on every sort axis fall back to fingerprint order (reverse=True
+    # ⇒ descending) so the list never reshuffles between runs.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("aaa", severity="high", title="A", datasets=1)
+    s.record_incident("bbb", severity="high", title="B", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--sort", "count", "--json"]) == 0
+    assert _incident_order(capsys) == ["bbb", "aaa"]
+
+
+def test_incidents_sort_rejects_unknown_axis(tmp_path):
+    # argparse choices guard: an unknown axis is a usage error (exit 2), not a silent default.
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["incidents", "--sort", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_incidents_sort_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--sort", "count"])
+    assert ns.sort == "count"
+    # default when omitted
+    assert build_parser().parse_args(["incidents"]).sort == "severity"
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.

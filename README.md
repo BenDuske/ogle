@@ -166,6 +166,8 @@ ogle incidents --min-severity high      # triage: only high-severity incidents (
 ogle incidents --serving-only           # only incidents that touch a serving path
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
+ogle incidents --sort count             # order by recurrence (most-recurring drift first)
+ogle incidents --sort datasets          # order by blast radius (most datasets first)
 ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
@@ -177,7 +179,14 @@ chronic drift that keeps recurring despite being "seen." When a filter empties a
 Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
 tracked.
 
-`--limit N` caps the list to the top N after that worst-first sort — a triage shortcut for
+`--sort {severity,count,datasets}` picks the ordering axis. The default `severity` is the
+triage order (worst first, recurrence as tiebreak); `count` surfaces the most-recurring
+(chronic/flapping) drift first; `datasets` surfaces the widest blast radius first. Every axis
+falls back to severity then fingerprint for a stable, deterministic order. It also redefines
+what `--limit` calls the "top N" (e.g. `--sort count --limit 3` = the three most-recurring),
+and is ignored by `--summary`/`--fail-on` (a rollup and a floor gate don't depend on order).
+
+`--limit N` caps the list to the top N after the chosen `--sort` — a triage shortcut for
 "just show me the N that matter most" on a store with a long tail. It composes with the filters
 (applied *after* them) and the header says `Top N of M` so a capped view never reads as the whole
 set. It's deliberately ignored by `--summary` (the rollup describes the whole filtered set — capping

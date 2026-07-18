@@ -453,14 +453,42 @@ def cmd_muted(args: argparse.Namespace) -> int:
 _INCIDENT_SEV_MARK = {"high": "\U0001f534", "medium": "\U0001f7e0", "low": "\U0001f7e1"}
 
 
+def _incident_severity_rank(rec: dict) -> int:
+    """A record's `Severity.rank`, with unknown/legacy severity sorting last (-1)."""
+    try:
+        return Severity(rec.get("severity")).rank
+    except (ValueError, TypeError):
+        return -1
+
+
 def _incident_sort_key(rec: dict) -> tuple:
     """Worst-severity-first, then most-recurred, then stable by fingerprint."""
-    sev = rec.get("severity")
-    try:
-        rank = Severity(sev).rank
-    except (ValueError, TypeError):
-        rank = -1  # unknown/legacy severity sorts last
-    return (rank, int(rec.get("count", 0)), rec.get("fingerprint", ""))
+    return (
+        _incident_severity_rank(rec),
+        int(rec.get("count", 0)),
+        rec.get("fingerprint", ""),
+    )
+
+
+# `ogle incidents --sort` orderings. Every key is applied with reverse=True, so each puts
+# the "most" of its primary axis first, then falls back to the other axes for a total,
+# deterministic order (fingerprint last so equal rows never reshuffle between runs).
+#   severity — worst severity first (default; the triage order), recurrence as tiebreak.
+#   count    — most-recurring first (the chronic/flapping drift), severity as tiebreak.
+#   datasets — broadest blast radius first (most datasets), severity as tiebreak.
+_INCIDENT_SORTS = {
+    "severity": _incident_sort_key,
+    "count": lambda r: (
+        int(r.get("count", 0)),
+        _incident_severity_rank(r),
+        r.get("fingerprint", ""),
+    ),
+    "datasets": lambda r: (
+        int(r.get("datasets", 0)),
+        _incident_severity_rank(r),
+        r.get("fingerprint", ""),
+    ),
+}
 
 
 def _incident_passes(
@@ -626,7 +654,11 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     until its drift resolves (its fingerprint stops recurring) or it is explicitly forgotten.
     """
     store = BaselineStore.load(Path(args.store))
-    all_records = sorted(store.incidents(), key=_incident_sort_key, reverse=True)
+    # `--sort` picks the ordering axis (default: worst-severity-first, the triage order).
+    # It shapes the list AND what `--limit` calls the "top N"; --summary/--fail-on ignore
+    # order (a rollup and a floor gate don't depend on it).
+    sort_key = _INCIDENT_SORTS[getattr(args, "sort", None) or "severity"]
+    all_records = sorted(store.incidents(), key=sort_key, reverse=True)
 
     # Triage filters (mirror `check --fail-on`): a floor on severity, recurrence, and/or
     # serving-only.
@@ -921,6 +953,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show incidents seen at least N times (surfaces chronic/flapping drift).",
     )
     incidents.add_argument(
+        "--sort",
+        choices=["severity", "count", "datasets"],
+        default="severity",
+        help="Ordering axis: severity (default, worst first), count (most-recurring "
+        "first), or datasets (broadest blast radius first). Also defines --limit's top N.",
+    )
+    incidents.add_argument(
         "--summary",
         action="store_true",
         help="Show an aggregate rollup (counts by severity, serving, recurring) instead of the list.",
@@ -930,7 +969,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="N",
         default=None,
-        help="Show only the top N incidents (worst severity/recurrence first). Ignored by --summary.",
+        help="Show only the top N incidents (by the chosen --sort). Ignored by --summary.",
     )
     incidents.add_argument(
         "--fail-on",
