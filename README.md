@@ -163,15 +163,25 @@ tracking?" without re-walking DataHub:
 ogle baselines                       # every tracked dataset: field count, row count, schema hash
 ogle baselines --json                # machine-readable (urn, fields, row_count, schema_hash)
 ogle baselines --grep serving        # find tracked datasets by URN keyword (case-insensitive)
+ogle baselines --sort fields         # widest-schema datasets first (highest blast radius)
+ogle baselines --sort rows           # highest-volume datasets first
 ogle baselines --urns                # plain URNs, one per line — a selector to pipe into a write-side command
 ogle baselines --grep staging --urns | xargs -n1 ogle mute   # mute a whole class of tracked datasets
 ```
 
+`--sort {urn,fields,rows}` picks the ordering axis. The default `urn` is alphabetical (the
+stable order for scripting); `fields` and `rows` surface the **highest-blast-radius** watched
+datasets first — the widest schemas and highest-volume tables, where a silent schema or volume
+shift does the most damage. Ties break on URN ascending (deterministic run to run), and a
+baseline with no signature or unknown row count sinks last. `--sort` is honored by `--urns` and
+`--json` too, so `ogle baselines --sort rows --urns | head -5` is "the five biggest tables I'm
+watching."
+
 `--urns` mirrors `incidents --fingerprints`: it turns the read-side watch-list into a selector
-for the write side (`ogle mute`, or feeding `ogle check --models`). It honors `--grep`, overrides
-`--json`, and stays **silent on an empty set** so a pipe gets a clean stream. An all-whitespace
-`--grep "   "` matches nothing (a slip, not a wildcard), and a filter that hides everything says
-so (`no baselines match the filter`) rather than reading as an empty store.
+for the write side (`ogle mute`, or feeding `ogle check --models`). It honors `--grep`/`--sort`,
+overrides `--json`, and stays **silent on an empty set** so a pipe gets a clean stream. An
+all-whitespace `--grep "   "` matches nothing (a slip, not a wildcard), and a filter that hides
+everything says so (`no baselines match the filter`) rather than reading as an empty store.
 
 ### Inspecting what Ogle remembers (`ogle incidents`)
 

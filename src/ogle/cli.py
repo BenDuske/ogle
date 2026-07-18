@@ -448,6 +448,20 @@ def cmd_muted(args: argparse.Namespace) -> int:
     return 0
 
 
+def _baseline_field_count(store: "BaselineStore", urn: str) -> int:
+    """Schema-field count for a baseline, or -1 if it has no signature (sorts last)."""
+    sig = store.get_baseline(urn)
+    return len(sig.schema_fields) if sig else -1
+
+
+def _baseline_row_count(store: "BaselineStore", urn: str) -> int:
+    """Row count for a baseline, or -1 when unknown/missing (sorts last)."""
+    sig = store.get_baseline(urn)
+    if sig and sig.row_count is not None:
+        return sig.row_count
+    return -1
+
+
 def cmd_baselines(args: argparse.Namespace) -> int:
     """List the datasets Ogle has a baseline signature for — the *other* half of the store.
 
@@ -470,7 +484,20 @@ def cmd_baselines(args: argparse.Namespace) -> int:
         low = needle.strip().lower()
         urns = [u for u in all_urns if low and low in u.lower()]
     else:
-        urns = all_urns
+        urns = list(all_urns)
+
+    # `--sort` picks the ordering axis (default `urn` = the alphabetical order the store
+    # already returns; the stable baseline for scripting). `fields`/`rows` put the
+    # highest-blast-radius datasets first — the widest schemas and highest-volume tables,
+    # where silent drift matters most — with URN ascending as the deterministic tiebreak
+    # (negate the metric so it descends while the URN stays ascending). A baseline with no
+    # signature or unknown row_count sorts last (-1), mirroring how `incidents --sort` sinks
+    # unknown severity. Applied here so --urns/--json/human views all share one order.
+    sort_axis = getattr(args, "sort", None) or "urn"
+    if sort_axis == "fields":
+        urns = sorted(urns, key=lambda u: (-_baseline_field_count(store, u), u))
+    elif sort_axis == "rows":
+        urns = sorted(urns, key=lambda u: (-_baseline_row_count(store, u), u))
 
     # `--urns`: plain machine output — just each URN, one per line, honoring --grep. Turns
     # the watch-list into a selector for a write-side command (`mute`/`check --models`).
@@ -1096,6 +1123,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         default=None,
         help="Only show datasets whose URN contains TEXT (case-insensitive).",
+    )
+    baselines.add_argument(
+        "--sort",
+        choices=["urn", "fields", "rows"],
+        default="urn",
+        help="Ordering axis: urn (default, alphabetical), fields (widest schema first), "
+        "or rows (highest volume first) — surface the highest-blast-radius watched datasets. "
+        "Honored by --urns/--json too.",
     )
     baselines.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     baselines.add_argument(

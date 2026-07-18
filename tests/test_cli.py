@@ -664,6 +664,104 @@ def test_baselines_urns_empty_is_silent(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == ""  # a pipe gets a clean empty stream
 
 
+# ---- `ogle baselines --sort`: order the watch-list by blast radius --------------
+# Three datasets whose alphabetical, field-count, and row-count orders all differ, so a
+# sort that no-ops (or sorts on the wrong axis) can't accidentally pass.
+_A_URN = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.a_alpha,PROD)"    # 1 field, 5000 rows
+_M_URN = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.m_mid,PROD)"      # 3 fields, 10 rows
+_Z_URN = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.z_zed,PROD)"      # 2 fields, 999 rows
+
+
+def _seed_sortable(store_path):
+    """A store whose URN/fields/rows orderings are all distinct (see per-axis expectations)."""
+    BaselineStore(
+        path=store_path,
+        baselines={
+            _A_URN: _sig(urn=_A_URN, schema_fields=[("id", "int")], row_count=5000),
+            _M_URN: _sig(
+                urn=_M_URN,
+                schema_fields=[("a", "int"), ("b", "int"), ("c", "int")],
+                row_count=10,
+            ),
+            _Z_URN: _sig(
+                urn=_Z_URN, schema_fields=[("x", "int"), ("y", "int")], row_count=999
+            ),
+        },
+    ).save()
+
+
+def test_baselines_sort_default_is_alphabetical(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_sortable(store)
+    rc = main(["baselines", "--store", str(store), "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_A_URN, _M_URN, _Z_URN]  # a < m < z
+
+
+def test_baselines_sort_fields_widest_first(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_sortable(store)
+    rc = main(["baselines", "--store", str(store), "--sort", "fields", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_M_URN, _Z_URN, _A_URN]  # 3 > 2 > 1 fields
+
+
+def test_baselines_sort_rows_highest_first(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_sortable(store)
+    rc = main(["baselines", "--store", str(store), "--sort", "rows", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_A_URN, _Z_URN, _M_URN]  # 5000 > 999 > 10 rows
+
+
+def test_baselines_sort_composes_with_grep(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_sortable(store)
+    # --grep keeps a_alpha + m_mid (both contain "_"), --sort fields reorders the survivors.
+    rc = main(
+        ["baselines", "--store", str(store), "--grep", "b2fd91", "--sort", "rows", "--urns"]
+    )
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_A_URN, _Z_URN, _M_URN]  # all match; ordered by rows desc
+
+
+def test_baselines_sort_tiebreak_is_urn_ascending(tmp_path, capsys):
+    """Equal metric → URN ascending, so the order is deterministic run to run."""
+    store = tmp_path / "baselines.json"
+    # Two datasets, identical field count (1), different URNs.
+    BaselineStore(
+        path=store,
+        baselines={
+            _Z_URN: _sig(urn=_Z_URN, schema_fields=[("x", "int")], row_count=1),
+            _A_URN: _sig(urn=_A_URN, schema_fields=[("id", "int")], row_count=1),
+        },
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--sort", "fields", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_A_URN, _Z_URN]  # tie on fields -> URN ascending
+
+
+def test_baselines_sort_rows_sinks_unknown_rowcount_last(tmp_path, capsys):
+    """A baseline with no row_count (None) sorts LAST under --sort rows, not first."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            _A_URN: _sig(urn=_A_URN, schema_fields=[("id", "int")], row_count=None),
+            _Z_URN: _sig(urn=_Z_URN, schema_fields=[("x", "int")], row_count=5),
+        },
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--sort", "rows", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN, _A_URN]  # 5 rows first, unknown (None) last
+
+
 # ---- `ogle incidents`: the cross-run incident-memory view -------------------------
 def test_incidents_empty_store_reports_none(tmp_path, capsys):
     store = tmp_path / "baselines.json"  # never created
