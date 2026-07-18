@@ -552,6 +552,118 @@ def test_check_purges_lapsed_snooze_and_pages(tmp_path, capsys):
     assert BaselineStore.load(store_path).muted() == []
 
 
+# ---- `ogle baselines`: the watch-list view (the other half of the store) ----------
+def _seed_baselines(store_path):
+    """A store with two tracked datasets (customers: 2 fields/1000 rows, orders: 1/0)."""
+    s = BaselineStore(
+        path=store_path,
+        baselines={
+            CUSTOMERS_URN: _sig(row_count=1000),  # 2 fields (id, email)
+            ORDERS_URN: _sig(
+                urn=ORDERS_URN, schema_fields=[("oid", "int")], row_count=0
+            ),
+        },
+    )
+    s.save()
+    return s
+
+
+def test_baselines_lists_tracked_datasets(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2 tracked dataset(s)" in out
+    assert CUSTOMERS_URN in out and ORDERS_URN in out
+    assert "2 field(s)" in out and "1000 rows" in out
+
+
+def test_baselines_empty_reports_none(tmp_path, capsys):
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["baselines", "--store", str(store)])
+    assert rc == 0
+    assert "no baselines yet" in capsys.readouterr().out.lower()
+
+
+def test_baselines_json_shape(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    seeded = _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_urn = {e["urn"]: e for e in payload["baselines"]}
+    assert by_urn[CUSTOMERS_URN]["fields"] == 2
+    assert by_urn[CUSTOMERS_URN]["row_count"] == 1000
+    # schema_hash is the real denormalized hash, not a placeholder.
+    assert by_urn[CUSTOMERS_URN]["schema_hash"] == seeded.get_baseline(
+        CUSTOMERS_URN
+    ).schema_hash
+    assert by_urn[ORDERS_URN]["row_count"] == 0
+
+
+def test_baselines_grep_filters_by_urn(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--grep", "orders"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ORDERS_URN in out and CUSTOMERS_URN not in out
+
+
+def test_baselines_grep_is_case_insensitive(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--grep", "ORDERS", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [e["urn"] for e in payload["baselines"]] == [ORDERS_URN]
+
+
+def test_baselines_grep_no_match_distinguishes_from_empty(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--grep", "nonesuch"])
+    assert rc == 0
+    assert "no baselines match the filter" in capsys.readouterr().out.lower()
+
+
+def test_baselines_grep_all_whitespace_matches_nothing(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    # A fat-fingered `--grep "   "` is a slip, not a wildcard — matches nothing.
+    rc = main(["baselines", "--store", str(store), "--grep", "   ", "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["baselines"] == []
+
+
+def test_baselines_urns_prints_plain_list_for_piping(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # Plain URNs only (sorted), no markdown/prose — a clean selector stream.
+    assert lines == sorted([CUSTOMERS_URN, ORDERS_URN])
+
+
+def test_baselines_urns_honors_grep_and_overrides_json(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["baselines", "--store", str(store), "--grep", "orders", "--urns", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.strip() == ORDERS_URN  # --urns wins over --json; --grep applied
+    assert "{" not in out  # not JSON
+
+
+def test_baselines_urns_empty_is_silent(tmp_path, capsys):
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["baselines", "--store", str(store), "--urns"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == ""  # a pipe gets a clean empty stream
+
+
 # ---- `ogle incidents`: the cross-run incident-memory view -------------------------
 def test_incidents_empty_store_reports_none(tmp_path, capsys):
     store = tmp_path / "baselines.json"  # never created

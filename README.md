@@ -152,6 +152,27 @@ it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urn
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
 false positives) as a first-class operator control.
 
+### Inspecting the watch-list (`ogle baselines`)
+
+The store has two halves. `ogle incidents` shows the drift Ogle *remembers*; `ogle baselines`
+shows what it's *watching* — every dataset it has captured a signature for and will diff the
+next walk against. It answers "is this dataset actually under Ogle's eye?" and "how many am I
+tracking?" without re-walking DataHub:
+
+```bash
+ogle baselines                       # every tracked dataset: field count, row count, schema hash
+ogle baselines --json                # machine-readable (urn, fields, row_count, schema_hash)
+ogle baselines --grep serving        # find tracked datasets by URN keyword (case-insensitive)
+ogle baselines --urns                # plain URNs, one per line — a selector to pipe into a write-side command
+ogle baselines --grep staging --urns | xargs -n1 ogle mute   # mute a whole class of tracked datasets
+```
+
+`--urns` mirrors `incidents --fingerprints`: it turns the read-side watch-list into a selector
+for the write side (`ogle mute`, or feeding `ogle check --models`). It honors `--grep`, overrides
+`--json`, and stays **silent on an empty set** so a pipe gets a clean stream. An all-whitespace
+`--grep "   "` matches nothing (a slip, not a wildcard), and a filter that hides everything says
+so (`no baselines match the filter`) rather than reading as an empty store.
+
 ### Inspecting what Ogle remembers (`ogle incidents`)
 
 Ogle keeps a cross-run memory of every incident it has seen — that's what lets it page

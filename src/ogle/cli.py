@@ -448,6 +448,74 @@ def cmd_muted(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_baselines(args: argparse.Namespace) -> int:
+    """List the datasets Ogle has a baseline signature for — the *other* half of the store.
+
+    Read-only. Where `ogle incidents` shows remembered drift, this shows what Ogle is
+    *watching*: every dataset it has captured a signature for, with the schema shape it will
+    diff the next walk against. Lets an operator answer "is this dataset actually under
+    Ogle's eye?" and "how many am I tracking?" without re-walking DataHub. `--urns` prints
+    just the URNs (one per line) so the watch-list can feed a write-side command, e.g.
+    `ogle baselines --grep serving --urns | xargs -n1 ogle mute`.
+    """
+    store = BaselineStore.load(Path(args.store))
+    all_urns = store.urns()  # already sorted for stable output
+
+    # `--grep`: substring match on the URN (case-insensitive), mirroring `incidents --grep`.
+    # An all-whitespace needle matches NOTHING (a fat-fingered `--grep ""` is a slip, not a
+    # wildcard), same as the incidents view.
+    needle = getattr(args, "grep", None)
+    filtered = needle is not None
+    if needle is not None:
+        low = needle.strip().lower()
+        urns = [u for u in all_urns if low and low in u.lower()]
+    else:
+        urns = all_urns
+
+    # `--urns`: plain machine output — just each URN, one per line, honoring --grep. Turns
+    # the watch-list into a selector for a write-side command (`mute`/`check --models`).
+    # Overrides --json (this IS the scriptable form) and stays SILENT on an empty set so a
+    # pipe gets a clean stream rather than a prose "no baselines" line.
+    if getattr(args, "urns", False):
+        for u in urns:
+            _emit(u)
+        return 0
+
+    if args.json:
+        entries = []
+        for u in urns:
+            sig = store.get_baseline(u)
+            entries.append(
+                {
+                    "urn": u,
+                    "fields": len(sig.schema_fields) if sig else 0,
+                    "row_count": sig.row_count if sig else None,
+                    "schema_hash": sig.schema_hash if sig else None,
+                }
+            )
+        _emit(json.dumps({"baselines": entries}, indent=2, sort_keys=True))
+        return 0
+
+    if not urns:
+        # Distinguish "nothing tracked" from "filter hid everything" so the operator knows
+        # whether to widen --grep vs. that Ogle has no baselines at all (mirrors incidents).
+        if filtered and all_urns:
+            _emit(f"_no baselines match the filter ({len(all_urns)} tracked)._")
+        else:
+            _emit("_no baselines yet — run `ogle check` to capture some._")
+        return 0
+
+    _emit(f"**{len(urns)} tracked dataset(s):**")
+    for u in urns:
+        sig = store.get_baseline(u)
+        nf = len(sig.schema_fields) if sig else 0
+        rc = sig.row_count if sig else None
+        rpart = f" · {rc} rows" if rc is not None else ""
+        hpart = f"  `{sig.schema_hash[:12]}`" if sig else ""
+        _emit(f"- `{u}` — {nf} field(s){rpart}{hpart}")
+    return 0
+
+
 # Severity marks for the incident-memory view, keyed by the string the store persists
 # (the store stays decoupled from the scorer's Severity enum, so the CLI maps here).
 _INCIDENT_SEV_MARK = {"high": "\U0001f534", "medium": "\U0001f7e0", "low": "\U0001f7e1"}
@@ -1012,6 +1080,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     muted.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     muted.set_defaults(func=cmd_muted)
+
+    # `ogle baselines` — inspect the OTHER half of the store (read-only): the datasets Ogle
+    # has a signature for and will diff the next walk against. `incidents` shows remembered
+    # drift; this shows what's under watch.
+    baselines = sub.add_parser(
+        "baselines",
+        help="List datasets Ogle has a baseline signature for (what it's watching).",
+    )
+    baselines.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    baselines.add_argument(
+        "--grep",
+        metavar="TEXT",
+        default=None,
+        help="Only show datasets whose URN contains TEXT (case-insensitive).",
+    )
+    baselines.add_argument("--json", action="store_true", help="Emit the list as JSON.")
+    baselines.add_argument(
+        "--urns",
+        action="store_true",
+        help="Print ONLY the URNs (one per line), honoring --grep — pipe into a write-side "
+        "command, e.g. `ogle baselines --grep serving --urns | xargs -n1 ogle mute`. "
+        "Overrides --json.",
+    )
+    baselines.set_defaults(func=cmd_baselines)
 
     # `ogle incidents` — inspect Ogle's cross-run incident memory (read-only): what drift
     # it's tracking, recurrence counts, serving impact. The visible side of the same
