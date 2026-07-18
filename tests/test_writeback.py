@@ -20,6 +20,7 @@ from ogle.writeback import (
     WritebackResult,
     apply,
     plan_writeback,
+    severity_tag_urn,
 )
 
 # ---- URNs (Task #2 shape) -------------------------------------------------------------
@@ -148,6 +149,78 @@ def test_plan_to_dict_shape():
     assert "actions" in dumped
     assert len(dumped["actions"]) == 2
     assert dumped["actions"][0]["entity_urn"] == DS_CUSTOMERS
+
+
+# =======================================================================================
+# severity write-back tags (--write-back-severity)
+# =======================================================================================
+
+
+def test_severity_tag_urn_helper():
+    assert severity_tag_urn(Severity.HIGH) == "urn:li:tag:ogle-drift-high"
+    assert severity_tag_urn(Severity.MEDIUM) == "urn:li:tag:ogle-drift-medium"
+    assert severity_tag_urn(Severity.LOW) == "urn:li:tag:ogle-drift-low"
+    # Accepts a raw string value + degrades on empty rather than raising.
+    assert severity_tag_urn("high") == "urn:li:tag:ogle-drift-high"
+    assert severity_tag_urn("") == "urn:li:tag:ogle-drift-unknown"
+
+
+def test_severity_off_by_default_only_flat_tag():
+    """No --write-back-severity -> the flat tag is the ONLY tag (behavior unchanged)."""
+    plan = plan_writeback([_finding(DS_CUSTOMERS, severity=Severity.HIGH)])
+    assert {a.tag_urn for a in plan.actions} == {OGLE_DRIFT_TAG}
+
+
+def test_severity_stamps_flat_plus_severity_tag_on_dataset():
+    plan = plan_writeback(
+        [_finding(DS_CUSTOMERS, severity=Severity.HIGH)], severity_tags=True
+    )
+    tags = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert tags == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-drift-high"}
+
+
+def test_severity_flat_tag_leads_for_an_entity():
+    """The coarse flat tag is emitted before the severity tag for a given dataset."""
+    plan = plan_writeback(
+        [_finding(DS_CUSTOMERS, severity=Severity.LOW)], severity_tags=True
+    )
+    ds_actions = [a for a in plan.actions if a.entity_urn == DS_CUSTOMERS]
+    assert [a.tag_urn for a in ds_actions] == [OGLE_DRIFT_TAG, "urn:li:tag:ogle-drift-low"]
+
+
+def test_severity_dataset_uses_worst_of_its_findings():
+    """customers has a LOW volume finding + a HIGH schema finding -> HIGH severity tag."""
+    findings = [
+        _finding(DS_CUSTOMERS, kind=DriftKind.VOLUME, severity=Severity.LOW),
+        _finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA, severity=Severity.HIGH),
+    ]
+    plan = plan_writeback(findings, severity_tags=True)
+    sev_tags = {
+        a.tag_urn for a in plan.actions if a.tag_urn.startswith("urn:li:tag:ogle-drift-")
+    } - {OGLE_DRIFT_TAG}
+    assert sev_tags == {"urn:li:tag:ogle-drift-high"}
+
+
+def test_severity_model_inherits_worst_upstream_severity():
+    """churn is fed by a MEDIUM dataset + a HIGH dataset -> churn gets the HIGH tag."""
+    findings = [
+        _finding(DS_CUSTOMERS, severity=Severity.MEDIUM),
+        _finding(DS_ORDERS, severity=Severity.HIGH),
+    ]
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN]})
+    plan = plan_writeback(findings, walk, severity_tags=True)
+    model_tags = {a.tag_urn for a in plan.actions if a.entity_urn == MODEL_CHURN}
+    assert model_tags == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-drift-high"}
+
+
+def test_severity_tags_apply_end_to_end():
+    """A severity-tagged plan lands both tags on the dataset via the fake backend."""
+    plan = plan_writeback(
+        [_finding(DS_CUSTOMERS, severity=Severity.HIGH)], severity_tags=True
+    )
+    backend = FakeWritebackBackend()
+    apply(plan, backend)
+    assert backend.tags[DS_CUSTOMERS] == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-drift-high"}
 
 
 # =======================================================================================

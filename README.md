@@ -211,6 +211,26 @@ Ambiguous prefixes fail loud (exit 2) with the list of candidates so the operato
 with more characters — Ogle never guesses which incident to drop. Unknown/already-forgotten
 tokens report `_not remembered_` but aren't an error (exit 0), so replaying a list is safe.
 
+### Writing findings back into DataHub (`--write-back`)
+
+On a **new** incident, `ogle check --write-back` stamps every drifted dataset and its
+downstream `mlModel`s with `urn:li:tag:ogle-drift-flagged` in DataHub, so the next person
+or agent browsing the graph inherits the finding without re-running Ogle. It only writes
+when *this* run fires a new incident (not on every tick), the merge is idempotent (a tag
+already present is skipped), and it requires a live walk (`--gms`).
+
+```bash
+ogle check --gms http://localhost:8080 --discover --store live.json --write-back
+ogle check --gms http://localhost:8080 --discover --store live.json --write-back --write-back-severity
+```
+
+`--write-back-severity` adds a **per-severity** tag (`ogle-drift-high` / `-medium` / `-low`)
+alongside the flat one, so an operator can filter DataHub straight to the worst drift. A
+dataset's severity tag is the worst of its own findings; a **model inherits the worst
+severity of the drifted datasets feeding it** — the finding that would page you is the one
+that colours the model. The flat tag is always stamped too, so coarse "everything Ogle
+flagged" grouping keeps working.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

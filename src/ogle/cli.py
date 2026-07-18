@@ -117,12 +117,12 @@ def _walk_live(gms: str, models: Sequence[str], discover: bool):
     return result.signatures, sorted(result.serving_dataset_urns), result
 
 
-def _do_writeback(findings, walk_result, gms: str):
+def _do_writeback(findings, walk_result, gms: str, severity_tags: bool = False):
     """Live tag write-back. Imported lazily like the walker."""
     from .writeback import DataHubWritebackBackend, apply, plan_writeback
 
     backend = DataHubWritebackBackend(gms_server=gms)
-    plan = plan_writeback(findings, walk_result)
+    plan = plan_writeback(findings, walk_result, severity_tags=severity_tags)
     return plan, apply(plan, backend)
 
 
@@ -255,7 +255,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             return 2
         else:
             try:
-                plan, wb_result = _do_writeback(report.findings, walk_result, args.gms)
+                plan, wb_result = _do_writeback(
+                    report.findings,
+                    walk_result,
+                    args.gms,
+                    severity_tags=getattr(args, "write_back_severity", False),
+                )
             except Exception as exc:
                 print(f"ogle check: write-back failed: {exc}", file=sys.stderr)
                 # Alert still fires — the check itself succeeded; the write-back is an
@@ -751,6 +756,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "On a new incident (exit 1), stamp affected datasets and their downstream "
             "mlModels with `urn:li:tag:ogle-drift-flagged` in DataHub. Requires --gms."
+        ),
+    )
+    check.add_argument(
+        "--write-back-severity",
+        action="store_true",
+        help=(
+            "With --write-back, ALSO stamp a per-severity tag "
+            "(`urn:li:tag:ogle-drift-high|medium|low`) so DataHub can be filtered to the "
+            "worst drift. A model inherits the worst severity of the datasets feeding it."
         ),
     )
     check.add_argument(

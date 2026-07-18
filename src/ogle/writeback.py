@@ -46,6 +46,25 @@ from .walker import WalkResult
 #: two ticks doesn't produce two different tag entities.
 OGLE_DRIFT_TAG = "urn:li:tag:ogle-drift-flagged"
 
+#: Prefix for the optional per-severity tag (`--write-back-severity`). Stamped ALONGSIDE
+#: the flat tag so a DataHub operator can filter to `ogle-drift-high` in the UI without
+#: losing the coarse `ogle-drift-flagged` grouping. Stable string -> one tag entity per
+#: severity across runs and hosts.
+OGLE_SEVERITY_TAG_PREFIX = "urn:li:tag:ogle-drift-"
+
+
+def severity_tag_urn(severity: Any) -> str:
+    """`urn:li:tag:ogle-drift-<severity>` for a `Severity` (or its string value).
+
+    Accepts the enum or a raw `"high"`/`"medium"`/`"low"` so callers don't have to
+    import `Severity`. An empty/unknown severity yields `...ogle-drift-unknown` rather
+    than raising — a write-back should degrade to a still-useful tag, never crash a
+    scheduler tick.
+    """
+    value = getattr(severity, "value", severity)
+    value = str(value).strip().lower() or "unknown"
+    return f"{OGLE_SEVERITY_TAG_PREFIX}{value}"
+
 
 # ---------------------------------------------------------------------------------------
 # Pure plan + apply
@@ -125,6 +144,7 @@ def plan_writeback(
     findings: Sequence[DriftFinding],
     walk_result: Optional[WalkResult] = None,
     tag_urn: str = OGLE_DRIFT_TAG,
+    severity_tags: bool = False,
 ) -> WritebackPlan:
     """Decide which entities to tag from a batch of drift findings.
 
@@ -135,6 +155,12 @@ def plan_writeback(
 
     Duplicates across findings collapse to a single action per (entity, tag) pair. If
     `walk_result` is None (or doesn't cover a URN), only the dataset itself is tagged.
+
+    When ``severity_tags`` is set, each entity ALSO receives a per-severity tag
+    (`urn:li:tag:ogle-drift-high`, etc.) alongside the flat tag, so an operator can
+    filter DataHub to the worst drift. A dataset's severity tag is the WORST severity
+    among its own findings; a model's is the worst among the drifted datasets feeding
+    it — the finding that would page you is the one that should colour the model.
     """
     if not findings:
         return WritebackPlan()
@@ -146,17 +172,36 @@ def plan_writeback(
     actions: List[TagAction] = []
     seen: Set[str] = set()  # (entity_urn, tag_urn) — collapse duplicates.
 
-    def _push(entity_urn: str, reason: str) -> None:
-        key = f"{entity_urn}\x1e{tag_urn}"
+    def _push(entity_urn: str, tag: str, reason: str) -> None:
+        key = f"{entity_urn}\x1e{tag}"
         if key in seen:
             return
         seen.add(key)
-        actions.append(TagAction(entity_urn=entity_urn, tag_urn=tag_urn, reason=reason))
+        actions.append(TagAction(entity_urn=entity_urn, tag_urn=tag, reason=reason))
+
+    # Worst severity per drifted dataset (a dataset can carry several findings — the one
+    # that pages is the max). Used both for the dataset's own severity tag and to colour
+    # its downstream models.
+    worst_by_ds: Dict[str, DriftFinding] = {}
+    for f in findings:
+        cur = worst_by_ds.get(f.urn)
+        if cur is None or f.severity.rank > cur.severity.rank:
+            worst_by_ds[f.urn] = f
 
     # Emit dataset actions in findings order, then model actions after — deterministic
     # ordering makes the CLI report + tests stable.
     for f in findings:
-        _push(f.urn, reason=f"drift: {f.kind.value} {f.severity.value}")
+        _push(f.urn, tag_urn, reason=f"drift: {f.kind.value} {f.severity.value}")
+    if severity_tags:
+        # One severity tag per dataset (its worst), emitted after the flat pass so the
+        # flat tag always leads for a given entity.
+        for f in findings:
+            worst = worst_by_ds[f.urn]
+            _push(
+                f.urn,
+                severity_tag_urn(worst.severity),
+                reason=f"severity: {worst.severity.value}",
+            )
 
     # De-dup drifted dataset URNs while preserving first-seen order.
     seen_ds: Set[str] = set()
@@ -169,7 +214,25 @@ def plan_writeback(
 
     for ds_urn in ordered_datasets:
         for model_urn in dataset_to_models.get(ds_urn, ()):
-            _push(model_urn, reason=f"downstream of drifted {ds_urn}")
+            _push(model_urn, tag_urn, reason=f"downstream of drifted {ds_urn}")
+
+    if severity_tags:
+        # A model inherits the worst severity across every drifted dataset feeding it.
+        model_worst: Dict[str, DriftFinding] = {}
+        for ds_urn in ordered_datasets:
+            worst = worst_by_ds[ds_urn]
+            for model_urn in dataset_to_models.get(ds_urn, ()):
+                cur = model_worst.get(model_urn)
+                if cur is None or worst.severity.rank > cur.severity.rank:
+                    model_worst[model_urn] = worst
+        for ds_urn in ordered_datasets:
+            for model_urn in dataset_to_models.get(ds_urn, ()):
+                worst = model_worst[model_urn]
+                _push(
+                    model_urn,
+                    severity_tag_urn(worst.severity),
+                    reason=f"downstream severity: {worst.severity.value}",
+                )
 
     return WritebackPlan(actions=actions)
 
