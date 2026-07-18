@@ -2036,7 +2036,59 @@ def test_status_json_counts_unknown_rows(tmp_path, capsys):
     assert b["watching"] == 1 and b["rows"] == 0 and b["unknown_rows"] == 1
 
 
+def test_status_fail_on_trips_exit_1_at_or_above_floor(tmp_path, capsys):
+    # A remembered incident at/above the --fail-on floor turns the rollup into a failing
+    # health gate (exit 1) AND still prints the snapshot + a reason line.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "incidents remembered: 1" in out  # snapshot still rendered
+    assert "--fail-on high" in out and "exit 1" in out
+
+
+def test_status_fail_on_below_floor_stays_exit_0(tmp_path, capsys):
+    # Only drift AT/ABOVE the floor should fail; a lone low incident under a high floor is 0.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("lo", severity="low", title="L", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high"])
+    assert rc == 0
+    assert "exit 1" not in capsys.readouterr().out
+
+
+def test_status_fail_on_gates_json_without_printing_note(tmp_path, capsys):
+    # --json returns the SAME exit code (so a scheduled JSON consumer gets the verdict) but
+    # stays pure JSON — the human reason line must not leak into the payload.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "medium", "--json"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "exit 1" not in out  # no prose in the JSON path
+    assert json.loads(out)["status"]["incidents"]["total"] == 1
+
+
+def test_status_without_fail_on_stays_exit_0_with_high_drift(tmp_path, capsys):
+    # Default (no --fail-on): even a HIGH remembered incident leaves status at exit 0 — the
+    # snapshot must never page unless a floor is explicitly requested.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "exit 1" not in capsys.readouterr().out
+
+
 def test_status_registered_in_help():
     ns = build_parser().parse_args(["status"])
     assert ns.func.__name__ == "cmd_status"
     assert ns.json is False
+    assert ns.fail_on is None

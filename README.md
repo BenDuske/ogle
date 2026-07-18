@@ -160,8 +160,9 @@ operator — or a scheduled wrapper — can answer "what is Ogle holding right n
 read, without re-walking DataHub:
 
 ```bash
-ogle status          # watch-list size + field/row totals, incident memory by severity, active mutes
-ogle status --json   # same snapshot, machine-readable (baselines/incidents/muted rollup)
+ogle status                    # watch-list size + field/row totals, incident memory by severity, active mutes
+ogle status --json             # same snapshot, machine-readable (baselines/incidents/muted rollup)
+ogle status --fail-on high     # exit 1 if any remembered incident is high+ (CI/cron health gate)
 ```
 
 The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
@@ -171,6 +172,13 @@ total sightings**, and **muted** (active snoozes only — expired ones are exclu
 and serving counts reuse the same rollup as `incidents --summary`, so the two always agree on the
 same store. An untouched store reports `is empty — run ogle check to start watching` rather than a
 wall of zeros.
+
+`--fail-on {low,medium,high}` turns the rollup into a CI/scheduled **health gate**: `ogle status`
+exits `1` when any remembered incident sits at or above the floor (and prints why), so a nightly
+job that already runs `status` for the snapshot can page off the same call — no second command.
+Unlike `incidents --fail-on`, it gates on the *whole* store (`status` has no filters), and it stays
+`0` by default so the plain snapshot never pages unless a floor is asked for. Mirrors the exit-code
+contract of `check --fail-on` / `incidents --fail-on`.
 
 ### Inspecting the watch-list (`ogle baselines`)
 

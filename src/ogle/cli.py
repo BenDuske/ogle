@@ -1021,8 +1021,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     """
     store = BaselineStore.load(Path(args.store))
     totals = _baseline_totals(store)
-    inc = _incident_summary(store.incidents())
+    incident_records = store.incidents()
+    inc = _incident_summary(incident_records)
     muted = store.muted(time.time())  # active snoozes only (expired excluded)
+
+    # CI/scheduled health gate. Turns the whole-store rollup into an exit-code check so a
+    # cron/CI wrapper that runs `ogle status` to answer "what is Ogle holding right now?" can
+    # also PAGE on it. Evaluated against every remembered incident (status has no filters), so
+    # it fails while any drift at/above the floor is still un-resolved — the same drift-memory
+    # semantics as `incidents --fail-on`, just over the unfiltered set. 0 when --fail-on is
+    # unset, so the default snapshot stays exit 0. Independent of --json / the empty-store path.
+    gate_rc = (
+        1 if _incidents_gate_fail(incident_records, getattr(args, "fail_on", None)) else 0
+    )
 
     if args.json:
         _emit(
@@ -1039,13 +1050,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
-        return 0
+        return gate_rc
 
     # Nothing captured, nothing remembered, nothing muted → first-run / empty store. Say so
     # plainly rather than printing a wall of zeros that reads like a populated-but-quiet store.
+    # (gate_rc is necessarily 0 here — an empty store holds no incident to trip the floor.)
     if totals["watching"] == 0 and inc["total"] == 0 and not muted:
         _emit(f"_store `{args.store}` is empty — run `ogle check` to start watching._")
-        return 0
+        return gate_rc
 
     sev = inc["by_severity"]
     _emit(f"**Ogle store status — `{args.store}`**")
@@ -1065,7 +1077,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"total sightings: {inc['total_sightings']}"
     )
     _emit(f"- 🔇 muted: {len(muted)} active")
-    return 0
+    if gate_rc:
+        _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
+    return gate_rc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1254,6 +1268,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
     )
     status.add_argument("--json", action="store_true", help="Emit the snapshot as JSON.")
+    status.add_argument(
+        "--fail-on",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="Exit 1 if any remembered incident is at/above this severity (CI/scheduled "
+        "whole-store health gate). Gates on every remembered incident; independent of --json.",
+    )
     status.set_defaults(func=cmd_status)
 
     # `ogle baselines` — inspect the OTHER half of the store (read-only): the datasets Ogle
