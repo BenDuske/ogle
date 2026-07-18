@@ -255,6 +255,16 @@ Ambiguous prefixes fail loud (exit 2) with the list of candidates so the operato
 with more characters — Ogle never guesses which incident to drop. Unknown/already-forgotten
 tokens report `_not remembered_` but aren't an error (exit 0), so replaying a list is safe.
 
+`--dry-run` **previews** exactly what a resolve would drop without touching the store —
+each hit prints the full fingerprint it would retire (a prefix resolves to its full id, so
+the preview is exact), while misses and ambiguity behave identically. Handy as a safety
+check before committing a batch pulled from `ogle incidents --fingerprints`:
+
+```bash
+ogle incidents --serving-only --min-severity high --fingerprints \
+  | xargs ogle resolve --dry-run     # see what WOULD be dropped, change nothing
+```
+
 ### Writing findings back into DataHub (`--write-back`)
 
 On a **new** incident, `ogle check --write-back` stamps every drifted dataset and its

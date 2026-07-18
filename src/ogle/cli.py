@@ -640,9 +640,16 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     `✅ resolved <fp>`, misses print `_not remembered: <token>_` (not an error — the caller
     may be replaying a list). An ambiguous prefix is a usage error (exit 2): we refuse to
     guess and list the candidates so the operator can retype with more characters.
+
+    `--dry-run` previews the SAME per-token resolution — hits print `👀 would resolve <fp>`,
+    misses and ambiguity behave identically (ambiguity still exits 2) — but the store is
+    never mutated or saved. Safe to run the documented batch pipe through it first:
+    `ogle incidents --serving-only --fingerprints | xargs ogle resolve --dry-run` shows
+    exactly what a real resolve would drop before you drop it.
     """
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
+    dry_run = getattr(args, "dry_run", False)
     resolved: List[str] = []
     for raw in args.fingerprint:
         # Strip surrounding whitespace so the documented pipe works cross-platform:
@@ -662,10 +669,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         if fp is None:
             _emit(f"_not remembered: {token}_")
             continue
-        store.forget_incident(fp)
+        # --dry-run resolves the token to a fingerprint (so the preview is exact) but never
+        # forgets it — the store is left untouched and the save below is skipped.
+        if not dry_run:
+            store.forget_incident(fp)
         resolved.append(fp)
-        _emit(f"✅ resolved `{fp}`")
-    if resolved:
+        _emit(f"👀 would resolve `{fp}`" if dry_run else f"✅ resolved `{fp}`")
+    if resolved and not dry_run:
         try:
             store.save(store_path)
         except Exception as exc:
@@ -1056,6 +1066,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    resolve.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview which incidents would be resolved without dropping anything from "
+        "memory (store is never modified). Pipe-safe: dry-run a batch before committing it.",
     )
     resolve.set_defaults(func=cmd_resolve)
 

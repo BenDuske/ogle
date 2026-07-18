@@ -1467,7 +1467,91 @@ def test_resolve_strips_trailing_whitespace_from_piped_tokens(tmp_path, capsys):
     assert not BaselineStore.load(store_path).has_seen("keep_a")
 
 
+# ---- `ogle resolve --dry-run` : preview without mutating memory -----------------------
+
+
+def test_resolve_dry_run_previews_without_dropping_or_saving(tmp_path, capsys):
+    # Contract: --dry-run resolves the token to its fingerprint and reports it, but the
+    # incident stays in memory and the store file is never rewritten.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH drift", datasets=1)
+    s.save()
+    mtime_before = store_path.stat().st_mtime_ns
+
+    rc = main(["resolve", "abcdef1234567890", "--dry-run", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would resolve" in out
+    assert "abcdef1234567890" in out
+    assert "✅ resolved" not in out  # never claims it actually dropped anything
+
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("abcdef1234567890")          # still remembered
+    assert store_path.stat().st_mtime_ns == mtime_before  # file untouched
+
+
+def test_resolve_dry_run_resolves_prefix_to_full_fingerprint(tmp_path, capsys):
+    # The preview must be EXACT: a short prefix reports the full fingerprint it would drop,
+    # so an operator sees precisely what a real resolve would remove.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcd", "--dry-run", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would resolve" in out
+    assert "abcdef1234567890" in out                      # full fp, not the typed prefix
+    assert BaselineStore.load(store_path).has_seen("abcdef1234567890")
+
+
+def test_resolve_dry_run_still_reports_misses_and_refuses_ambiguity(tmp_path, capsys):
+    # Misses stay reportable (not an error) and an ambiguous prefix is still a usage error
+    # (exit 2) even in preview mode — dry-run changes only whether we WRITE, not the guards.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcd1111", severity="high", title="A", datasets=1)
+    s.record_incident("abcd2222", severity="low", title="B", datasets=1)
+    s.save()
+
+    # A clean miss: reportable, exit 0.
+    rc = main(["resolve", "no_such_fp", "--dry-run", "--store", str(store_path)])
+    assert rc == 0
+    assert "not remembered" in capsys.readouterr().out
+
+    # An ambiguous prefix: refuse and exit 2, same as a real resolve.
+    rc = main(["resolve", "abcd", "--dry-run", "--store", str(store_path)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "ambiguous" in err
+    # Nothing dropped by the refusal.
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("abcd1111") and reloaded.has_seen("abcd2222")
+
+
+def test_resolve_dry_run_batch_previews_every_hit_and_keeps_all(tmp_path, capsys):
+    # A batch dry-run previews each hit and leaves the WHOLE set intact — the safety check
+    # before `... --fingerprints | xargs ogle resolve --dry-run` then a real resolve.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("real_fp_1", severity="high", title="A", datasets=1)
+    s.record_incident("real_fp_2", severity="low", title="B", datasets=1)
+    s.save()
+
+    rc = main(
+        ["resolve", "real_fp_1", "real_fp_2", "--dry-run", "--store", str(store_path)]
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.count("would resolve") == 2
+
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("real_fp_1") and reloaded.has_seen("real_fp_2")
+
+
 def test_resolve_registered_in_help():
     ns = build_parser().parse_args(["resolve", "abcd"])
     assert ns.func.__name__ == "cmd_resolve"
     assert ns.fingerprint == ["abcd"]
+    assert ns.dry_run is False  # defaults off — resolve mutates unless asked to preview
