@@ -1978,3 +1978,65 @@ def test_forget_registered_in_help():
     assert ns.func.__name__ == "cmd_forget"
     assert ns.urn == [ORDERS_URN]
     assert ns.dry_run is False  # defaults off — forget mutates unless asked to preview
+
+
+# ---- status: whole-store rollup ---------------------------------------------------
+def test_status_rollup_human(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)  # 2 datasets, 3 fields total, 1000 rows
+    s.record_incident("high_serv", severity="high", title="H", datasets=2, serving=True)
+    s.record_incident("high_serv", severity="high", title="H", datasets=2, serving=True)
+    s.record_incident("low_only", severity="low", title="L", datasets=1)
+    s.mute(CUSTOMERS_URN)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "watching: 2 dataset(s)" in out
+    assert "3 field(s)" in out and "1000 row(s)" in out
+    assert "incidents remembered: 2" in out  # two distinct fingerprints
+    assert "serving-path: 1" in out and "recurring: 1" in out  # high_serv seen 2x
+    assert "muted: 1 active" in out
+
+
+def test_status_empty_store_reports_empty(tmp_path, capsys):
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "is empty" in capsys.readouterr().out.lower()
+
+
+def test_status_json_shape(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp1", severity="medium", title="M", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["baselines"]["watching"] == 2
+    assert payload["baselines"]["fields"] == 3
+    assert payload["baselines"]["rows"] == 1000
+    assert payload["incidents"]["total"] == 1
+    assert payload["incidents"]["by_severity"]["medium"] == 1
+    assert payload["muted"] == 0
+    assert payload["store"] == str(store)
+
+
+def test_status_json_counts_unknown_rows(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(
+        path=store,
+        baselines={CUSTOMERS_URN: _sig(row_count=None)},  # row_count unknown
+    )
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    b = json.loads(capsys.readouterr().out)["status"]["baselines"]
+    assert b["watching"] == 1 and b["rows"] == 0 and b["unknown_rows"] == 1
+
+
+def test_status_registered_in_help():
+    ns = build_parser().parse_args(["status"])
+    assert ns.func.__name__ == "cmd_status"
+    assert ns.json is False

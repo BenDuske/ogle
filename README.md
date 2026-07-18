@@ -152,6 +152,26 @@ it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urn
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
 false positives) as a first-class operator control.
 
+### Store health at a glance (`ogle status`)
+
+The store has two halves plus a mute list, each with its own view (`baselines`, `incidents`,
+`muted`). `ogle status` is the top-level rollup that unifies all three into one snapshot, so an
+operator — or a scheduled wrapper — can answer "what is Ogle holding right now?" in a single
+read, without re-walking DataHub:
+
+```bash
+ogle status          # watch-list size + field/row totals, incident memory by severity, active mutes
+ogle status --json   # same snapshot, machine-readable (baselines/incidents/muted rollup)
+```
+
+The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
+with an `(N unknown)` note when some baselines have no captured row count), **incidents
+remembered** (broken out 🔴 high / 🟠 medium / 🟡 low / • unknown), **serving-path / recurring /
+total sightings**, and **muted** (active snoozes only — expired ones are excluded). The severity
+and serving counts reuse the same rollup as `incidents --summary`, so the two always agree on the
+same store. An untouched store reports `is empty — run ogle check to start watching` rather than a
+wall of zeros.
+
 ### Inspecting the watch-list (`ogle baselines`)
 
 The store has two halves. `ogle incidents` shows the drift Ogle *remembers*; `ogle baselines`

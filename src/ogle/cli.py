@@ -980,6 +980,94 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     return gate_rc
 
 
+def _baseline_totals(store: "BaselineStore") -> dict:
+    """Aggregate the watch-list into blast-radius totals for the status rollup.
+
+    `fields`/`rows` sum only over baselines that carry a signature with a known value;
+    `unknown_rows` counts baselines whose `row_count` is None (never captured / not tracked),
+    so a small `rows` total next to a large `unknown_rows` reads as "coverage gap", not
+    "low volume". Mirrors how `baselines --sort rows` sinks unknown-row datasets last.
+    """
+    urns = store.urns()
+    total_fields = 0
+    total_rows = 0
+    unknown_rows = 0
+    for u in urns:
+        sig = store.get_baseline(u)
+        if not sig:
+            unknown_rows += 1
+            continue
+        total_fields += len(sig.schema_fields)
+        if sig.row_count is None:
+            unknown_rows += 1
+        else:
+            total_rows += sig.row_count
+    return {
+        "watching": len(urns),
+        "fields": total_fields,
+        "rows": total_rows,
+        "unknown_rows": unknown_rows,
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """One-glance health snapshot of the whole store — both halves plus mutes.
+
+    Read-only. `baselines` shows the watch-list, `incidents` shows remembered drift, and
+    `muted` shows snoozes — this unifies all three into a single rollup so an operator (or a
+    scheduled wrapper) can answer "what is Ogle holding right now?" in one call, without
+    re-walking DataHub. Reuses `_incident_summary` so the severity/serving/recurring counts
+    match what `incidents --summary` reports on the same store.
+    """
+    store = BaselineStore.load(Path(args.store))
+    totals = _baseline_totals(store)
+    inc = _incident_summary(store.incidents())
+    muted = store.muted(time.time())  # active snoozes only (expired excluded)
+
+    if args.json:
+        _emit(
+            json.dumps(
+                {
+                    "status": {
+                        "store": str(args.store),
+                        "baselines": totals,
+                        "incidents": inc,
+                        "muted": len(muted),
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    # Nothing captured, nothing remembered, nothing muted → first-run / empty store. Say so
+    # plainly rather than printing a wall of zeros that reads like a populated-but-quiet store.
+    if totals["watching"] == 0 and inc["total"] == 0 and not muted:
+        _emit(f"_store `{args.store}` is empty — run `ogle check` to start watching._")
+        return 0
+
+    sev = inc["by_severity"]
+    _emit(f"**Ogle store status — `{args.store}`**")
+    rpart = f"{totals['rows']} row(s)"
+    if totals["unknown_rows"]:
+        rpart += f" ({totals['unknown_rows']} unknown)"
+    _emit(
+        f"- 📊 watching: {totals['watching']} dataset(s) · "
+        f"{totals['fields']} field(s) · {rpart}"
+    )
+    _emit(
+        f"- 🧠 incidents remembered: {inc['total']} "
+        f"(🔴 {sev['high']} · 🟠 {sev['medium']} · 🟡 {sev['low']} · • {sev['unknown']})"
+    )
+    _emit(
+        f"- ⚠️ serving-path: {inc['serving']} · 🔁 recurring: {inc['recurring']} · "
+        f"total sightings: {inc['total_sightings']}"
+    )
+    _emit(f"- 🔇 muted: {len(muted)} active")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ogle",
@@ -1154,6 +1242,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     muted.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     muted.set_defaults(func=cmd_muted)
+
+    # `ogle status` — one-glance rollup of the whole store (read-only): the watch-list, the
+    # incident memory, and active mutes in a single view. The top-level "what is Ogle holding
+    # right now?" that unifies `baselines` + `incidents` + `muted`.
+    status = sub.add_parser(
+        "status",
+        help="One-glance health snapshot of the store (watch-list + incidents + mutes).",
+    )
+    status.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    status.add_argument("--json", action="store_true", help="Emit the snapshot as JSON.")
+    status.set_defaults(func=cmd_status)
 
     # `ogle baselines` — inspect the OTHER half of the store (read-only): the datasets Ogle
     # has a signature for and will diff the next walk against. `incidents` shows remembered
