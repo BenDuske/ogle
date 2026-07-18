@@ -1870,3 +1870,111 @@ def test_resolve_registered_in_help():
     assert ns.func.__name__ == "cmd_resolve"
     assert ns.fingerprint == ["abcd"]
     assert ns.dry_run is False  # defaults off — resolve mutates unless asked to preview
+
+
+# ---- `ogle forget` -------------------------------------------------------------------
+# The write-side counterpart to `ogle baselines`: prune a decommissioned dataset from the
+# watch-list (drops its baseline signature + any mute state) so `baselines`/`check` stay honest.
+
+def test_forget_drops_baseline_from_watchlist_and_persists(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # customers + orders
+    rc = main(["forget", ORDERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "forgot" in capsys.readouterr().out
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded          # gone from the watch-list
+    assert CUSTOMERS_URN in reloaded           # the other dataset is untouched
+
+
+def test_forget_also_clears_mute_state_for_the_dataset(tmp_path, capsys):
+    # A mute pointing at a gone dataset is dead weight — forget clears it alongside the baseline.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute(ORDERS_URN)  # permanent mute
+    s.save()
+    assert ORDERS_URN in BaselineStore.load(store).muted()
+
+    rc = main(["forget", ORDERS_URN, "--store", str(store)])
+    assert rc == 0
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded
+    assert ORDERS_URN not in reloaded.muted()  # orphan mute cleared too
+
+
+def test_forget_unknown_urn_is_a_reportable_miss_not_an_error(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    mtime_before = store.stat().st_mtime_ns
+    rc = main(["forget", "urn:li:dataset:(nope)", "--store", str(store)])
+    assert rc == 0  # a replayed/absent URN is not a failure
+    assert "not watched" in capsys.readouterr().out
+    assert store.stat().st_mtime_ns == mtime_before  # nothing to save → untouched
+
+
+def test_forget_batch_partial_success_persists_only_the_hits(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["forget", ORDERS_URN, "urn:li:dataset:(gone)", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "forgot" in out and "not watched" in out
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded and CUSTOMERS_URN in reloaded
+
+
+def test_forget_dry_run_previews_without_dropping_or_saving(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    mtime_before = store.stat().st_mtime_ns
+    rc = main(["forget", ORDERS_URN, "--dry-run", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would forget" in out and "✅ forgot" not in out
+    assert ORDERS_URN in BaselineStore.load(store)          # still watched
+    assert store.stat().st_mtime_ns == mtime_before          # store never written
+
+
+def test_forget_empty_token_is_a_reportable_miss_not_a_mass_wipe(tmp_path, capsys):
+    # Guard: a fat-fingered empty/all-whitespace token forgets NOTHING (never wipes the store).
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    mtime_before = store.stat().st_mtime_ns
+    rc = main(["forget", "   ", "--store", str(store)])
+    assert rc == 0
+    assert "not watched" in capsys.readouterr().out
+    assert len(BaselineStore.load(store)) == 2
+    assert store.stat().st_mtime_ns == mtime_before
+
+
+def test_forget_reads_urns_from_stdin_dash(tmp_path, capsys, monkeypatch):
+    # `ogle baselines --urns | ogle forget -` works with no xargs (native on Windows).
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{CUSTOMERS_URN}\n{ORDERS_URN}\n"))
+    rc = main(["forget", "-", "--store", str(store)])
+    assert rc == 0
+    assert capsys.readouterr().out.count("forgot") == 2
+    assert len(BaselineStore.load(store)) == 0  # both pruned
+
+
+def test_baselines_urns_pipe_into_forget_stdin_end_to_end(tmp_path, capsys, monkeypatch):
+    # The whole xargs-free story: `baselines --grep --urns` selects the decommissioned
+    # datasets, `forget -` prunes exactly those, and the rest of the watch-list survives.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # customers + orders
+    assert main(["baselines", "--store", str(store), "--grep", "orders", "--urns"]) == 0
+    urns_blob = capsys.readouterr().out  # newline-separated URNs, as a pipe delivers
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(urns_blob))
+    assert main(["forget", "-", "--store", str(store)]) == 0
+    assert capsys.readouterr().out.count("forgot") == 1
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded and CUSTOMERS_URN in reloaded
+
+
+def test_forget_registered_in_help():
+    ns = build_parser().parse_args(["forget", ORDERS_URN])
+    assert ns.func.__name__ == "cmd_forget"
+    assert ns.urn == [ORDERS_URN]
+    assert ns.dry_run is False  # defaults off — forget mutates unless asked to preview

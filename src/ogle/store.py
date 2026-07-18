@@ -111,6 +111,27 @@ class BaselineStore:
         """All dataset URNs Ogle currently has a baseline for (sorted for stable output)."""
         return sorted(self.baselines)
 
+    def forget_baseline(self, urn: str) -> bool:
+        """Drop a dataset from the watch-list entirely — its baseline signature and any
+        mute/snooze state for it.
+
+        The counterpart to `put_baseline` for a decommissioned dataset: once a table is gone
+        from DataHub, its signature would otherwise linger in the watch-list forever (and its
+        mute would be an orphan pointing at nothing). Clearing both keeps `baselines`/`muted`
+        honest.
+
+        Incidents are keyed by fingerprint (a drift *event*), not by URN, so they are
+        intentionally left untouched — a remembered incident outlives the dataset row and is
+        dropped via `forget_incident`/`resolve`, not here.
+
+        Returns True if a baseline was actually removed, False if this URN wasn't being
+        watched (so a CLI can report a miss rather than claim an action).
+        """
+        existed = self.baselines.pop(urn, None) is not None
+        self.muted_urns.discard(urn)
+        self.muted_until.pop(urn, None)
+        return existed
+
     def __len__(self) -> int:
         return len(self.baselines)
 

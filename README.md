@@ -183,6 +183,27 @@ overrides `--json`, and stays **silent on an empty set** so a pipe gets a clean 
 all-whitespace `--grep "   "` matches nothing (a slip, not a wildcard), and a filter that hides
 everything says so (`no baselines match the filter`) rather than reading as an empty store.
 
+### Pruning the watch-list (`ogle forget`)
+
+`ogle forget` is the write-side counterpart to `ogle baselines`: when a dataset is
+decommissioned in DataHub, its signature would otherwise sit in the watch-list forever (and
+any mute on it becomes an orphan pointing at nothing). `forget` drops the baseline **and**
+clears any mute/snooze on that URN so `ogle baselines` and the next walk stay honest:
+
+```bash
+ogle forget "urn:li:dataset:(dbt,old.orders,PROD)"          # prune one decommissioned dataset
+ogle forget URN_A URN_B                                       # batch — hits and misses report per token
+ogle baselines --grep staging --urns | ogle forget -         # prune a whole class, no xargs (native on Windows)
+ogle baselines --grep old --urns | ogle forget --dry-run -   # preview what WOULD be pruned, change nothing
+```
+
+Where `ogle resolve` drops a drift *event* by fingerprint, `forget` drops the *dataset* by
+URN — matched **exactly** (the `--urns` selector emits them whole, so there's no prefix to
+disambiguate). A lone `-` reads URNs from stdin so the `baselines --urns` pipe runs without
+`xargs`; an unknown or empty token is a reportable miss (`not watched`), never a mass wipe.
+Incidents are left untouched — a remembered drift outlives the dataset row and is cleared via
+`ogle resolve`, not here. `--dry-run` previews the exact per-token outcome without writing.
+
 ### Inspecting what Ogle remembers (`ogle incidents`)
 
 Ogle keeps a cross-run memory of every incident it has seen — that's what lets it page

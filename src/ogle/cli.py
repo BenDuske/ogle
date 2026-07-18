@@ -811,6 +811,53 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forget(args: argparse.Namespace) -> int:
+    """Drop one or more datasets from the watch-list (their baseline signature + mute state).
+
+    The write-side counterpart to `ogle baselines`: once a dataset is decommissioned in
+    DataHub, its signature would otherwise sit in the watch-list forever. `forget` prunes it
+    so `ogle baselines` and the next `ogle check` walk stay honest. Unlike `resolve` (which
+    drops a drift *event* by fingerprint), `forget` drops the *dataset* by URN — and also
+    clears any mute/snooze on it, since a mute pointing at a gone dataset is dead weight.
+
+    Reporting is per-token so a batch can partially succeed: hits print `✅ forgot <urn>`,
+    misses print `_not watched: <urn>_` (not an error — the caller may be replaying a list).
+    URNs are matched exactly (they aren't hash prefixes; the documented pipe emits them
+    whole), so there's no prefix ambiguity to guard against.
+
+    A lone `-` token reads URNs from stdin (whitespace-separated), so the watch-list selector
+    pipes natively without `xargs` — key on Windows:
+        ogle baselines --grep decommissioned --urns | ogle forget -
+
+    `--dry-run` previews the SAME per-token outcome — hits print `👀 would forget <urn>` —
+    but the store is never mutated or saved, so a batch pipe can be checked before it commits.
+    """
+    store_path = Path(args.store)
+    store = BaselineStore.load(store_path)
+    dry_run = getattr(args, "dry_run", False)
+    forgotten: List[str] = []
+    for raw in _expand_stdin_fingerprints(args.urn):
+        # Trim surrounding whitespace so the cross-platform pipe works (Windows lines carry a
+        # trailing CR); a URN never has surrounding whitespace. An all-whitespace token
+        # collapses to "" → a reportable miss below, never a mass wipe.
+        urn = raw.strip()
+        if not urn or urn not in store:
+            _emit(f"_not watched: {urn}_")
+            continue
+        # --dry-run reports the exact outcome but leaves the store untouched (save skipped).
+        if not dry_run:
+            store.forget_baseline(urn)
+        forgotten.append(urn)
+        _emit(f"👀 would forget `{urn}`" if dry_run else f"✅ forgot `{urn}`")
+    if forgotten and not dry_run:
+        try:
+            store.save(store_path)
+        except Exception as exc:
+            print(f"ogle forget: could not save store: {exc}", file=sys.stderr)
+            return 2
+    return 0
+
+
 def cmd_incidents(args: argparse.Namespace) -> int:
     """List the incidents Ogle currently remembers — its cross-run drift memory.
 
@@ -1237,6 +1284,31 @@ def build_parser() -> argparse.ArgumentParser:
         "memory (store is never modified). Pipe-safe: dry-run a batch before committing it.",
     )
     resolve.set_defaults(func=cmd_resolve)
+
+    # `ogle forget` — the write-side counterpart to `ogle baselines`: prune a decommissioned
+    # dataset from the watch-list (drops its baseline signature + any mute state). Mirrors
+    # `resolve` (stdin `-`, --dry-run) but keys on URN, not fingerprint.
+    forget = sub.add_parser(
+        "forget",
+        help="Drop a dataset from the watch-list (its baseline is gone/decommissioned).",
+    )
+    forget.add_argument(
+        "urn",
+        nargs="+",
+        help="Dataset URN(s) from `ogle baselines --urns` (matched exactly). A lone `-` reads "
+        "them from stdin, so `ogle baselines --grep old --urns | ogle forget -` works without "
+        "xargs (native on Windows).",
+    )
+    forget.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    forget.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview which datasets would be forgotten without dropping anything from the "
+        "store (never modified). Pipe-safe: dry-run a batch before committing it.",
+    )
+    forget.set_defaults(func=cmd_forget)
 
     # `ogle watch` — one scheduler tick that pages once on a new incident.
     from .watch import build_watch_args

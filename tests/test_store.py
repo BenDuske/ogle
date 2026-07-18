@@ -54,6 +54,43 @@ def test_urns_sorted_and_stable():
     assert store.urns() == sorted([ORDERS_URN, CUSTOMERS_URN])
 
 
+def test_forget_baseline_removes_only_that_dataset():
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN))
+    store.put_baseline(_sig(urn=ORDERS_URN))
+    assert store.forget_baseline(ORDERS_URN) is True
+    assert ORDERS_URN not in store and CUSTOMERS_URN in store
+    assert len(store) == 1
+
+
+def test_forget_baseline_unknown_urn_is_false_noop():
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN))
+    assert store.forget_baseline(ORDERS_URN) is False  # never watched
+    assert len(store) == 1
+
+
+def test_forget_baseline_also_clears_mute_and_snooze():
+    # A mute/snooze pointing at a forgotten dataset is an orphan — forget clears both forms.
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN))
+    store.put_baseline(_sig(urn=ORDERS_URN))
+    store.mute(CUSTOMERS_URN)               # permanent
+    store.mute(ORDERS_URN, until=1e18)      # snooze
+    assert store.forget_baseline(CUSTOMERS_URN) is True
+    assert store.forget_baseline(ORDERS_URN) is True
+    assert store.muted() == []             # both mute forms gone with their datasets
+
+
+def test_forget_baseline_leaves_incidents_untouched():
+    # Incidents are keyed by fingerprint (a drift event), not URN — forget must not drop them.
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN))
+    store.record_incident("fp_for_customers", severity="high")
+    store.forget_baseline(CUSTOMERS_URN)
+    assert store.has_seen("fp_for_customers")  # the drift memory outlives the dataset row
+
+
 def test_put_many():
     store = BaselineStore()
     store.put_many([_sig(urn=CUSTOMERS_URN), _sig(urn=ORDERS_URN)])
