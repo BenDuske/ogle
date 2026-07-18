@@ -220,10 +220,11 @@ never changes the pass/fail verdict — and works with the list, `--summary`, an
 human list it prints just the surviving fingerprints, one per line, honoring every filter plus
 `--sort`/`--limit`. Pipe them straight into `ogle resolve` to batch-triage a whole class of drift
 in one command — `ogle incidents --serving-only --min-severity high --fingerprints | xargs ogle
-resolve`. It stays **silent on an empty set** (so a pipe gets a clean empty stream, not a bogus
-token), overrides `--summary`/`--json` (this *is* the machine form), and still returns the
-`--fail-on` gate code so one invocation can both list a batch and signal a failing gate. (`ogle
-resolve` trims surrounding whitespace, so the pipe works even where a shell adds a trailing CR.)
+resolve` (or `| ogle resolve -` to skip `xargs`, native on Windows). It stays **silent on an
+empty set** (so a pipe gets a clean empty stream, not a bogus token), overrides
+`--summary`/`--json` (this *is* the machine form), and still returns the `--fail-on` gate code so
+one invocation can both list a batch and signal a failing gate. (`ogle resolve` trims surrounding
+whitespace, so the pipe works even where a shell adds a trailing CR.)
 
 Each line shows the incident's **severity**, a human **headline**, how many times it has
 **recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether
@@ -249,7 +250,13 @@ or an unambiguous prefix, like a git short SHA:
 ```bash
 ogle resolve fd6f829c                              # short-prefix, like a git SHA
 ogle resolve fd6f829c77ff9fb4 a1b2c3d4e5f60718     # batch — hits and misses report per token
+ogle incidents --serving-only --fingerprints | ogle resolve -   # stdin pipe, no xargs
 ```
+
+A lone `-` token reads fingerprints from **stdin** (whitespace-separated), so the selector
+pipe runs **without `xargs`** — the native form on Windows, where `xargs` isn't a built-in.
+Blank lines and trailing CRs are dropped, and an empty stdin resolves nothing (never a mass
+wipe); `-` composes with literal tokens and `--dry-run` just like any other argument.
 
 Ambiguous prefixes fail loud (exit 2) with the list of candidates so the operator retypes
 with more characters — Ogle never guesses which incident to drop. Unknown/already-forgotten

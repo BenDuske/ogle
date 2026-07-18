@@ -628,6 +628,34 @@ def _resolve_fingerprint(store: BaselineStore, needle: str) -> Tuple[Optional[st
     return None, []
 
 
+def _expand_stdin_fingerprints(tokens: List[str]) -> List[str]:
+    """Expand a lone `-` token into whitespace-separated fingerprints read from stdin.
+
+    Lets the documented selector pipe run natively on Windows, where `xargs` isn't a
+    built-in:
+        ogle incidents --serving-only --fingerprints | ogle resolve -
+    `sys.stdin.read().split()` splits on any whitespace and drops empties, so trailing
+    CRs and blank lines never become bogus tokens (same guarantee the per-token strip
+    gives the `xargs` path). Stdin is read at most once even if `-` is repeated; the
+    piped tokens are spliced in at the first `-` and any further `-` are dropped, and
+    every non-`-` token passes through in place and order. A fingerprint is 16-hex, so a
+    literal `-` is never a real token — no ambiguity with a value.
+    """
+    if "-" not in tokens:
+        return tokens
+    piped = sys.stdin.read().split()
+    out: List[str] = []
+    inserted = False
+    for t in tokens:
+        if t == "-":
+            if not inserted:
+                out.extend(piped)
+                inserted = True
+        else:
+            out.append(t)
+    return out
+
+
 def cmd_resolve(args: argparse.Namespace) -> int:
     """Mark one or more remembered incidents as resolved (drops them from cross-run memory).
 
@@ -646,12 +674,16 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     never mutated or saved. Safe to run the documented batch pipe through it first:
     `ogle incidents --serving-only --fingerprints | xargs ogle resolve --dry-run` shows
     exactly what a real resolve would drop before you drop it.
+
+    A lone `-` token reads fingerprints from stdin (whitespace-separated), so the same
+    pipe works natively without `xargs` — key on Windows, where `xargs` isn't a built-in:
+    `ogle incidents --serving-only --fingerprints | ogle resolve -`.
     """
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
     dry_run = getattr(args, "dry_run", False)
     resolved: List[str] = []
-    for raw in args.fingerprint:
+    for raw in _expand_stdin_fingerprints(args.fingerprint):
         # Strip surrounding whitespace so the documented pipe works cross-platform:
         # `ogle incidents --fingerprints | xargs ogle resolve` — on Windows the emitted lines
         # carry a trailing CR, and a fingerprint never has surrounding whitespace, so trimming
@@ -1062,7 +1094,9 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument(
         "fingerprint",
         nargs="+",
-        help="Incident fingerprint(s) from `ogle incidents` (full 16-hex or unambiguous prefix).",
+        help="Incident fingerprint(s) from `ogle incidents` (full 16-hex or unambiguous "
+        "prefix). A lone `-` reads them from stdin, so `ogle incidents --fingerprints | "
+        "ogle resolve -` works without xargs (native on Windows).",
     )
     resolve.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."

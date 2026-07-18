@@ -1550,6 +1550,111 @@ def test_resolve_dry_run_batch_previews_every_hit_and_keeps_all(tmp_path, capsys
     assert reloaded.has_seen("real_fp_1") and reloaded.has_seen("real_fp_2")
 
 
+# ---- `ogle resolve -` : read fingerprints from stdin (xargs-free pipe) ---------------
+
+
+def test_resolve_reads_fingerprints_from_stdin_dash(tmp_path, capsys, monkeypatch):
+    # The point of `-`: `ogle incidents --fingerprints | ogle resolve -` works with no
+    # xargs (native on Windows). Two fingerprints piped in, both dropped and persisted.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("real_fp_1", severity="high", title="A", datasets=1)
+    s.record_incident("real_fp_2", severity="low", title="B", datasets=1)
+    s.save()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("real_fp_1\nreal_fp_2\n"))
+    rc = main(["resolve", "-", "--store", str(store_path)])
+    assert rc == 0
+    assert capsys.readouterr().out.count("resolved") == 2
+    reloaded = BaselineStore.load(store_path)
+    assert not reloaded.has_seen("real_fp_1") and not reloaded.has_seen("real_fp_2")
+
+
+def test_resolve_stdin_dash_ignores_blank_lines_and_crs(tmp_path, capsys, monkeypatch):
+    # `sys.stdin.read().split()` drops empties and trailing CRs, so a Windows pipe with
+    # blank lines never produces a bogus empty token (which would be a reportable miss).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("keep_a", severity="high", title="A", datasets=1)
+    s.save()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("\r\nkeep_a\r\n\r\n"))
+    rc = main(["resolve", "-", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "resolved" in out
+    assert "not remembered" not in out  # no phantom empty token from the blank lines
+    assert not BaselineStore.load(store_path).has_seen("keep_a")
+
+
+def test_resolve_stdin_dash_mixes_with_positional_tokens(tmp_path, capsys, monkeypatch):
+    # `-` splices piped tokens in at its position; literal tokens on the same line still
+    # resolve. Order/placement is preserved so a mixed invocation composes cleanly.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("cli_fp", severity="high", title="A", datasets=1)
+    s.record_incident("piped_fp", severity="low", title="B", datasets=1)
+    s.save()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("piped_fp\n"))
+    rc = main(["resolve", "cli_fp", "-", "--store", str(store_path)])
+    assert rc == 0
+    assert capsys.readouterr().out.count("resolved") == 2
+    reloaded = BaselineStore.load(store_path)
+    assert not reloaded.has_seen("cli_fp") and not reloaded.has_seen("piped_fp")
+
+
+def test_resolve_stdin_dash_empty_is_a_noop_not_a_wipe(tmp_path, capsys, monkeypatch):
+    # Guard: an EMPTY stdin behind `-` must resolve nothing (not prefix-match everything).
+    # `read().split()` yields no tokens, so the loop never runs and the store is untouched.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("keep_a", severity="high", title="A", datasets=1)
+    s.record_incident("keep_b", severity="low", title="B", datasets=1)
+    s.save()
+    mtime_before = store_path.stat().st_mtime_ns
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("   \n\r\n"))
+    rc = main(["resolve", "-", "--store", str(store_path)])
+    assert rc == 0
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("keep_a") and reloaded.has_seen("keep_b")
+    assert store_path.stat().st_mtime_ns == mtime_before  # nothing written
+
+
+def test_resolve_stdin_dash_honors_dry_run(tmp_path, capsys, monkeypatch):
+    # The stdin path composes with --dry-run: preview the piped fingerprints, drop nothing.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("real_fp_1", severity="high", title="A", datasets=1)
+    s.save()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("real_fp_1\n"))
+    rc = main(["resolve", "-", "--dry-run", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would resolve" in out and "✅ resolved" not in out
+    assert BaselineStore.load(store_path).has_seen("real_fp_1")  # still remembered
+
+
+def test_incidents_fingerprints_pipe_into_resolve_stdin_end_to_end(tmp_path, capsys, monkeypatch):
+    # The whole xargs-free story: capture `--fingerprints` output, feed it to `resolve -`
+    # via stdin, and every remembered incident is gone.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_alpha", severity="high", title="A", datasets=1)
+    s.record_incident("fp_beta", severity="low", title="B", datasets=1)
+    s.save()
+
+    assert main(["incidents", "--store", str(store_path), "--fingerprints"]) == 0
+    fps_blob = capsys.readouterr().out  # newline-separated fingerprints, as a pipe delivers
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(fps_blob))
+    assert main(["resolve", "-", "--store", str(store_path)]) == 0
+    assert capsys.readouterr().out.count("resolved") == 2
+    assert BaselineStore.load(store_path).incidents() == []
+
+
 def test_resolve_registered_in_help():
     ns = build_parser().parse_args(["resolve", "abcd"])
     assert ns.func.__name__ == "cmd_resolve"
