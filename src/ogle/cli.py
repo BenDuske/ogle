@@ -492,6 +492,32 @@ def _incident_passes(
     return True
 
 
+def _incidents_gate_fail(records: List[dict], fail_on: Optional[str]) -> bool:
+    """True if any remembered incident meets/exceeds the `--fail-on` severity floor.
+
+    Turns the read-only `ogle incidents` view into a CI/scheduled health gate. Where
+    `check --fail-on` gates on *new* drift surfaced this run, this gates on whether Ogle's
+    *memory* still holds open drift at/above a floor — so a nightly job can keep failing
+    while any high-severity drift remains un-resolved, even on runs that surface nothing
+    new (drift resolves only when `ogle resolve` forgets it or its fingerprint stops
+    recurring). Evaluated against the already-filtered set, so it composes with
+    `--min-severity`/`--serving-only`/`--min-count`, but is INDEPENDENT of `--limit`: a
+    display cap must never change the pass/fail verdict. Unknown/legacy severities rank -1
+    and never trip a floor (same rule as `--min-severity`).
+    """
+    if fail_on is None:
+        return False
+    floor = Severity(fail_on).rank
+    for rec in records:
+        try:
+            rank = Severity(rec.get("severity")).rank
+        except (ValueError, TypeError):
+            rank = -1
+        if rank >= floor:
+            return True
+    return False
+
+
 def _incident_summary(records: List[dict]) -> dict:
     """Aggregate a set of remembered incidents into a triage rollup.
 
@@ -621,6 +647,11 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         _emit("_--limit must be a positive integer._")
         return 2
 
+    # CI/scheduled health gate. Evaluated on the whole filtered set (NOT the --limit cap)
+    # so a display cap can never flip the verdict; 0 when no --fail-on is given. Every
+    # "shown" path below returns `gate_rc` instead of a bare 0.
+    gate_rc = 1 if _incidents_gate_fail(records, getattr(args, "fail_on", None)) else 0
+
     # `--summary`: an aggregate rollup of the (filtered) set instead of the per-incident list.
     # `--limit` is deliberately NOT applied here: the rollup describes the whole filtered set,
     # so capping it would under-count severity/serving/recurring totals.
@@ -628,7 +659,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         summary = _incident_summary(records)
         if args.json:
             _emit(json.dumps({"summary": summary}, indent=2, sort_keys=True))
-            return 0
+            return gate_rc
         if not records:
             # Same empty-vs-filtered distinction as the list view so a hidden set never
             # reads as an empty store.
@@ -636,7 +667,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
                 _emit(f"_no incidents match the filter ({len(all_records)} remembered)._")
             else:
                 _emit("_no incidents remembered yet._")
-            return 0
+            return gate_rc
         sev = summary["by_severity"]
         _emit(f"**Incident memory summary — {summary['total']} remembered:**")
         _emit(
@@ -646,14 +677,16 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         _emit(f"- ⚠️ serving-path: {summary['serving']}")
         _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
-        return 0
+        if gate_rc and not args.json:
+            _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
+        return gate_rc
 
     # `--limit`: cap to the top N after sort+filter (records are already worst-first).
     capped = records[:limit] if limit is not None else records
 
     if args.json:
         _emit(json.dumps({"incidents": capped}, indent=2, sort_keys=True))
-        return 0
+        return gate_rc
     if not records:
         # Distinguish "memory is empty" from "filters hid everything" so the operator
         # knows whether to widen the filter vs. that there's genuinely nothing tracked.
@@ -661,7 +694,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             _emit(f"_no incidents match the filter ({len(all_records)} remembered)._")
         else:
             _emit("_no incidents remembered yet._")
-        return 0
+        return gate_rc
 
     # When --limit hides some, say so ("Top N of M") so a capped view never reads as the
     # full remembered set.
@@ -679,7 +712,9 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         serv = " · ⚠️ serving" if r.get("serving") else ""
         title = r.get("title") or "(drift)"
         _emit(f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}  `{r['fingerprint']}`")
-    return 0
+    if gate_rc and not args.json:
+        _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
+    return gate_rc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -896,6 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         default=None,
         help="Show only the top N incidents (worst severity/recurrence first). Ignored by --summary.",
+    )
+    incidents.add_argument(
+        "--fail-on",
+        choices=["low", "medium", "high"],
+        default=None,
+        help="Exit 1 if any remembered incident is at/above this severity (CI/scheduled "
+        "drift-memory health gate). Composes with the filters; independent of --limit.",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)

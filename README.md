@@ -168,6 +168,7 @@ ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ ti
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
+ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
 ```
 
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
@@ -187,6 +188,14 @@ per severity, how many touch a serving path, how many are recurring (seen ≥2×
 sighting count. It describes the *filtered* set, so it composes with the triage flags (e.g.
 `ogle incidents --summary --serving-only` summarizes only the serving-path drift). Add `--json`
 for a machine-readable `{"summary": {...}}` shape.
+
+`--fail-on {low,medium,high}` turns the read-only listing into a **health gate on the drift
+*memory***. Where `check --fail-on` gates on *new* drift surfaced this run, `incidents --fail-on`
+exits **1** whenever Ogle still *remembers* open drift at or above the floor — so a nightly job
+stays red until the drift is actually fixed (`ogle resolve`d, or its fingerprint stops recurring),
+even on ticks that surface nothing new. It evaluates the *filtered* set (composes with
+`--min-severity`/`--serving-only`/`--min-count`) but is **independent of `--limit`** — a display cap
+never changes the pass/fail verdict — and works with the list, `--summary`, and `--json` views alike.
 
 Each line shows the incident's **severity**, a human **headline**, how many times it has
 **recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether

@@ -920,6 +920,116 @@ def test_incidents_limit_registered_in_help():
     assert ns.limit == 5
 
 
+# ---- `ogle incidents --fail-on` : drift-memory health gate ---------------------------
+# Unlike `check --fail-on` (gates on NEW drift this run), this gates on whether remembered
+# memory still holds open drift at/above a floor — a nightly job stays red until it's fixed.
+
+def test_incidents_fail_on_high_trips_on_remembered_high(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)  # has a HIGH
+    assert main(["incidents", "--store", str(store_path), "--fail-on", "high"]) == 1
+    assert "exit 1" in capsys.readouterr().out
+
+
+def test_incidents_fail_on_high_passes_when_only_below_floor(tmp_path, capsys):
+    # A store whose worst remembered drift is MEDIUM must NOT trip a HIGH gate.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("med", severity="medium", title="MED", datasets=1)
+    s.record_incident("low", severity="low", title="LOW", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fail-on", "high"]) == 0
+    assert "exit 1" not in capsys.readouterr().out
+
+
+def test_incidents_fail_on_boundary_is_inclusive(tmp_path, capsys):
+    # A MEDIUM incident meets a `--fail-on medium` floor (>=, not >).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("med", severity="medium", title="MED", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fail-on", "medium"]) == 1
+
+
+def test_incidents_fail_on_empty_store_passes(tmp_path, capsys):
+    # No memory => nothing to gate on => exit 0 even at the lowest floor.
+    store_path = tmp_path / "baselines.json"
+    BaselineStore(path=store_path).save()
+    assert main(["incidents", "--store", str(store_path), "--fail-on", "low"]) == 0
+
+
+def test_incidents_fail_on_default_never_gates(tmp_path, capsys):
+    # Without --fail-on the command is read-only: always exit 0 even with a HIGH remembered.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path)]) == 0
+
+
+def test_incidents_fail_on_composes_with_serving_only(tmp_path, capsys):
+    # The gate sees the FILTERED set: a non-serving HIGH must not trip `--serving-only`.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("high_noserv", severity="high", title="HIGH", datasets=1, serving=False)
+    s.record_incident("low_serv", severity="low", title="LOW", datasets=1, serving=True)
+    s.save()
+    # Serving path holds only a LOW -> HIGH gate passes despite the (hidden) non-serving HIGH.
+    assert main(
+        ["incidents", "--store", str(store_path), "--serving-only", "--fail-on", "high"]
+    ) == 0
+
+
+def test_incidents_fail_on_independent_of_limit(tmp_path, capsys):
+    # --limit is a DISPLAY cap; it must never hide a failing incident from the gate.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # HIGH sorts first; a lower recurrence still keeps it worst-first. Add filler so
+    # --limit 1 shows only the HIGH — then a MEDIUM gate must still see... the whole set.
+    s.record_incident("high", severity="high", title="HIGH", datasets=1)
+    s.record_incident("low", severity="low", title="LOW", datasets=1)
+    s.save()
+    # Show only the top 1 (HIGH), but gate on medium: HIGH alone already trips it, and the
+    # verdict is computed on the full set regardless of the cap.
+    assert main(
+        ["incidents", "--store", str(store_path), "--limit", "1", "--fail-on", "medium"]
+    ) == 1
+
+
+def test_incidents_fail_on_gates_json_without_corrupting_payload(tmp_path, capsys):
+    # --json returns the failing exit code but emits NO prose note into the payload.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(
+        ["incidents", "--store", str(store_path), "--fail-on", "high", "--json"]
+    ) == 1
+    out = capsys.readouterr().out
+    json.loads(out)  # still valid JSON
+    assert "exit 1" not in out
+
+
+def test_incidents_fail_on_gates_summary(tmp_path, capsys):
+    # The rollup view honours the gate too (whole filtered set, not the --limit cap).
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(
+        ["incidents", "--store", str(store_path), "--summary", "--fail-on", "high"]
+    ) == 1
+    assert "exit 1" in capsys.readouterr().out
+
+
+def test_incidents_fail_on_unknown_severity_never_trips(tmp_path, capsys):
+    # A legacy/unknown-severity record ranks -1 and must not trip even the lowest floor.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("legacy")  # no severity
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fail-on", "low"]) == 0
+
+
+def test_incidents_fail_on_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--fail-on", "high"])
+    assert ns.fail_on == "high"
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.
