@@ -644,7 +644,13 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
     resolved: List[str] = []
-    for token in args.fingerprint:
+    for raw in args.fingerprint:
+        # Strip surrounding whitespace so the documented pipe works cross-platform:
+        # `ogle incidents --fingerprints | xargs ogle resolve` — on Windows the emitted lines
+        # carry a trailing CR, and a fingerprint never has surrounding whitespace, so trimming
+        # is always safe. An all-whitespace token collapses to "" → a reportable miss below
+        # (never a mass wipe), preserving the empty-token guard.
+        token = raw.strip()
         fp, candidates = _resolve_fingerprint(store, token)
         if candidates:
             print(
@@ -710,6 +716,20 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     # so a display cap can never flip the verdict; 0 when no --fail-on is given. Every
     # "shown" path below returns `gate_rc` instead of a bare 0.
     gate_rc = 1 if _incidents_gate_fail(records, getattr(args, "fail_on", None)) else 0
+
+    # `--fingerprints`: plain machine output — just each surviving incident's fingerprint,
+    # one per line, in --sort order and honoring every filter + --limit. Turns the read-side
+    # `ogle incidents` into a selector that feeds the write-side `ogle resolve`, e.g.
+    #   ogle incidents --serving-only --min-severity high --fingerprints | xargs ogle resolve
+    # Deliberately overrides --summary/--json (a rollup has no per-incident ids; this IS the
+    # scriptable form) and stays SILENT on an empty set so a pipe gets nothing to act on
+    # rather than a prose "no incidents" line. Still returns gate_rc so it composes with
+    # --fail-on as a health gate.
+    if getattr(args, "fingerprints", False):
+        capped = records[:limit] if limit is not None else records
+        for r in capped:
+            _emit(r["fingerprint"])
+        return gate_rc
 
     # `--summary`: an aggregate rollup of the (filtered) set instead of the per-incident list.
     # `--limit` is deliberately NOT applied here: the rollup describes the whole filtered set,
@@ -1013,6 +1033,13 @@ def build_parser() -> argparse.ArgumentParser:
         "drift-memory health gate). Composes with the filters; independent of --limit.",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
+    incidents.add_argument(
+        "--fingerprints",
+        action="store_true",
+        help="Print ONLY the fingerprints (one per line), honoring the filters/--sort/--limit "
+        "— pipe into `ogle resolve`, e.g. `ogle incidents --serving-only --fingerprints | "
+        "xargs ogle resolve`. Overrides --summary/--json.",
+    )
     incidents.set_defaults(func=cmd_incidents)
 
     # `ogle resolve` — the operator's counterpart to `ogle incidents`: drop a fixed drift

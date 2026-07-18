@@ -1230,6 +1230,110 @@ def test_incidents_sort_registered_in_help():
     assert build_parser().parse_args(["incidents"]).sort == "severity"
 
 
+# ---- `ogle incidents --fingerprints` : plain fingerprint list for piping into resolve --
+# The read side becomes a selector for the write side: emit just the surviving fingerprints
+# (one per line, honoring every filter + --sort + --limit) so a triager can
+# `ogle incidents --serving-only --fingerprints | xargs ogle resolve` a whole batch at once.
+
+def _fp_lines(capsys):
+    return [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+
+def test_incidents_fingerprints_emits_plain_lines_in_sort_order(tmp_path, capsys):
+    # Just the fingerprints, worst-severity-first, no markdown/marks/titles.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)  # high_serv, med_only, low_serv
+    assert main(["incidents", "--store", str(store_path), "--fingerprints"]) == 0
+    lines = _fp_lines(capsys)
+    assert lines == ["high_serv", "med_only", "low_serv"]  # severity order, one per line
+    # No decoration leaked in — these are raw tokens `ogle resolve` can consume.
+    assert all("*" not in ln and "`" not in ln and " " not in ln for ln in lines)
+
+
+def test_incidents_fingerprints_honors_filters(tmp_path, capsys):
+    # Composes with the triage filters: only serving-path incidents' fingerprints print.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--serving-only", "--fingerprints"]) == 0
+    assert set(_fp_lines(capsys)) == {"high_serv", "low_serv"}  # med_only (non-serving) hidden
+
+
+def test_incidents_fingerprints_honors_sort_and_limit(tmp_path, capsys):
+    # --sort redefines the top N, so `--sort count --limit 1 --fingerprints` emits the single
+    # most-recurring fingerprint — the selector picks exactly what the same sort/limit would list.
+    store_path = tmp_path / "baselines.json"
+    _seed_sortable_incidents(store_path)  # low_recur 5×, high_narrow 1×, med_broad 2×
+    rc = main(["incidents", "--store", str(store_path),
+               "--sort", "count", "--limit", "1", "--fingerprints"])
+    assert rc == 0
+    assert _fp_lines(capsys) == ["low_recur"]
+
+
+def test_incidents_fingerprints_empty_set_is_silent(tmp_path, capsys):
+    # A filter that hides everything prints NOTHING (no prose "no incidents" line) so a pipe
+    # into `xargs ogle resolve` gets a clean empty stream, not a bogus token.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path),
+                 "--grep", "nonesuch", "--fingerprints"]) == 0
+    assert _fp_lines(capsys) == []
+
+
+def test_incidents_fingerprints_empty_store_is_silent(tmp_path, capsys):
+    # Same for a genuinely empty store — silent, exit 0, nothing to resolve.
+    store_path = tmp_path / "baselines.json"
+    assert main(["incidents", "--store", str(store_path), "--fingerprints"]) == 0
+    assert _fp_lines(capsys) == []
+
+
+def test_incidents_fingerprints_overrides_summary_and_json(tmp_path, capsys):
+    # --fingerprints is the dominant machine mode: passing --summary/--json too still yields
+    # the plain line list, never a JSON object or the rollup prose.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path),
+                 "--fingerprints", "--summary", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines() == ["high_serv", "med_only", "low_serv"]
+    assert "{" not in out and "summary" not in out  # neither JSON nor the rollup leaked
+
+
+def test_incidents_fingerprints_composes_with_fail_on(tmp_path, capsys):
+    # Still returns the health-gate code: --fail-on high trips (exit 1) while the fingerprints
+    # print, so one command can both list the batch AND signal a failing gate.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)  # contains a high incident
+    rc = main(["incidents", "--store", str(store_path),
+               "--fingerprints", "--fail-on", "high"])
+    assert rc == 1
+    assert "high_serv" in _fp_lines(capsys)
+
+
+def test_incidents_fingerprints_feed_resolve_end_to_end(tmp_path):
+    # The whole point: capture the fingerprints, hand them to `ogle resolve`, and the
+    # matching incidents leave cross-run memory — a scripted batch triage.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert main(["incidents", "--store", str(store_path),
+                     "--serving-only", "--fingerprints"]) == 0
+    fps = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    assert set(fps) == {"high_serv", "low_serv"}
+    assert main(["resolve", "--store", str(store_path), *fps]) == 0
+    # Only the non-serving incident remains remembered.
+    remaining = set(BaselineStore.load(store_path).seen_incidents)
+    assert remaining == {"med_only"}
+
+
+def test_incidents_fingerprints_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--fingerprints"])
+    assert ns.fingerprints is True
+    # Default is off (the human list view) when the flag is omitted.
+    assert build_parser().parse_args(["incidents"]).fingerprints is False
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.
@@ -1348,6 +1452,19 @@ def test_resolve_empty_prefix_is_a_reportable_miss_not_a_mass_wipe(tmp_path, cap
     assert rc == 0
     reloaded = BaselineStore.load(store_path)
     assert reloaded.has_seen("keep_a") and reloaded.has_seen("keep_b")
+
+
+def test_resolve_strips_trailing_whitespace_from_piped_tokens(tmp_path, capsys):
+    # The `incidents --fingerprints | xargs ogle resolve` pipe carries a trailing CR on
+    # Windows; resolve must trim it so the token still matches (a fingerprint never has
+    # surrounding whitespace). Without the strip, "keep_a\r" would be a spurious miss.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("keep_a", severity="high", title="HIGH", datasets=1)
+    s.save()
+    assert main(["resolve", "keep_a\r", "--store", str(store_path)]) == 0
+    assert "resolved" in capsys.readouterr().out
+    assert not BaselineStore.load(store_path).has_seen("keep_a")
 
 
 def test_resolve_registered_in_help():

@@ -172,6 +172,7 @@ ogle incidents --sort datasets          # order by blast radius (most datasets f
 ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
+ogle incidents --serving-only --fingerprints | xargs ogle resolve   # batch-resolve a filtered set
 ```
 
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
@@ -214,6 +215,15 @@ stays red until the drift is actually fixed (`ogle resolve`d, or its fingerprint
 even on ticks that surface nothing new. It evaluates the *filtered* set (composes with
 `--min-severity`/`--serving-only`/`--min-count`) but is **independent of `--limit`** — a display cap
 never changes the pass/fail verdict — and works with the list, `--summary`, and `--json` views alike.
+
+`--fingerprints` turns the read side into a **selector for the write side**: instead of the
+human list it prints just the surviving fingerprints, one per line, honoring every filter plus
+`--sort`/`--limit`. Pipe them straight into `ogle resolve` to batch-triage a whole class of drift
+in one command — `ogle incidents --serving-only --min-severity high --fingerprints | xargs ogle
+resolve`. It stays **silent on an empty set** (so a pipe gets a clean empty stream, not a bogus
+token), overrides `--summary`/`--json` (this *is* the machine form), and still returns the
+`--fail-on` gate code so one invocation can both list a batch and signal a failing gate. (`ogle
+resolve` trims surrounding whitespace, so the pipe works even where a shell adds a trailing CR.)
 
 Each line shows the incident's **severity**, a human **headline**, how many times it has
 **recurred** (`seen 3×` — the "still happening" signal), how many datasets it spans, whether
