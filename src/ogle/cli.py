@@ -616,7 +616,14 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         r for r in all_records if _incident_passes(r, min_rank, serving_only, min_count)
     ]
 
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        _emit("_--limit must be a positive integer._")
+        return 2
+
     # `--summary`: an aggregate rollup of the (filtered) set instead of the per-incident list.
+    # `--limit` is deliberately NOT applied here: the rollup describes the whole filtered set,
+    # so capping it would under-count severity/serving/recurring totals.
     if getattr(args, "summary", False):
         summary = _incident_summary(records)
         if args.json:
@@ -641,8 +648,11 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         _emit(f"- total sightings: {summary['total_sightings']}")
         return 0
 
+    # `--limit`: cap to the top N after sort+filter (records are already worst-first).
+    capped = records[:limit] if limit is not None else records
+
     if args.json:
-        _emit(json.dumps({"incidents": records}, indent=2, sort_keys=True))
+        _emit(json.dumps({"incidents": capped}, indent=2, sort_keys=True))
         return 0
     if not records:
         # Distinguish "memory is empty" from "filters hid everything" so the operator
@@ -653,8 +663,13 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             _emit("_no incidents remembered yet._")
         return 0
 
-    _emit(f"**{len(records)} remembered incident(s):**")
-    for r in records:
+    # When --limit hides some, say so ("Top N of M") so a capped view never reads as the
+    # full remembered set.
+    if len(capped) < len(records):
+        _emit(f"**Top {len(capped)} of {len(records)} remembered incident(s):**")
+    else:
+        _emit(f"**{len(records)} remembered incident(s):**")
+    for r in capped:
         sev = r.get("severity") or "unknown"
         mark = _INCIDENT_SEV_MARK.get(sev, "•")  # bullet for unknown/legacy
         count = int(r.get("count", 0))
@@ -874,6 +889,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--summary",
         action="store_true",
         help="Show an aggregate rollup (counts by severity, serving, recurring) instead of the list.",
+    )
+    incidents.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Show only the top N incidents (worst severity/recurrence first). Ignored by --summary.",
     )
     incidents.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     incidents.set_defaults(func=cmd_incidents)

@@ -166,6 +166,7 @@ ogle incidents --min-severity high      # triage: only high-severity incidents (
 ogle incidents --serving-only           # only incidents that touch a serving path
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
+ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ```
 
@@ -174,6 +175,12 @@ The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` fi
 chronic drift that keeps recurring despite being "seen." When a filter empties a non-empty memory,
 Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
 tracked.
+
+`--limit N` caps the list to the top N after that worst-first sort — a triage shortcut for
+"just show me the N that matter most" on a store with a long tail. It composes with the filters
+(applied *after* them) and the header says `Top N of M` so a capped view never reads as the whole
+set. It's deliberately ignored by `--summary` (the rollup describes the whole filtered set — capping
+it would under-count).
 
 `--summary` swaps the per-incident list for an at-a-glance rollup — total remembered, a count
 per severity, how many touch a serving path, how many are recurring (seen ≥2×), and the total

@@ -850,6 +850,76 @@ def test_incidents_summary_filtered_empty_message(tmp_path, capsys):
     assert "no incidents match the filter" in out and "3 remembered" in out
 
 
+# ---- `ogle incidents --limit N`: triage cap to the top-N worst -----------------------
+def test_incidents_limit_caps_to_top_n(tmp_path, capsys):
+    # --limit keeps only the top N after the worst-first sort: high before medium before low.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)  # high_serv, med_only, low_serv
+    assert main(["incidents", "--store", str(store_path), "--limit", "2", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["high_serv", "med_only"]  # low_serv is past the cap
+
+
+def test_incidents_limit_larger_than_set_shows_all(tmp_path, capsys):
+    # A cap above the remembered count is a no-op — every incident still lists.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--limit", "10", "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["incidents"]) == 3
+
+
+def test_incidents_limit_composes_with_filters(tmp_path, capsys):
+    # --limit applies AFTER the triage filters: serving-only keeps just chronic (the only
+    # serving incident), then the cap of 1 keeps it — order of filter-then-cap is what's pinned.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)  # chronic(high,serv,5×) twice(med,2×) once(low,1×)
+    rc = main(["incidents", "--store", str(store_path),
+               "--serving-only", "--limit", "1", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["chronic"]  # only serving incident, and the cap keeps it
+
+
+def test_incidents_limit_text_header_says_top_n_of_m(tmp_path, capsys):
+    # The list header must announce the cap so a truncated view never reads as the whole set.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--limit", "1"]) == 0
+    assert "Top 1 of 3 remembered incident(s)" in capsys.readouterr().out
+
+
+def test_incidents_limit_at_full_count_keeps_plain_header(tmp_path, capsys):
+    # When the cap doesn't actually hide anything, keep the plain header (no misleading "Top").
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--limit", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "3 remembered incident(s)" in out and "Top" not in out
+
+
+def test_incidents_limit_ignored_by_summary(tmp_path, capsys):
+    # --summary describes the WHOLE filtered set; --limit must not shrink its totals.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary", "--limit", "1", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["total"] == 3  # all three, not capped to 1
+    assert summary["total_sightings"] == 8
+
+
+def test_incidents_limit_zero_is_rejected(tmp_path, capsys):
+    # A non-positive cap is a usage error, not a silent empty list that reads as "none tracked".
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--limit", "0"]) == 2
+    assert "--limit must be a positive integer" in capsys.readouterr().out
+
+
+def test_incidents_limit_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--limit", "5"])
+    assert ns.limit == 5
+
+
 # ---- `ogle resolve` ------------------------------------------------------------------
 # Feature #3 memory operator control: once a drift is fixed in prod, the operator drops it
 # from cross-run memory so `ogle incidents` no longer lists it AND a recurrence pages fresh.
