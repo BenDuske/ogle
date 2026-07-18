@@ -783,6 +783,95 @@ def test_incidents_filter_flags_registered_in_help():
     assert ns.min_count == 4
 
 
+# ---- `ogle incidents --grep`: find specific drift by title/fingerprint text ---------
+def test_incidents_grep_matches_title(tmp_path, capsys):
+    # --grep keeps only incidents whose title contains the needle (find drift by keyword).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_a", severity="high", title="customers row-count drop", datasets=1)
+    s.record_incident("fp_b", severity="high", title="orders schema change", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--grep", "customers", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fp_a"]  # "orders schema change" has no "customers"
+
+
+def test_incidents_grep_is_case_insensitive(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_a", severity="high", title="Customers row-count drop", datasets=1)
+    s.save()
+    # Upper-case needle still matches a mixed-case title.
+    assert main(["incidents", "--store", str(store_path), "--grep", "CUSTOMERS", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fp_a"]
+
+
+def test_incidents_grep_matches_fingerprint_prefix(tmp_path, capsys):
+    # The needle also matches the fingerprint, so a prefix works like `ogle resolve`.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abc123def", severity="high", title="drift one", datasets=1)
+    s.record_incident("999feed", severity="high", title="drift two", datasets=1)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--grep", "abc1", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["abc123def"]  # matched on fingerprint, not title
+
+
+def test_incidents_grep_composes_with_min_severity(tmp_path, capsys):
+    # --grep AND --min-severity: both a text match and the severity floor must hold.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("hi", severity="high", title="serving drift", datasets=1)
+    s.record_incident("lo", severity="low", title="serving drift", datasets=1)
+    s.save()
+    rc = main(["incidents", "--store", str(store_path),
+               "--grep", "serving", "--min-severity", "high", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["hi"]  # both titled "serving drift"; the low one is below the floor
+
+
+def test_incidents_grep_no_match_message(tmp_path, capsys):
+    # A needle nothing contains yields the "no match" message + remembered count,
+    # NOT the "none remembered" message (memory is non-empty; the filter hid it).
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--grep", "nonesuch"]) == 0
+    out = capsys.readouterr().out
+    assert "no incidents match the filter" in out and "3 remembered" in out
+    assert "no incidents remembered yet" not in out
+
+
+def test_incidents_grep_empty_needle_matches_nothing(tmp_path, capsys):
+    # An all-whitespace needle is a user slip, not a wildcard — it matches nothing rather
+    # than everything, so a fat-fingered `--grep ""` never masquerades as "all incidents".
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--grep", "   ", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+
+
+def test_incidents_grep_untitled_legacy_matches_fingerprint(tmp_path, capsys):
+    # A legacy bare-count record (no title) still greps on its fingerprint.
+    store_path = tmp_path / "baselines.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "seen_incidents": {"orders_urn_xyz": {"count": 4}}}),
+        encoding="utf-8",
+    )
+    assert main(["incidents", "--store", str(store_path), "--grep", "orders", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["orders_urn_xyz"]
+
+
+def test_incidents_grep_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--grep", "customers"])
+    assert ns.grep == "customers"
+    # Default is None (no text filter) when the flag is omitted.
+    assert build_parser().parse_args(["incidents"]).grep is None
+
+
 # ---- `ogle incidents --summary`: aggregate rollup of the memory ---------------------
 def test_incidents_summary_json_shape(tmp_path, capsys):
     # The rollup counts by severity, serving-path, recurrence, and total sightings.

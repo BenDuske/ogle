@@ -165,6 +165,7 @@ ogle incidents --json                   # same, machine-readable
 ogle incidents --min-severity high      # triage: only high-severity incidents (drops unknown/legacy)
 ogle incidents --serving-only           # only incidents that touch a serving path
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
+ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ogle incidents --sort count             # order by recurrence (most-recurring drift first)
 ogle incidents --sort datasets          # order by blast radius (most datasets first)
@@ -178,6 +179,14 @@ The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` fi
 chronic drift that keeps recurring despite being "seen." When a filter empties a non-empty memory,
 Ogle says so (`no incidents match the filter (N remembered)`) rather than implying nothing is
 tracked.
+
+`--grep TEXT` is the text axis: it keeps only incidents whose **title or fingerprint** contains
+`TEXT` (case-insensitive) — the way to pull one dataset or drift phrase out of a large memory
+(`ogle incidents --grep customers`). Because it also matches the fingerprint, a fingerprint
+**prefix** works as a needle, mirroring how `ogle resolve` accepts prefixes. It ANDs with every
+other filter (`--grep customers --min-severity high` = high-severity customers drift only). An
+all-whitespace needle matches nothing rather than everything, so a fat-fingered `--grep ""` never
+masquerades as "all incidents."
 
 `--sort {severity,count,datasets}` picks the ordering axis. The default `severity` is the
 triage order (worst first, recurrence as tiebreak); `count` surfaces the most-recurring

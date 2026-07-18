@@ -491,11 +491,31 @@ _INCIDENT_SORTS = {
 }
 
 
+def _incident_matches_needle(rec: dict, needle: str) -> bool:
+    """True if `needle` (case-insensitive) is a substring of the incident's title or
+    fingerprint.
+
+    The text axis behind `ogle incidents --grep`: find specific drift in a large memory by
+    keyword. Matches the human-facing `title` (a dataset name, feature, or drift phrase) OR
+    the `fingerprint` — so a fingerprint prefix works as a needle too, mirroring how
+    `ogle resolve` accepts prefixes. An un-titled legacy record (no `title`) still matches on
+    its fingerprint. An all-whitespace needle matches nothing meaningful, so it's treated as
+    "no match" rather than "match everything" (an empty grep is a user slip, not a wildcard).
+    """
+    probe = needle.strip().lower()
+    if not probe:
+        return False
+    title = (rec.get("title") or "").lower()
+    fingerprint = (rec.get("fingerprint") or "").lower()
+    return probe in title or probe in fingerprint
+
+
 def _incident_passes(
     rec: dict,
     min_rank: Optional[int],
     serving_only: bool,
     min_count: Optional[int] = None,
+    needle: Optional[str] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -503,12 +523,15 @@ def _incident_passes(
     unknown/legacy ranks -1, so ANY `--min-severity` floor drops it — asking for a floor
     is asking to hide the un-triageable. `serving_only` keeps only serving-path incidents.
     `min_count` is a recurrence floor (None = no floor): keeps only incidents seen at least
-    that many times, surfacing the chronic/flapping drift that keeps coming back. All filters
-    are ANDed; passing none keeps everything.
+    that many times, surfacing the chronic/flapping drift that keeps coming back. `needle`
+    (None = no text filter) keeps only incidents whose title/fingerprint contains it
+    (case-insensitive). All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
         return False
     if min_count is not None and int(rec.get("count", 0)) < min_count:
+        return False
+    if needle is not None and not _incident_matches_needle(rec, needle):
         return False
     if min_rank is not None:
         try:
@@ -665,13 +688,17 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     min_rank = Severity(args.min_severity).rank if args.min_severity else None
     serving_only = getattr(args, "serving_only", False)
     min_count = getattr(args, "min_count", None)
+    needle = getattr(args, "grep", None)
     filtered = (
         getattr(args, "min_severity", None) is not None
         or serving_only
         or min_count is not None
+        or needle is not None
     )
     records = [
-        r for r in all_records if _incident_passes(r, min_rank, serving_only, min_count)
+        r
+        for r in all_records
+        if _incident_passes(r, min_rank, serving_only, min_count, needle)
     ]
 
     limit = getattr(args, "limit", None)
@@ -951,6 +978,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         default=None,
         help="Only show incidents seen at least N times (surfaces chronic/flapping drift).",
+    )
+    incidents.add_argument(
+        "--grep",
+        metavar="TEXT",
+        default=None,
+        help="Only show incidents whose title or fingerprint contains TEXT "
+        "(case-insensitive) — find specific drift in a large memory.",
     )
     incidents.add_argument(
         "--sort",
