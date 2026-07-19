@@ -126,6 +126,15 @@ def _do_writeback(findings, walk_result, gms: str, severity_tags: bool = False):
     return plan, apply(plan, backend)
 
 
+def _do_retract(recovered_urns, active_findings, walk_result, gms: str):
+    """Live tag retraction — strip Ogle's tag off datasets whose drift cleared. Lazy import."""
+    from .writeback import DataHubWritebackBackend, apply_retract, plan_retract
+
+    backend = DataHubWritebackBackend(gms_server=gms)
+    plan = plan_retract(recovered_urns, active_findings, walk_result)
+    return plan, apply_retract(plan, backend)
+
+
 # ---------------------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------------------
@@ -268,6 +277,34 @@ def cmd_check(args: argparse.Namespace) -> int:
                 return 1
             _render_writeback(plan, wb_result, as_json=args.json)
 
+    # Optional retraction — clear Ogle's tag off assets that recovered. Unlike write-back
+    # this runs on healthy runs too (recovery is exactly the no-new-incident case). Only
+    # meaningful against a live graph; the read-before-write in apply_retract keeps it a
+    # cheap no-op on entities Ogle never tagged.
+    if getattr(args, "retract_cleared", False):
+        if walk_result is None:
+            print(
+                "ogle check: --retract-cleared requires a live walk (--gms/--models/--discover);"
+                " offline mode has no way to reach DataHub.",
+                file=sys.stderr,
+            )
+            return 2
+        drifted = {f.urn for f in report.findings}
+        recovered = [u for u in report.scored_urns if u not in drifted]
+        if not recovered:
+            _emit("_retract: no recovered datasets this run._")
+        else:
+            try:
+                r_plan, r_result = _do_retract(
+                    recovered, report.findings, walk_result, args.gms
+                )
+            except Exception as exc:
+                print(f"ogle check: retract failed: {exc}", file=sys.stderr)
+                # Same contract as write-back: the check succeeded; retraction is an
+                # optional side-effect, so don't upgrade the exit code on its account.
+                return 1 if gate_should_fail(report, getattr(args, "fail_on", None)) else 0
+            _render_retract(r_plan, r_result, as_json=args.json)
+
     # CI exit-code gate. Without --fail-on this is exactly the old "fail on any new
     # incident" contract; with it, a below-floor new incident is still reported (and
     # tagged) but exits 0. Announce that suppression so it's never a silent pass —
@@ -299,6 +336,31 @@ def _render_writeback(plan, result, *, as_json: bool) -> None:
         lines.append(f"- `{urn}`")
     if result.unchanged:
         lines.append(f"_({len(result.unchanged)} already tagged, skipped)_")
+    if result.failed:
+        lines.append(f"_({len(result.failed)} failed — see logs)_")
+    _emit("\n".join(lines))
+
+
+def _render_retract(plan, result, *, as_json: bool) -> None:
+    if as_json:
+        _emit(
+            json.dumps(
+                {"plan": plan.to_dict(), "result": result.to_dict()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    # `tagged_entities` de-dupes the entities we actually changed — here it's the set we
+    # UN-flagged (apply_retract reuses WritebackResult; `applied` = tags removed).
+    if not result.tagged_entities:
+        _emit("_retract: nothing to clear (no recovered asset carried an Ogle tag)._")
+        return
+    lines = ["", f"**Cleared Ogle's drift tag from {len(result.tagged_entities)} entity(ies):**"]
+    for urn in result.tagged_entities:
+        lines.append(f"- `{urn}`")
+    if result.unchanged:
+        lines.append(f"_({len(result.unchanged)} already clean, skipped)_")
     if result.failed:
         lines.append(f"_({len(result.failed)} failed — see logs)_")
     _emit("\n".join(lines))
@@ -1560,6 +1622,17 @@ def build_parser() -> argparse.ArgumentParser:
             "With --write-back, ALSO stamp a per-severity tag "
             "(`urn:li:tag:ogle-drift-high|medium|low`) so DataHub can be filtered to the "
             "worst drift. A model inherits the worst severity of the datasets feeding it."
+        ),
+    )
+    check.add_argument(
+        "--retract-cleared",
+        action="store_true",
+        help=(
+            "Close the loop: on this run, REMOVE Ogle's drift tags from datasets that were "
+            "checked and are now healthy (and their downstream mlModels no longer fed by any "
+            "still-drifting dataset), so a recovered asset stops carrying a stale flag. Runs "
+            "even when there is no new incident. Requires a live walk (--gms). Idempotent — "
+            "skips entities that aren't Ogle-tagged."
         ),
     )
     check.add_argument(

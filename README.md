@@ -431,6 +431,25 @@ severity of the drifted datasets feeding it** — the finding that would page yo
 that colours the model. The flat tag is always stamped too, so coarse "everything Ogle
 flagged" grouping keeps working.
 
+#### Clearing the flag when drift heals (`--retract-cleared`)
+
+A tag you never take back becomes noise: after a fix ships, `ogle-drift-flagged` lingers on
+an asset that's healthy again, and operators learn to ignore it. `--retract-cleared` closes
+the loop — on any run (including a **healthy** one, which is exactly when recovery happens),
+it **removes** Ogle's drift tag from every dataset that was checked and is now clean, plus
+each downstream `mlModel` that is no longer fed by *any* still-drifting dataset. A model that
+still sits downstream of live drift keeps its flag, so clearing never hides a real incident.
+
+```bash
+# stamp on drift, and clear the stamp once an asset recovers — the tag stays trustworthy
+ogle check --gms http://localhost:8080 --discover --store live.json --write-back --retract-cleared
+```
+
+Retraction is idempotent (an asset Ogle never tagged is a cheap no-op via a read-before-write),
+strips the flat tag **and** every `ogle-drift-<severity>` variant, and requires a live walk
+(`--gms`). It reads DataHub as the source of truth, so it needs no local record of what was
+flagged before.
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

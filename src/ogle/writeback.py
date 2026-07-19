@@ -248,8 +248,9 @@ class WritebackBackend(Protocol):
         """Set of tag URNs currently on `entity_urn`. Missing entity/aspect -> empty set."""
 
     def set_tag_urns(self, entity_urn: str, tag_urns: Iterable[str]) -> None:
-        """Replace the entity's `GlobalTags` with these URNs. Idempotent from apply's side —
-        caller guarantees the set is a superset of the previous one for additive semantics."""
+        """Replace the entity's `GlobalTags` with exactly these URNs. `apply` calls it with a
+        superset (additive); `apply_retract` calls it with a subset (removal). Either way the
+        write is authoritative — the caller has already merged/pruned against the read set."""
 
 
 def apply(plan: WritebackPlan, backend: WritebackBackend) -> WritebackResult:
@@ -298,6 +299,153 @@ def apply(plan: WritebackPlan, backend: WritebackBackend) -> WritebackResult:
         # unchanged tags are still "already present", not "just applied".
         for a in actions:
             (applied if a.tag_urn in missing else unchanged).append(a)
+
+    return WritebackResult(applied=applied, unchanged=unchanged, failed=failed)
+
+
+# ---------------------------------------------------------------------------------------
+# Retraction — the write-side inverse. Remove Ogle's tag when drift clears.
+# ---------------------------------------------------------------------------------------
+#: The severities `plan_writeback(severity_tags=True)` could have stamped. Retraction
+#: targets ALL of them (plus the flat tag) so a recovered entity is fully un-flagged no
+#: matter which severity it carried on a prior tick — a stale `ogle-drift-high` left
+#: behind is exactly the untrustworthy-tag bug retraction exists to fix.
+_RETRACT_SEVERITIES = ("high", "medium", "low", "unknown")
+
+
+def all_ogle_tag_urns(tag_urn: str = OGLE_DRIFT_TAG) -> Set[str]:
+    """Every tag URN Ogle could have written: the flat tag plus each severity variant."""
+    return {tag_urn} | {severity_tag_urn(s) for s in _RETRACT_SEVERITIES}
+
+
+def plan_retract(
+    recovered_urns: Iterable[str],
+    active_findings: Sequence[DriftFinding] = (),
+    walk_result: Optional[WalkResult] = None,
+    tag_urn: str = OGLE_DRIFT_TAG,
+    severity_tags: bool = True,
+) -> WritebackPlan:
+    """Plan removal of Ogle's tags from entities whose drift has cleared.
+
+    Inverse of `plan_writeback`. ``recovered_urns`` are dataset URNs healthy THIS run (a
+    prior tick may have flagged them). ``active_findings`` are the datasets STILL drifting
+    now — the safety input that stops retraction from un-flagging something that should
+    stay flagged:
+
+      * A dataset in ``recovered_urns`` is retracted only if it is NOT still drifting.
+      * A downstream `mlModel` is retracted only when NONE of its still-drifting upstream
+        datasets feed it — a model that is downstream of both a recovered dataset and a
+        still-drifting one keeps its flag. Clearing it there would hide a live incident.
+
+    Tags removed per entity: the flat ``tag_urn`` always; when ``severity_tags`` (default
+    True), every severity variant too. Removal of an absent tag is a harmless no-op in
+    ``apply_retract`` (it lands in ``unchanged``), so over-listing is safe.
+
+    Empty ``recovered_urns`` -> empty plan. If ``walk_result`` is None, only datasets are
+    retracted (no model mapping to follow).
+    """
+    still_drifting: Set[str] = {f.urn for f in active_findings}
+
+    dataset_to_models: Dict[str, List[str]] = (
+        walk_result.dataset_to_models if walk_result is not None else {}
+    )
+
+    # De-dup recovered datasets, drop any that are actually still drifting, preserve order.
+    recovered: List[str] = []
+    seen_ds: Set[str] = set()
+    for urn in recovered_urns:
+        if urn in still_drifting or urn in seen_ds:
+            continue
+        seen_ds.add(urn)
+        recovered.append(urn)
+
+    # Models that must KEEP their flag: anything downstream of a still-drifting dataset.
+    protected_models: Set[str] = set()
+    for ds_urn in still_drifting:
+        protected_models.update(dataset_to_models.get(ds_urn, ()))
+
+    remove_tags: List[str] = [tag_urn]
+    if severity_tags:
+        remove_tags.extend(severity_tag_urn(s) for s in _RETRACT_SEVERITIES)
+    # Preserve order, drop dupes (flat tag could collide with a severity variant if a
+    # caller passed an odd tag_urn).
+    ordered_tags: List[str] = []
+    seen_tags: Set[str] = set()
+    for t in remove_tags:
+        if t not in seen_tags:
+            seen_tags.add(t)
+            ordered_tags.append(t)
+
+    actions: List[TagAction] = []
+    emitted: Set[str] = set()  # (entity, tag) — one removal action per pair.
+
+    def _push(entity_urn: str, reason: str) -> None:
+        for t in ordered_tags:
+            key = f"{entity_urn}\x1e{t}"
+            if key in emitted:
+                continue
+            emitted.add(key)
+            actions.append(TagAction(entity_urn=entity_urn, tag_urn=t, reason=reason))
+
+    # Datasets first (recovered order), then their now-unflagged downstream models.
+    for ds_urn in recovered:
+        _push(ds_urn, reason="recovered: drift cleared")
+
+    cleared_models: Set[str] = set()
+    for ds_urn in recovered:
+        for model_urn in dataset_to_models.get(ds_urn, ()):
+            if model_urn in protected_models or model_urn in cleared_models:
+                continue
+            cleared_models.add(model_urn)
+            _push(model_urn, reason=f"recovered: upstream {ds_urn} cleared")
+
+    return WritebackPlan(actions=actions)
+
+
+def apply_retract(plan: WritebackPlan, backend: WritebackBackend) -> WritebackResult:
+    """Remove each planned tag from its entity via `backend` — inverse of `apply`.
+
+    Reads the entity's current tag URNs, drops the planned tags that are actually present,
+    and writes back the reduced set. A planned tag that is NOT present is recorded in
+    ``unchanged`` (nothing to remove) — so retraction is idempotent and safe to run every
+    tick, exactly like `apply`. ``applied`` holds the tags genuinely removed. A read
+    failure strands that entity's actions in ``failed`` (we never blind-write over tags we
+    couldn't read); a write failure does the same. One broken entity never strands the batch.
+    """
+    applied: List[TagAction] = []
+    unchanged: List[TagAction] = []
+    failed: List[TagAction] = []
+
+    by_entity: Dict[str, List[TagAction]] = {}
+    order: List[str] = []
+    for action in plan.actions:
+        if action.entity_urn not in by_entity:
+            order.append(action.entity_urn)
+        by_entity.setdefault(action.entity_urn, []).append(action)
+
+    for entity_urn in order:
+        actions = by_entity[entity_urn]
+        try:
+            current = backend.existing_tag_urns(entity_urn)
+        except Exception:
+            failed.extend(actions)
+            continue
+
+        wanted = {a.tag_urn for a in actions}
+        present = wanted & current
+        if not present:
+            # Nothing of ours to strip off this entity — no write at all.
+            unchanged.extend(actions)
+            continue
+
+        try:
+            backend.set_tag_urns(entity_urn, current - present)
+        except Exception:
+            failed.extend(actions)
+            continue
+
+        for a in actions:
+            (applied if a.tag_urn in present else unchanged).append(a)
 
     return WritebackResult(applied=applied, unchanged=unchanged, failed=failed)
 

@@ -357,3 +357,128 @@ def test_full_writeback_flow_end_to_end():
     assert backend.tags[MODEL_DEMAND] == {OGLE_DRIFT_TAG}
     # And churn wasn't tagged twice even though both drifted datasets feed it.
     assert result.applied.count(TagAction(MODEL_CHURN, OGLE_DRIFT_TAG, "downstream of drifted " + DS_CUSTOMERS)) == 1
+
+
+# =======================================================================================
+# plan_retract / apply_retract — the write-side inverse (clear the flag when drift heals)
+# =======================================================================================
+from ogle.writeback import (  # noqa: E402
+    all_ogle_tag_urns,
+    apply_retract,
+    plan_retract,
+    severity_tag_urn as _sev_tag,
+)
+
+_SEV_HIGH = _sev_tag(Severity.HIGH)
+_SEV_MED = _sev_tag(Severity.MEDIUM)
+
+
+def test_retract_empty_when_nothing_recovered():
+    plan = plan_retract([], active_findings=[_finding(DS_ORDERS)])
+    assert isinstance(plan, WritebackPlan)
+    assert plan.actions == []
+
+
+def test_all_ogle_tag_urns_covers_flat_plus_every_severity():
+    urns = all_ogle_tag_urns()
+    assert OGLE_DRIFT_TAG in urns
+    assert {_sev_tag("high"), _sev_tag("medium"), _sev_tag("low"), _sev_tag("unknown")} <= urns
+
+
+def test_retract_plans_flat_and_all_severity_tags_by_default():
+    plan = plan_retract([DS_CUSTOMERS])
+    removed = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert removed == all_ogle_tag_urns()
+
+
+def test_retract_flat_only_when_severity_tags_false():
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+    removed = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert removed == {OGLE_DRIFT_TAG}
+
+
+def test_retract_skips_dataset_still_drifting():
+    """A URN that shows up in recovered AND still-drifting is never retracted."""
+    plan = plan_retract([DS_CUSTOMERS, DS_ORDERS], active_findings=[_finding(DS_ORDERS)])
+    entities = {a.entity_urn for a in plan.actions}
+    assert DS_CUSTOMERS in entities
+    assert DS_ORDERS not in entities
+
+
+def test_retract_clears_downstream_model_when_fully_recovered():
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN]})
+    plan = plan_retract([DS_CUSTOMERS], walk_result=walk)
+    entities = {a.entity_urn for a in plan.actions}
+    assert entities == {DS_CUSTOMERS, MODEL_CHURN}
+
+
+def test_retract_protects_model_still_downstream_of_active_drift():
+    """MODEL_CHURN is fed by both a recovered and a still-drifting dataset -> keep its flag."""
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN, MODEL_DEMAND]})
+    plan = plan_retract(
+        [DS_CUSTOMERS], active_findings=[_finding(DS_ORDERS)], walk_result=walk
+    )
+    entities = {a.entity_urn for a in plan.actions}
+    assert DS_CUSTOMERS in entities        # recovered dataset cleared
+    assert MODEL_CHURN not in entities     # still downstream of drifting DS_ORDERS -> protected
+    assert MODEL_DEMAND not in entities     # not downstream of any recovered dataset
+
+
+def test_apply_retract_removes_present_tag_and_leaves_others():
+    backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG, "urn:li:tag:pii"}})
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+    result = apply_retract(plan, backend)
+    # Ogle's tag stripped; the unrelated pii tag survives.
+    assert backend.tags[DS_CUSTOMERS] == {"urn:li:tag:pii"}
+    assert [a.tag_urn for a in result.applied] == [OGLE_DRIFT_TAG]
+
+
+def test_apply_retract_idempotent_when_tag_absent():
+    """Re-running on an already-clean entity writes nothing and reports unchanged."""
+    backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {"urn:li:tag:pii"}})
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+    result = apply_retract(plan, backend)
+    assert result.applied == []
+    assert [a.tag_urn for a in result.unchanged] == [OGLE_DRIFT_TAG]
+    assert backend.write_calls == 0  # no write when there's nothing of ours to remove
+    assert backend.tags[DS_CUSTOMERS] == {"urn:li:tag:pii"}
+
+
+def test_apply_retract_read_failure_strands_entity_not_batch():
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN]})
+    backend = FakeWritebackBackend(
+        tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG}, MODEL_CHURN: {OGLE_DRIFT_TAG}},
+        fail_on_read={DS_CUSTOMERS},
+    )
+    plan = plan_retract([DS_CUSTOMERS], walk_result=walk, severity_tags=False)
+    result = apply_retract(plan, backend)
+    failed_entities = {a.entity_urn for a in result.failed}
+    applied_entities = {a.entity_urn for a in result.applied}
+    assert failed_entities == {DS_CUSTOMERS}     # unreadable entity stranded
+    assert applied_entities == {MODEL_CHURN}      # the rest of the batch still cleared
+    assert backend.tags[DS_CUSTOMERS] == {OGLE_DRIFT_TAG}   # never blind-written
+
+
+def test_apply_retract_write_failure_recorded():
+    backend = FakeWritebackBackend(
+        tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG}}, fail_on_write={DS_CUSTOMERS}
+    )
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+    result = apply_retract(plan, backend)
+    assert {a.entity_urn for a in result.failed} == {DS_CUSTOMERS}
+    assert result.applied == []
+
+
+def test_retract_round_trips_a_full_write_then_clear():
+    """Tag with plan_writeback+apply, then heal with plan_retract+apply_retract -> clean."""
+    findings = [_finding(DS_CUSTOMERS, severity=Severity.HIGH)]
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN]})
+    backend = FakeWritebackBackend()
+
+    apply(plan_writeback(findings, walk, severity_tags=True), backend)
+    assert OGLE_DRIFT_TAG in backend.tags[DS_CUSTOMERS]
+    assert _SEV_HIGH in backend.tags[DS_CUSTOMERS]
+
+    apply_retract(plan_retract([DS_CUSTOMERS], walk_result=walk), backend)
+    assert backend.tags[DS_CUSTOMERS] == set()
+    assert backend.tags[MODEL_CHURN] == set()

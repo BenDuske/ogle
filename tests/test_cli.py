@@ -2646,3 +2646,48 @@ def test_fmt_age_picks_largest_whole_unit():
     assert _fmt_age(7200) == "2h"
     assert _fmt_age(172800) == "2d"
     assert _fmt_age(1209600) == "2w"
+
+
+# ---- --retract-cleared: guard + live wiring ---------------------------------------
+def test_retract_cleared_offline_is_input_error(tmp_path, capsys):
+    """Retraction needs a live graph; the offline signatures path can't reach DataHub."""
+    store = tmp_path / "b.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs), "--retract-cleared"])
+    assert rc == 2
+    assert "requires a live walk" in capsys.readouterr().err
+
+
+def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, monkeypatch):
+    """Live run: healthy scored datasets (not drifting) are the recovered set handed to retract."""
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    # Seed baselines so a second identical run scores both datasets healthy (no drift).
+    seed = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=2000)]
+    wr = WalkResult(
+        signatures=seed,
+        serving_dataset_urns={CUSTOMERS_URN},
+        dataset_to_models={CUSTOMERS_URN: ["urn:li:mlModel:(x,churn,PROD)"]},
+    )
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (seed, sorted(wr.serving_dataset_urns), wr))
+
+    captured = {}
+
+    def _fake_retract(recovered, active, walk_result, gms):
+        captured["recovered"] = list(recovered)
+        captured["active"] = list(active)
+        from ogle.writeback import WritebackPlan, WritebackResult
+        return WritebackPlan(), WritebackResult()
+
+    monkeypatch.setattr("ogle.cli._do_retract", _fake_retract)
+
+    # First run seeds (healthy). Second run: still healthy -> both datasets recovered candidates.
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])
+    capsys.readouterr()
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover", "--retract-cleared"])
+
+    assert rc == 0
+    assert set(captured["recovered"]) == {CUSTOMERS_URN, ORDERS_URN}
+    assert captured["active"] == []  # no drift this run
+    assert "nothing to clear" in capsys.readouterr().out
