@@ -202,10 +202,21 @@ new one — never a torn one. The confirmation line goes to stderr, keeping stdo
 Every series is a **gauge** (point-in-time store levels, so none carry the `_total` suffix
 Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /
 `_rows_unknown`, `ogle_incidents_remembered{severity="high|medium|low|unknown"}`,
-`ogle_incidents_serving` / `_recurring` / `_sightings`, and `ogle_muted_active`. The numbers are
-the same rollups `status` prints (verified against `status --json` in the test suite), so a
-Grafana panel and the CLI snapshot never disagree. Unlike `status --fail-on`, `metrics` **always
-exits 0** — a scrape must not fail on data levels; keep gating on `status`/`incidents --fail-on`.
+`ogle_incidents_serving` / `_recurring` / `_sightings`, `ogle_muted_active`, the incident
+staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), and a monitor heartbeat
+`ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
+`status --json` in the test suite), so a Grafana panel and the CLI snapshot never disagree.
+Unlike `status --fail-on`, `metrics` **always exits 0** — a scrape must not fail on data levels;
+keep gating on `status`/`incidents --fail-on`.
+
+**Monitor the monitor.** Every gauge above is a point-in-time store *level*, so if the scheduled
+`ogle check` crash-loops or its cron is removed, those gauges freeze at their last value while
+`ogle_up` keeps asserting `1` — the dashboard looks healthy while drift goes undetected.
+`ogle_store_age_seconds` is the dead-man's-switch: it's `now − store-file-mtime`, and the store
+file's mtime only advances when `ogle check` actually runs, so alerting on
+`ogle_store_age_seconds > 2 × check_interval` fires when Ogle itself goes dark, independent of
+whether any drift is present. Before the first store write (no file yet) the family is declared
+but emits **no sample** — an honest "no data", not a fabricated zero age.
 
 ### Corruption-resilient store (unattended-safe)
 

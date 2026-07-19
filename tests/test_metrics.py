@@ -94,6 +94,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_muted_active",
         "ogle_incidents_last_seen_min_age_seconds",
         "ogle_incidents_last_seen_max_age_seconds",
+        "ogle_store_age_seconds",
     }
     # Every family has exactly one HELP and one TYPE, and every one is a gauge.
     assert helps == families
@@ -215,6 +216,19 @@ def test_output_writes_file_not_stdout(tmp_path, capsys):
     assert 'ogle_incidents_serving 1' in body
 
 
+def _drop_wallclock(body):
+    """Strip the wall-clock heartbeat SAMPLE line so two invocations compare deterministically.
+
+    `ogle_store_age_seconds` = now - store mtime, sampled per invocation, so the stdout and
+    file renders (two separate `main()` calls microseconds apart) legitimately differ on that
+    one value. The HELP/TYPE headers stay — only the value line is clock-dependent.
+    """
+    return "\n".join(
+        ln for ln in body.splitlines()
+        if not (ln and not ln.startswith("#") and ln.split()[0] == "ogle_store_age_seconds")
+    )
+
+
 def test_output_matches_stdout_render(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     _seed_store(store_path)
@@ -225,8 +239,9 @@ def test_output_matches_stdout_render(tmp_path, capsys):
     out = tmp_path / "ogle.prom"
     main(["metrics", "--store", str(store_path), "--output", str(out)])
     file_body = out.read_text(encoding="utf-8")
-    # Same exposition, modulo the trailing newline _emit and the file both append.
-    assert file_body.strip() == stdout_body.strip()
+    # Same exposition, modulo the trailing newline _emit and the file both append and the
+    # per-invocation wall-clock heartbeat value.
+    assert _drop_wallclock(file_body).strip() == _drop_wallclock(stdout_body).strip()
     assert file_body.endswith("\n")  # exposition wants a newline-terminated final sample
 
 
@@ -334,3 +349,92 @@ def test_metrics_cli_emits_age_sample_for_timed_incident(tmp_path, capsys):
     lo = float(samples["ogle_incidents_last_seen_min_age_seconds"])
     hi = float(samples["ogle_incidents_last_seen_max_age_seconds"])
     assert hi >= lo > 0  # a single ancient incident: both large, max >= min
+
+
+# ---- store-age heartbeat (dead-man's-switch for the monitor itself) -----------------
+def test_store_file_age_none_when_file_missing(tmp_path):
+    from ogle.cli import _store_file_age
+
+    # No store written yet (first run) → no age series, never a fabricated zero.
+    assert _store_file_age(tmp_path / "nope.json", now=1000.0) is None
+
+
+def test_store_file_age_is_seconds_since_mtime(tmp_path):
+    import os
+
+    from ogle.cli import _store_file_age
+
+    p = tmp_path / "baselines.json"
+    p.write_text("{}", encoding="utf-8")
+    os.utime(p, (500.0, 500.0))  # mtime = 500s
+    assert _store_file_age(p, now=800.0) == 300.0
+
+
+def test_store_file_age_clamps_future_mtime_to_zero(tmp_path):
+    import os
+
+    from ogle.cli import _store_file_age
+
+    # mtime ahead of now (clock skew / cloud-sync touch) reads as 0, never negative.
+    p = tmp_path / "baselines.json"
+    p.write_text("{}", encoding="utf-8")
+    os.utime(p, (2000.0, 2000.0))
+    assert _store_file_age(p, now=1000.0) == 0.0
+
+
+def test_render_emits_store_age_gauge_when_known():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        age_bounds=None,
+        store_age=42.0,
+    )
+    samples, types, helps = _parse_prom(text)
+    assert types["ogle_store_age_seconds"] == "gauge"
+    assert "ogle_store_age_seconds" in helps
+    assert samples["ogle_store_age_seconds"] == "42"
+
+
+def test_render_declares_store_age_gauge_but_no_sample_when_unknown():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        age_bounds=None,
+        store_age=None,
+    )
+    _, types, helps = _parse_prom(text)
+    # HELP/TYPE always declared (stable scrape shape) ...
+    assert "ogle_store_age_seconds" in helps
+    assert types["ogle_store_age_seconds"] == "gauge"
+    # ... but NO value line before the first store write (honest "no data").
+    for ln in text.splitlines():
+        assert not (
+            ln
+            and not ln.startswith("#")
+            and ln.split()[0] == "ogle_store_age_seconds"
+        )
+
+
+def test_metrics_cli_emits_store_age_for_existing_store(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)  # writes the file → mtime exists
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, types, _ = _parse_prom(capsys.readouterr().out)
+    assert types["ogle_store_age_seconds"] == "gauge"
+    # A freshly-written store: age is small but real (>= 0), and always present.
+    assert float(samples["ogle_store_age_seconds"]) >= 0
+
+
+def test_metrics_cli_omits_store_age_sample_for_missing_store(tmp_path, capsys):
+    # An empty/never-written store still renders (all-zero), but with no store file the
+    # heartbeat has no honest value — the family is declared, no sample emitted.
+    store_path = tmp_path / "baselines.json"
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, types, helps = _parse_prom(capsys.readouterr().out)
+    assert "ogle_store_age_seconds" in helps
+    assert types["ogle_store_age_seconds"] == "gauge"
+    assert "ogle_store_age_seconds" not in samples

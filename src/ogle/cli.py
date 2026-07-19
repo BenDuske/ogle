@@ -1535,12 +1535,35 @@ def _incident_age_bounds(
     return min(ages), max(ages)
 
 
+def _store_file_age(path: Path, now: float) -> Optional[float]:
+    """Seconds since the store file was last written (dead-man's-switch for the monitor).
+
+    Returns `now - mtime` (clamped at 0 for clock skew, mirroring `_incident_age_bounds`),
+    or `None` when the file does not exist yet — a first run before any `ogle check` has
+    persisted a store, where a fabricated age would be a lie.
+
+    This is the metric that catches Ogle itself going dark: every drift gauge is a
+    point-in-time store LEVEL, so if the scheduled `ogle check` crash-loops or its cron is
+    removed, those gauges freeze at their last value while `ogle_up` keeps asserting 1 — the
+    dashboard looks healthy while drift goes undetected. The store file's mtime advances only
+    when `ogle check` actually writes a baseline/incident update, so its age is a true
+    heartbeat: `alert: ogle_store_age_seconds > 2 * check_interval` fires when the monitor
+    stops running, independent of whether any drift is present.
+    """
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, now - mtime)
+
+
 def _render_prometheus(
     totals: dict,
     inc: dict,
     muted_count: int,
     store_path: str,
     age_bounds: Optional[Tuple[float, float]] = None,
+    store_age: Optional[float] = None,
 ) -> str:
     """Render the store rollup as Prometheus text exposition format (v0.0.4).
 
@@ -1641,6 +1664,19 @@ def _render_prometheus(
         "Age of the longest-quiet incident (stalest — resolve/forget candidate).",
         stale_samples,
     )
+    # Heartbeat: how long since the store file was last written = since `ogle check` last
+    # ran. Unlike every gauge above (which describes drift), this describes OGLE — alert on
+    # it to catch the monitor itself going dark while its other gauges freeze. Declared
+    # always for a stable scrape shape; emits no sample before the first store write (no
+    # file yet → honest "no data", not a fabricated zero).
+    store_age_samples: list = []
+    if store_age is not None:
+        store_age_samples = [(None, f"{store_age:g}")]
+    family(
+        "ogle_store_age_seconds",
+        "Seconds since the store file was last written (age of the last `ogle check` run).",
+        store_age_samples,
+    )
     return "\n".join(lines)
 
 
@@ -1664,7 +1700,10 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     inc = _incident_summary(records)
     muted = store.muted(now)  # active snoozes only (expired excluded)
     age_bounds = _incident_age_bounds(records, now)
-    text = _render_prometheus(totals, inc, len(muted), str(args.store), age_bounds)
+    store_age = _store_file_age(Path(args.store), now)
+    text = _render_prometheus(
+        totals, inc, len(muted), str(args.store), age_bounds, store_age
+    )
     out = getattr(args, "output", None)
     if out:
         path = _atomic_write_text(Path(out), text)
