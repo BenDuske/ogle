@@ -162,6 +162,25 @@ def _do_retract(recovered_urns, active_findings, walk_result, gms: str):
     return plan, apply_retract(plan, backend)
 
 
+def _plan_writeback_only(findings, walk_result, severity_tags: bool = False):
+    """Compute the write-back plan WITHOUT touching DataHub (no backend, no writes).
+
+    Backs `--catalog-dry-run`: `plan_writeback` is pure, so a preview never constructs the
+    live backend — the exact opposite of `_do_writeback`, which applies. Lazy import keeps
+    the SDK off the offline path.
+    """
+    from .writeback import plan_writeback
+
+    return plan_writeback(findings, walk_result, severity_tags=severity_tags)
+
+
+def _plan_retract_only(recovered_urns, active_findings, walk_result):
+    """Compute the retraction plan WITHOUT touching DataHub. Dry-run twin of `_do_retract`."""
+    from .writeback import plan_retract
+
+    return plan_retract(recovered_urns, active_findings, walk_result)
+
+
 # ---------------------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------------------
@@ -298,6 +317,16 @@ def cmd_check(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        elif getattr(args, "catalog_dry_run", False):
+            # Preview-only: compute the pure plan and show it; never construct the backend
+            # or write. Same live-walk requirement as a real write-back (the plan needs the
+            # dataset→model mapping) — the dry-run just stops short of applying.
+            plan = _plan_writeback_only(
+                report.findings,
+                walk_result,
+                severity_tags=getattr(args, "write_back_severity", False),
+            )
+            _render_plan_preview(plan, as_json=args.json, retract=False)
         else:
             try:
                 plan, wb_result = _do_writeback(
@@ -329,6 +358,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         recovered = [u for u in report.scored_urns if u not in drifted]
         if not recovered:
             _emit("_retract: no recovered datasets this run._")
+        elif getattr(args, "catalog_dry_run", False):
+            r_plan = _plan_retract_only(recovered, report.findings, walk_result)
+            _render_plan_preview(r_plan, as_json=args.json, retract=True)
         else:
             try:
                 r_plan, r_result = _do_retract(
@@ -399,6 +431,38 @@ def _render_retract(plan, result, *, as_json: bool) -> None:
         lines.append(f"_({len(result.unchanged)} already clean, skipped)_")
     if result.failed:
         lines.append(f"_({len(result.failed)} failed — see logs)_")
+    _emit("\n".join(lines))
+
+
+def _render_plan_preview(plan, *, as_json: bool, retract: bool) -> None:
+    """Show exactly what a write-back / retraction WOULD do — nothing is written.
+
+    Backs `--catalog-dry-run`. Renders straight off the pure plan (no backend read), so a
+    preview is honest about intent (the deterministic action set) but makes no claim about
+    which entities are already tagged — that would need a live read the dry-run refuses to
+    do. The `dry_run: true` flag in JSON mode lets a wrapper tell a preview from an apply.
+    """
+    verb = "retract" if retract else "write-back"
+    if as_json:
+        _emit(json.dumps({"dry_run": True, "plan": plan.to_dict()}, indent=2, sort_keys=True))
+        return
+    if not plan.actions:
+        clear_or_tag = "clear" if retract else "tag"
+        _emit(f"_{verb} dry-run: nothing to {clear_or_tag} (no matching entity)._")
+        return
+    # De-dup entities for the headline count while listing every (entity, tag) action.
+    seen: set = set()
+    entities = [a.entity_urn for a in plan.actions if not (a.entity_urn in seen or seen.add(a.entity_urn))]
+    would = "remove" if retract else "stamp"
+    arrow = "⊘" if retract else "←"
+    lines = [
+        "",
+        f"**👀 dry-run — would {would} {len(plan.actions)} tag(s) across "
+        f"{len(entities)} entity(ies); NOTHING written to DataHub:**",
+    ]
+    for a in plan.actions:
+        suffix = f"  _{a.reason}_" if a.reason else ""
+        lines.append(f"- `{a.entity_urn}` {arrow} `{a.tag_urn}`{suffix}")
     _emit("\n".join(lines))
 
 
@@ -1966,6 +2030,16 @@ def build_parser() -> argparse.ArgumentParser:
             "still-drifting dataset), so a recovered asset stops carrying a stale flag. Runs "
             "even when there is no new incident. Requires a live walk (--gms). Idempotent — "
             "skips entities that aren't Ogle-tagged."
+        ),
+    )
+    check.add_argument(
+        "--catalog-dry-run",
+        action="store_true",
+        help=(
+            "Preview the exact tag writes/retractions --write-back / --retract-cleared "
+            "WOULD make to DataHub, then stop — nothing is written. The safe way to see "
+            "what the agent would stamp on your live catalog before letting it. Mirrors "
+            "the --dry-run on `resolve`/`forget` for the outward-facing catalog ops."
         ),
     )
     check.add_argument(

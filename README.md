@@ -535,6 +535,23 @@ strips the flat tag **and** every `ogle-drift-<severity>` variant, and requires 
 (`--gms`). It reads DataHub as the source of truth, so it needs no local record of what was
 flagged before.
 
+#### Previewing catalog writes first (`--catalog-dry-run`)
+
+Letting an agent write to a shared production catalog is a trust decision. `--catalog-dry-run`
+lets you make it with eyes open: it computes the **exact** tags `--write-back` / `--retract-cleared`
+would stamp or clear and prints them, then stops — **nothing is written to DataHub**. This is the
+outward-facing twin of the `--dry-run` on `ogle resolve` / `ogle forget` (which preview local
+store edits); it still needs a live walk (`--gms`), since the plan follows the real dataset→model
+lineage.
+
+```bash
+# See what Ogle WOULD tag on a new incident — change nothing:
+ogle check --gms http://localhost:8080 --discover --store live.json --write-back --catalog-dry-run
+
+# Preview a retraction the same way; --json adds "dry_run": true so a wrapper can tell it from an apply:
+ogle check --gms http://localhost:8080 --discover --store live.json --retract-cleared --catalog-dry-run --json
+```
+
 ### Running on a schedule (`ogle watch`)
 
 `ogle watch` is one scheduler tick: it runs `ogle check`, then acts on the exit code —

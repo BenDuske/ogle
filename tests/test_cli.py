@@ -2797,3 +2797,104 @@ def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, 
     assert set(captured["recovered"]) == {CUSTOMERS_URN, ORDERS_URN}
     assert captured["active"] == []  # no drift this run
     assert "nothing to clear" in capsys.readouterr().out
+
+
+# ---- --catalog-dry-run: preview the live-catalog write without applying ------------
+def _seed_and_drift(tmp_path, store, monkeypatch):
+    """Seed a HEALTHY CUSTOMERS baseline offline, then arm the live walk to return a
+    schema-dropped CUSTOMERS = fresh serving-path drift.
+
+    The offline seed keeps the baseline healthy (a live seed would bake the drift in and the
+    re-check would see no change). CUSTOMERS is the only drifted+serving dataset, with one
+    downstream model, so a write-back plan covers exactly two entities.
+    """
+    from ogle.walker import WalkResult
+
+    MODEL = "urn:li:mlModel:(urn:li:dataPlatform:mlflow,churn,PROD)"
+    healthy = _write_sigs(tmp_path / "healthy.json", [_sig(CUSTOMERS_URN)], serving=[CUSTOMERS_URN])
+    main(["check", "--store", str(store), "--signatures", str(healthy)])  # seed baseline
+
+    drifted = _sig(CUSTOMERS_URN, schema_fields=[("id", "int")])  # dropped `email` = schema drift
+    wr = WalkResult(
+        signatures=[drifted],
+        serving_dataset_urns={CUSTOMERS_URN},
+        dataset_to_models={CUSTOMERS_URN: [MODEL]},
+    )
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: ([drifted], sorted(wr.serving_dataset_urns), wr),
+    )
+    return CUSTOMERS_URN, MODEL
+
+
+def test_write_back_catalog_dry_run_previews_without_applying(tmp_path, capsys, monkeypatch):
+    """--write-back --catalog-dry-run shows the planned tags and NEVER calls the applier."""
+    store = tmp_path / "b.json"
+    ds, model = _seed_and_drift(tmp_path, store, monkeypatch)
+    capsys.readouterr()
+
+    def _boom(*a, **k):
+        raise AssertionError("_do_writeback must not run under --catalog-dry-run")
+
+    monkeypatch.setattr("ogle.cli._do_writeback", _boom)
+
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back", "--catalog-dry-run",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 1  # new incident still fires
+    assert "dry-run" in out and "NOTHING written" in out
+    assert f"`{ds}`" in out and f"`{model}`" in out  # dataset + downstream model both planned
+
+
+def test_write_back_catalog_dry_run_json_sets_flag(tmp_path, capsys, monkeypatch):
+    """JSON preview carries `dry_run: true` so a wrapper can tell it from a real apply."""
+    store = tmp_path / "b.json"
+    ds, _ = _seed_and_drift(tmp_path, store, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("ogle.cli._do_writeback", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+
+    main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back", "--catalog-dry-run", "--json",
+    ])
+    # The dry-run preview is the LAST JSON object emitted (after the report).
+    blobs = [b for b in capsys.readouterr().out.split("\n{") if '"dry_run"' in b]
+    assert blobs, "expected a dry_run JSON preview"
+    payload = json.loads("{" + blobs[-1] if not blobs[-1].startswith("{") else blobs[-1])
+    assert payload["dry_run"] is True
+    assert any(a["entity_urn"] == ds for a in payload["plan"]["actions"])
+
+
+def test_retract_cleared_catalog_dry_run_previews_without_applying(tmp_path, capsys, monkeypatch):
+    """--retract-cleared --catalog-dry-run previews the clear plan and never calls _do_retract."""
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    seed = [_sig(CUSTOMERS_URN, row_count=1000)]
+    wr = WalkResult(
+        signatures=seed,
+        serving_dataset_urns={CUSTOMERS_URN},
+        dataset_to_models={CUSTOMERS_URN: ["urn:li:mlModel:(x,churn,PROD)"]},
+    )
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: (seed, sorted(wr.serving_dataset_urns), wr),
+    )
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])  # seed
+    capsys.readouterr()
+
+    def _boom(*a, **k):
+        raise AssertionError("_do_retract must not run under --catalog-dry-run")
+
+    monkeypatch.setattr("ogle.cli._do_retract", _boom)
+
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--retract-cleared", "--catalog-dry-run",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run" in out and "NOTHING written" in out
+    assert f"`{CUSTOMERS_URN}`" in out
