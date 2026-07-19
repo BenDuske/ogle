@@ -543,6 +543,105 @@ def cmd_baselines(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mute_state(store: "BaselineStore", urn: str, now: float) -> dict:
+    """The live mute state of one URN as a small dict: {muted, snoozed, until}.
+
+    `muted` is the effective silence right now (permanent OR an unexpired snooze); `snoozed`
+    distinguishes a timed mute from a permanent one; `until` is the snooze expiry (epoch
+    seconds) or None for permanent/not-muted. Reuses the store's own `is_muted`/`mute_expiry`
+    so `show` reports exactly what `ogle check` would honor on the next walk.
+    """
+    muted = store.is_muted(urn, now)
+    until = store.mute_expiry(urn)
+    return {"muted": muted, "snoozed": muted and until is not None, "until": until}
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Drill into ONE watched dataset — the full memorized signature plus its mute state.
+
+    Read-only. Where `ogle baselines` lists the whole watch-list one summary line each, this
+    opens a single URN and shows what no other view does: the exact field list (path + native
+    type) Ogle memorized, each field's null fraction (the quality signal behind QUALITY
+    drift), the row count, the FULL schema hash, the capture provenance, and whether the
+    dataset is currently muted/snoozed. The natural next step after a page — "Ogle flagged
+    `orders`; show me exactly what it has on it." Keys on an EXACT URN (the `--urns` selector
+    emits them whole), so it composes with the watch-list: `ogle baselines --grep orders
+    --urns | head -1 | xargs ogle show`.
+
+    Incidents are keyed by drift-*event* fingerprint, not by URN, so a dataset's remembered
+    drift lives in `ogle incidents --grep <name>`, not here — this view is strictly the
+    baseline signature + mute state, the two facets the store holds per URN.
+
+    Exit 0 when the dataset is watched, 1 when it isn't (a scriptable "no such baseline"),
+    so `ogle show <urn> >/dev/null && …` branches cleanly.
+    """
+    store = BaselineStore.load(Path(args.store))
+    urn = args.urn
+    sig = store.get_baseline(urn)
+    now = time.time()
+
+    if sig is None:
+        # Not on the watch-list. Distinguish an empty store from a plain miss so the operator
+        # knows whether to run `check` first vs. that this specific URN just isn't tracked.
+        if len(store) == 0:
+            _emit(f"_not watched: `{urn}` — store is empty; run `ogle check` first._")
+        else:
+            _emit(f"_not watched: `{urn}` ({len(store)} dataset(s) tracked)._")
+        return 1
+
+    mute = _mute_state(store, urn, now)
+    # Stable field order (schema_fields tuple order isn't guaranteed meaningful — the hash is
+    # order-independent), so the same baseline always renders identically.
+    fields = sorted(sig.schema_fields, key=lambda f: f.path)
+
+    if args.json:
+        entries = []
+        for f in fields:
+            entry = {"path": f.path, "native_type": f.native_type}
+            if f.path in sig.field_null_fractions:
+                entry["null_fraction"] = sig.field_null_fractions[f.path]
+            entries.append(entry)
+        _emit(
+            json.dumps(
+                {
+                    "dataset": {
+                        "urn": urn,
+                        "fields": entries,
+                        "field_count": len(fields),
+                        "row_count": sig.row_count,
+                        "schema_hash": sig.schema_hash,
+                        "computed_at": sig.computed_at,
+                        "muted": mute["muted"],
+                        "muted_until": mute["until"],
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    _emit(f"**dataset `{urn}`**")
+    rpart = f"{sig.row_count} row(s)" if sig.row_count is not None else "rows unknown"
+    _emit(f"- schema: {len(fields)} field(s) · {rpart}")
+    _emit(f"- hash: `{sig.schema_hash}`")
+    if sig.computed_at:
+        _emit(f"- captured: {sig.computed_at}")
+    if mute["snoozed"]:
+        _emit(f"- 🔇 muted: snoozed until {_fmt_expiry(mute['until'])}")
+    elif mute["muted"]:
+        _emit("- 🔇 muted: permanent")
+    else:
+        _emit("- 🔔 muted: no")
+    if fields:
+        _emit("**fields:**")
+        for f in fields:
+            frac = sig.field_null_fractions.get(f.path)
+            npart = f" — {frac * 100:.0f}% null" if frac is not None else ""
+            _emit(f"- `{f.path}` : {f.native_type}{npart}")
+    return 0
+
+
 # Severity marks for the incident-memory view, keyed by the string the store persists
 # (the store stays decoupled from the scorer's Severity enum, so the CLI maps here).
 _INCIDENT_SEV_MARK = {"high": "\U0001f534", "medium": "\U0001f7e0", "low": "\U0001f7e1"}
@@ -1310,6 +1409,24 @@ def build_parser() -> argparse.ArgumentParser:
         "Overrides --json.",
     )
     baselines.set_defaults(func=cmd_baselines)
+
+    # `ogle show` — drill into ONE watched dataset (read-only): the full memorized signature
+    # (fields + types + null fractions + row count + hash + provenance) and its mute state.
+    # `baselines` lists the watch-list a line each; this opens a single URN — the detail no
+    # other view shows. Keys on an exact URN, so it pairs with `baselines --urns`.
+    show = sub.add_parser(
+        "show",
+        help="Show one dataset's full memorized signature + mute state (drill into a baseline).",
+    )
+    show.add_argument(
+        "urn",
+        help="Dataset URN to inspect (exact, as emitted by `ogle baselines --urns`).",
+    )
+    show.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    show.add_argument("--json", action="store_true", help="Emit the full signature as JSON.")
+    show.set_defaults(func=cmd_show)
 
     # `ogle incidents` — inspect Ogle's cross-run incident memory (read-only): what drift
     # it's tracking, recurrence counts, serving impact. The visible side of the same

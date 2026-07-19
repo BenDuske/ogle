@@ -211,6 +211,27 @@ overrides `--json`, and stays **silent on an empty set** so a pipe gets a clean 
 all-whitespace `--grep "   "` matches nothing (a slip, not a wildcard), and a filter that hides
 everything says so (`no baselines match the filter`) rather than reading as an empty store.
 
+### Drilling into one dataset (`ogle show`)
+
+`ogle baselines` lists the watch-list a summary line each; `ogle show <urn>` opens a **single**
+dataset and prints the full signature Ogle memorized — the detail no other view exposes. After a
+page ("Ogle flagged `orders`"), it answers "show me exactly what it has on that table":
+
+```bash
+ogle show "urn:li:dataset:(dbt,shop.orders,PROD)"          # full field list + types + null% + rows + hash + mute state
+ogle show "urn:li:dataset:(dbt,shop.orders,PROD)" --json   # the whole signature, machine-readable
+ogle baselines --grep orders --urns | head -1 | xargs ogle show   # drill in straight from the selector
+```
+
+The human view lists every field as `path : native_type`, tags each field's **null fraction**
+(the quality signal behind QUALITY drift — a column that used to be full and is now mostly null),
+and shows the row count, the **full** schema hash, the capture provenance, and whether the
+dataset is muted/snoozed. Fields are sorted by path so the same baseline always renders
+identically. It keys on an **exact** URN (as `baselines --urns` emits them) and exits **1** when
+the dataset isn't watched — a scriptable "no such baseline" so `ogle show X >/dev/null && …`
+branches cleanly. A dataset's remembered *drift* lives in `ogle incidents --grep <name>` (incidents
+are keyed by drift event, not URN); `show` is strictly the baseline signature + mute state.
+
 ### Pruning the watch-list (`ogle forget`)
 
 `ogle forget` is the write-side counterpart to `ogle baselines`: when a dataset is

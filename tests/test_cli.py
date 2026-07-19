@@ -2092,3 +2092,156 @@ def test_status_registered_in_help():
     assert ns.func.__name__ == "cmd_status"
     assert ns.json is False
     assert ns.fail_on is None
+
+
+# ---- ogle show: single-dataset drill-down ----------------------------------------
+def _seed_show(store_path, **mute):
+    """A store with customers (2 fields, one carrying a null fraction) + orders. Optional
+    mute kwargs: permanent=True, or until=<epoch> for a snooze."""
+    s = BaselineStore(
+        path=store_path,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                row_count=1000, field_null_fractions={"email": 0.25}
+            ),
+            ORDERS_URN: _sig(urn=ORDERS_URN, schema_fields=[("oid", "int")], row_count=0),
+        },
+    )
+    if mute.get("permanent"):
+        s.mute(CUSTOMERS_URN)
+    elif mute.get("until") is not None:
+        s.mute(CUSTOMERS_URN, until=mute["until"])
+    s.save()
+    return s
+
+
+def test_show_human_renders_signature_and_fields(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store)
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert CUSTOMERS_URN in out
+    assert "2 field(s)" in out and "1000 row(s)" in out
+    # The field list — no other command shows path:type — plus the quality signal.
+    assert "`email` : string" in out and "`id` : int" in out
+    assert "25% null" in out
+    assert "muted: no" in out
+
+
+def test_show_prints_full_schema_hash(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    seeded = _seed_show(store)
+    main(["show", CUSTOMERS_URN, "--store", str(store)])
+    full = seeded.get_baseline(CUSTOMERS_URN).schema_hash
+    assert len(full) == 64  # full sha256, not the 12-char baselines preview
+    assert full in capsys.readouterr().out
+
+
+def test_show_json_shape(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    seeded = _seed_show(store)
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store), "--json"])
+    assert rc == 0
+    ds = json.loads(capsys.readouterr().out)["dataset"]
+    assert ds["urn"] == CUSTOMERS_URN
+    assert ds["field_count"] == 2
+    assert ds["row_count"] == 1000
+    assert ds["schema_hash"] == seeded.get_baseline(CUSTOMERS_URN).schema_hash
+    assert ds["muted"] is False and ds["muted_until"] is None
+    by_path = {f["path"]: f for f in ds["fields"]}
+    assert by_path["email"]["native_type"] == "string"
+    assert by_path["email"]["null_fraction"] == 0.25
+    # A field with no recorded null fraction omits the key rather than guessing 0.
+    assert "null_fraction" not in by_path["id"]
+
+
+def test_show_null_fraction_omitted_when_absent_human(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store)
+    main(["show", CUSTOMERS_URN, "--store", str(store)])
+    out = capsys.readouterr().out
+    # `id` has no null fraction → its line carries no "% null" suffix.
+    id_line = [ln for ln in out.splitlines() if "`id` :" in ln][0]
+    assert "null" not in id_line
+
+
+def test_show_not_watched_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store)
+    rc = main(["show", "urn:li:dataset:(nope)", "--store", str(store)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "not watched" in out.lower()
+    assert "2 dataset(s) tracked" in out  # miss vs empty store
+
+
+def test_show_empty_store_exits_one_and_says_so(tmp_path, capsys):
+    store = tmp_path / "s.json"  # never created
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 1
+    assert "store is empty" in capsys.readouterr().out.lower()
+
+
+def test_show_reports_permanent_mute(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store, permanent=True)
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 0
+    assert "muted: permanent" in capsys.readouterr().out
+
+
+def test_show_reports_snooze_with_expiry(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    until = time.time() + 3600
+    _seed_show(store, until=until)
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store), "--json"])
+    assert rc == 0
+    ds = json.loads(capsys.readouterr().out)["dataset"]
+    assert ds["muted"] is True
+    assert ds["muted_until"] == pytest.approx(until)
+
+
+def test_show_unknown_row_count_reads_plainly(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={CUSTOMERS_URN: _sig(row_count=None)},
+    ).save()
+    main(["show", CUSTOMERS_URN, "--store", str(store)])
+    assert "rows unknown" in capsys.readouterr().out
+
+
+def test_show_fields_sorted_by_path_for_stable_output(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("zeta", "int"), ("alpha", "int"), ("mid", "int")],
+                row_count=1,
+            )
+        },
+    ).save()
+    main(["show", CUSTOMERS_URN, "--store", str(store)])
+    out = capsys.readouterr().out
+    assert out.index("`alpha`") < out.index("`mid`") < out.index("`zeta`")
+
+
+def test_show_registered_in_help():
+    ns = build_parser().parse_args(["show", CUSTOMERS_URN])
+    assert ns.func.__name__ == "cmd_show"
+    assert ns.urn == CUSTOMERS_URN
+    assert ns.json is False
+
+
+def test_show_composes_with_baselines_urns_selector(tmp_path, capsys):
+    """`ogle baselines --grep customers --urns` emits the exact URN `show` consumes."""
+    store = tmp_path / "s.json"
+    _seed_show(store)
+    main(["baselines", "--store", str(store), "--grep", "customers", "--urns"])
+    urn = capsys.readouterr().out.strip()
+    assert urn == CUSTOMERS_URN
+    rc = main(["show", urn, "--store", str(store)])
+    assert rc == 0
+    assert "2 field(s)" in capsys.readouterr().out
