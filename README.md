@@ -180,6 +180,30 @@ Unlike `incidents --fail-on`, it gates on the *whole* store (`status` has no fil
 `0` by default so the plain snapshot never pages unless a floor is asked for. Mirrors the exit-code
 contract of `check --fail-on` / `incidents --fail-on`.
 
+### Corruption-resilient store (unattended-safe)
+
+The store is written atomically (temp file + `os.replace`), so Ogle itself never leaves a
+half-written file. But a store on disk can still go bad from the outside — a truncated
+cloud-sync, a hand-edit, a disk fault, or a file from a future/foreign Ogle version. A
+scheduled `ogle check` that simply crashed on that would **crash-loop and go silently blind
+to drift** — the worst failure mode for a production monitor.
+
+Instead, `ogle check` recovers: an unreadable store (bad JSON, wrong version, or malformed
+shape) is **quarantined** to `<store>.corrupt` (deterministic `.corrupt.1`, `.corrupt.2`, …
+if a prior forensic copy already exists — never clobbered), a **loud warning** is printed to
+stderr, and the run **re-baselines from scratch** and exits `0` rather than failing. The next
+walk repopulates baselines, and the operator keeps the bad file for forensics.
+
+```
+ogle check: WARNING baseline store at live.json was unreadable (corrupt/foreign);
+quarantined to live.json.corrupt and re-baselining from scratch — this run cannot
+detect drift against prior state.
+```
+
+The warning goes to **stderr**, so `--json` on stdout stays clean for a wrapper to parse.
+Strict callers that would rather see the raw error can use `BaselineStore.load(path,
+recover_corrupt=False)`.
+
 ### Inspecting the watch-list (`ogle baselines`)
 
 The store has two halves. `ogle incidents` shows the drift Ogle *remembers*; `ogle baselines`

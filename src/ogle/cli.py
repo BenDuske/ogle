@@ -198,6 +198,15 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
+    if store.recovered_from_corruption:
+        # A crash-looping check on a bad store would go silently blind to drift — warn loudly
+        # (stderr, so JSON on stdout stays clean) and re-baseline this run rather than fail.
+        _emit(
+            f"ogle check: WARNING baseline store at {store_path} was unreadable "
+            f"(corrupt/foreign); quarantined to {store.corrupt_backup_path} and "
+            f"re-baselining from scratch — this run cannot detect drift against prior state.",
+            stream=sys.stderr,
+        )
 
     # Gather the current signatures + which of them feed a serving model.
     walk_result = None  # None in offline mode; a real WalkResult in live mode.

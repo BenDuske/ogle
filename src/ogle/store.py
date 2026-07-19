@@ -103,6 +103,13 @@ class BaselineStore:
     # live in `muted_urns` and always win over a snooze for the same URN.
     muted_until: Dict[str, float] = field(default_factory=dict)
 
+    # Runtime-only recovery status (NOT persisted — excluded from to_dict, and from
+    # dataclass eq/repr so two stores with identical data still compare equal). Set by
+    # `load()` when it had to quarantine a corrupt/foreign file and start fresh, so a
+    # caller (e.g. `ogle check`) can warn loudly instead of silently re-baselining blind.
+    recovered_from_corruption: bool = field(default=False, compare=False, repr=False)
+    corrupt_backup_path: Optional[Path] = field(default=None, compare=False, repr=False)
+
     # ---- baselines -----------------------------------------------------------------
     def get_baseline(self, urn: str) -> Optional[DatasetSignature]:
         """The last signature seen for `urn`, or None if this dataset is new to Ogle."""
@@ -346,14 +353,53 @@ class BaselineStore:
         self.path = target
         return target
 
+    @staticmethod
+    def _quarantine_corrupt(p: Path) -> Path:
+        """Move an unreadable store file aside so the next `save()` can write a clean one,
+        while preserving the bad file for forensics. Returns the backup path.
+
+        Deterministic naming (`<name>.corrupt`, then `.corrupt.1`, `.corrupt.2`, ... if a
+        prior recovery already claimed the slot) — never clobbers an earlier forensic copy,
+        and stays test-reproducible (no timestamp/random in the name). The move is an atomic
+        same-directory `os.replace`.
+        """
+        target = p.with_name(p.name + ".corrupt")
+        n = 1
+        while target.exists():
+            target = p.with_name(p.name + f".corrupt.{n}")
+            n += 1
+        os.replace(p, target)
+        return target
+
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "BaselineStore":
-        """Load a store from disk. A missing file yields a fresh empty store (first run)."""
+    def load(cls, path: Union[str, Path], *, recover_corrupt: bool = True) -> "BaselineStore":
+        """Load a store from disk. A missing file yields a fresh empty store (first run).
+
+        A corrupt or foreign file (invalid JSON, wrong version, or malformed shape) is a
+        real production hazard: a scheduled `ogle check` that crash-loops on a bad store
+        goes silently blind to drift. So by default (`recover_corrupt=True`) an unreadable
+        file is *quarantined* aside (see `_quarantine_corrupt`) and this returns a fresh
+        empty store that re-baselines on the next walk — `recovered_from_corruption` and
+        `corrupt_backup_path` are set on it so the caller can warn instead of failing silent.
+        Pass `recover_corrupt=False` for a strict caller (or a test) that wants the raw error.
+        """
         p = Path(path)
         if not p.exists():
             return cls(path=p)
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return cls.from_dict(data, path=p)
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return cls.from_dict(data, path=p)
+        except (ValueError, KeyError, TypeError):
+            # ValueError covers json.JSONDecodeError (a subclass) + from_dict's version
+            # guard + bad numeric coercions; KeyError/TypeError cover a shape that parsed
+            # as JSON but isn't a store. All mean "this file is not a usable baseline store".
+            if not recover_corrupt:
+                raise
+            backup = cls._quarantine_corrupt(p)
+            store = cls(path=p)
+            store.recovered_from_corruption = True
+            store.corrupt_backup_path = backup
+            return store
 
     def put_many(self, signatures: Iterable[DatasetSignature]) -> None:
         """Convenience: upsert a batch of baselines (what a full DataHub walk produces)."""

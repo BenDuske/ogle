@@ -106,6 +106,19 @@ def test_unchanged_exits_zero(tmp_path, capsys):
     assert "No drift" in capsys.readouterr().out
 
 
+def test_check_warns_and_recovers_on_corrupt_store(tmp_path, capsys):
+    # A corrupt store must not crash the scheduled run; it re-baselines and warns on stderr.
+    store = tmp_path / "baselines.json"
+    store.write_text("}{ not json", encoding="utf-8")
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs)])
+    assert rc == 0  # first run against a fresh store: seed, don't page
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "quarantined" in err
+    assert store.with_name(store.name + ".corrupt").exists()  # forensic copy kept
+    assert store.exists()  # clean store re-written in place
+
+
 def test_new_incident_exits_one(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()

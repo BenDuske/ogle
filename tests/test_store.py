@@ -439,11 +439,80 @@ def test_on_disk_shape_has_version(tmp_path):
     assert "seen_incidents" in data
 
 
-def test_load_rejects_wrong_version(tmp_path):
+def test_load_rejects_wrong_version_in_strict_mode(tmp_path):
     p = tmp_path / "store.json"
     p.write_text(json.dumps({"version": 999, "baselines": {}}), encoding="utf-8")
     with pytest.raises(ValueError, match="version"):
-        BaselineStore.load(p)
+        BaselineStore.load(p, recover_corrupt=False)
+
+
+# ---- corruption resilience -------------------------------------------------------
+def test_load_recovers_from_corrupt_json(tmp_path):
+    # A scheduled `ogle check` must not crash-loop (and go blind) on a mangled store file.
+    p = tmp_path / "store.json"
+    p.write_text("{ this is not: valid json ]", encoding="utf-8")
+    store = BaselineStore.load(p)
+    # Fresh empty store, flagged so a caller can warn.
+    assert len(store) == 0
+    assert store.recovered_from_corruption is True
+    assert store.path == p
+    # Bad file was preserved for forensics, not deleted...
+    backup = p.with_name(p.name + ".corrupt")
+    assert store.corrupt_backup_path == backup
+    assert backup.read_text(encoding="utf-8") == "{ this is not: valid json ]"
+    # ...and moved aside so the canonical path is free for a clean re-baseline.
+    assert not p.exists()
+    store.put_baseline(_sig())
+    store.save()
+    assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN) is not None
+
+
+def test_load_recovers_from_wrong_version_by_default(tmp_path):
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps({"version": 999, "baselines": {}}), encoding="utf-8")
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path.exists()
+
+
+def test_corrupt_backup_never_clobbers_prior_forensic_copy(tmp_path):
+    p = tmp_path / "store.json"
+    # First recovery claims <name>.corrupt
+    p.write_text("garbage-1", encoding="utf-8")
+    s1 = BaselineStore.load(p)
+    assert s1.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    # A second corrupt file must land at .corrupt.1, leaving the first copy intact.
+    p.write_text("garbage-2", encoding="utf-8")
+    s2 = BaselineStore.load(p)
+    assert s2.corrupt_backup_path == p.with_name(p.name + ".corrupt.1")
+    assert p.with_name(p.name + ".corrupt").read_text(encoding="utf-8") == "garbage-1"
+    assert p.with_name(p.name + ".corrupt.1").read_text(encoding="utf-8") == "garbage-2"
+
+
+def test_load_of_good_store_is_not_flagged_recovered(tmp_path):
+    p = tmp_path / "store.json"
+    s = BaselineStore(path=p)
+    s.put_baseline(_sig())
+    s.save()
+    loaded = BaselineStore.load(p)
+    assert loaded.recovered_from_corruption is False
+    assert loaded.corrupt_backup_path is None
+    # No spurious quarantine file created for a healthy load.
+    assert not p.with_name(p.name + ".corrupt").exists()
+
+
+def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
+    # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
+    p = tmp_path / "store.json"
+    bad = BaselineStore(path=p)
+    bad.recovered_from_corruption = True
+    bad.corrupt_backup_path = p.with_name("x.corrupt")
+    good = BaselineStore(path=p)
+    assert bad == good  # compare=False fields ignored
+    bad.save()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert "recovered_from_corruption" not in data
+    assert "corrupt_backup_path" not in data
 
 
 def test_save_overwrites_prior_good_baseline(tmp_path):
