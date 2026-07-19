@@ -133,6 +133,7 @@ def run_drift_check(
             title=incident.title,
             datasets=len(incident.urns),
             serving=incident.serving_impacted,
+            now=now,
         )
 
     text = narrate(all_findings, llm=llm)

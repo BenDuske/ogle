@@ -13,7 +13,7 @@ import pytest
 
 import io
 
-from ogle.cli import _emit, build_parser, load_signatures_file, main
+from ogle.cli import _emit, _fmt_age, _parse_age, build_parser, load_signatures_file, main
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -2503,3 +2503,146 @@ def test_diff_registered_in_help_signatures_required():
     # --signatures is mandatory: omitting it is a parse error (exit 2 via SystemExit).
     with pytest.raises(SystemExit):
         build_parser().parse_args(["diff", CUSTOMERS_URN])
+
+
+# ---- incidents temporal axis: age display, --stale hunt, --sort recent -------------------
+
+# An epoch so far in the past (2001-09-09) that it's stale under any real --stale threshold,
+# while a sighting stamped at time.time() in-test is effectively age ~0.
+_ANCIENT = 1_000_000_000.0
+
+
+def test_incidents_shows_age_when_timestamped(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # A day-old sighting renders a concrete "… ago" age.
+    s.record_incident("fp", severity="high", title="HIGH drift", now=time.time() - 90000)
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "last seen 1d ago" in out
+
+
+def test_incidents_fresh_sighting_reads_just_now_without_ago(tmp_path, capsys):
+    # A sub-minute age reads "just now" on its own — never the awkward "just now ago".
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", title="HIGH drift", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "last seen just now" in out
+    assert "just now ago" not in out
+
+
+def test_incidents_untimed_record_shows_no_age(tmp_path, capsys):
+    # A legacy/untimed incident renders normally but never fakes an age.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", title="HIGH drift")  # no now
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    assert "last seen" not in capsys.readouterr().out
+
+
+def test_incidents_stale_filters_out_recent(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("old_fp", severity="high", title="OLD", now=_ANCIENT)
+    s.record_incident("fresh_fp", severity="high", title="FRESH", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--stale", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["old_fp"]  # only the drift not seen recently survives
+
+
+def test_incidents_stale_skips_untimed_records(tmp_path, capsys):
+    # A record with no last_seen can't be proven stale, so --stale drops it rather than
+    # guessing — only the demonstrably-old one comes through.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("untimed_fp", severity="high", title="UNTIMED")  # no now
+    s.record_incident("old_fp", severity="high", title="OLD", now=_ANCIENT)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--stale", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["old_fp"]
+
+
+def test_incidents_stale_bad_duration_is_error(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", now=_ANCIENT)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--stale", "soon"]) == 2
+    assert "duration" in capsys.readouterr().out
+
+
+def test_incidents_stale_fingerprints_pipe_selector(tmp_path, capsys):
+    # --stale composes with --fingerprints so `incidents --stale 30d --fingerprints |
+    # ogle resolve -` clears drift that stopped recurring.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("old_fp", severity="high", now=_ANCIENT)
+    s.record_incident("fresh_fp", severity="high", now=time.time())
+    s.save()
+    assert main(
+        ["incidents", "--store", str(store_path), "--stale", "1h", "--fingerprints"]
+    ) == 0
+    assert capsys.readouterr().out.strip() == "old_fp"
+
+
+def test_incidents_sort_recent_freshest_first(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("old_fp", severity="low", now=1000.0)
+    s.record_incident("fresh_fp", severity="low", now=5000.0)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--sort", "recent", "--json"]) == 0
+    order = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert order == ["fresh_fp", "old_fp"]
+
+
+def test_incidents_sort_recent_sinks_untimed_last(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("timed_fp", severity="low", now=5000.0)
+    s.record_incident("untimed_fp", severity="low")  # no now → sinks last
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--sort", "recent", "--json"]) == 0
+    order = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert order == ["timed_fp", "untimed_fp"]
+
+
+def test_incidents_stale_and_recent_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--stale", "7d", "--sort", "recent"])
+    assert ns.func.__name__ == "cmd_incidents"
+    assert ns.stale == "7d"
+    assert ns.sort == "recent"
+
+
+def test_parse_age_accepts_units():
+    assert _parse_age("45s") == 45
+    assert _parse_age("30m") == 1800
+    assert _parse_age("3h") == 10800
+    assert _parse_age("2d") == 172800
+    assert _parse_age("1w") == 604800
+    assert _parse_age(" 12H ") == 43200  # whitespace + case tolerant
+
+
+def test_parse_age_rejects_bad_input():
+    assert _parse_age("3") is None       # bare number: ambiguous unit
+    assert _parse_age("d") is None       # no amount
+    assert _parse_age("0d") is None      # zero matches everything — rejected
+    assert _parse_age("-5h") is None     # negative
+    assert _parse_age("3y") is None      # unsupported unit
+    assert _parse_age("") is None
+
+
+def test_fmt_age_picks_largest_whole_unit():
+    assert _fmt_age(10) == "just now"
+    assert _fmt_age(-5) == "just now"    # clock skew never reads negative
+    assert _fmt_age(300) == "5m"
+    assert _fmt_age(7200) == "2h"
+    assert _fmt_age(172800) == "2d"
+    assert _fmt_age(1209600) == "2w"

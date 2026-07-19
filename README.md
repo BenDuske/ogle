@@ -288,14 +288,22 @@ ogle incidents --min-severity high      # triage: only high-severity incidents (
 ogle incidents --serving-only           # only incidents that touch a serving path
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
+ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ogle incidents --sort count             # order by recurrence (most-recurring drift first)
 ogle incidents --sort datasets          # order by blast radius (most datasets first)
+ogle incidents --sort recent            # order by freshness (most-recently-seen drift first)
 ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
 ogle incidents --serving-only --fingerprints | xargs ogle resolve   # batch-resolve a filtered set
+ogle incidents --stale 30d --fingerprints | ogle resolve -          # prune drift that stopped recurring
 ```
+
+Each incident line carries the **age of its most recent sighting** (`last seen 3h ago`, or
+`just now` for a fresh one) when Ogle has a timestamp for it — the temporal signal that tells a
+recurring, still-happening problem apart from one that quietly stopped. Incidents remembered by an
+older Ogle (before age-tracking) simply omit the age rather than fake one.
 
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
 `check --fail-on` so a busy operator can focus on what pages first — `--min-count` surfaces the
@@ -311,9 +319,18 @@ other filter (`--grep customers --min-severity high` = high-severity customers d
 all-whitespace needle matches nothing rather than everything, so a fat-fingered `--grep ""` never
 masquerades as "all incidents."
 
-`--sort {severity,count,datasets}` picks the ordering axis. The default `severity` is the
+`--stale AGE` is the *staleness* axis: it keeps only incidents **last seen longer ago than
+AGE** — the drift that stopped recurring, i.e. the resolve/forget candidates. `AGE` is a compact
+duration (`30m`, `12h`, `7d`, `2w`; a bare number is rejected so `--stale 3` can't ambiguously mean
+seconds or days). It composes with every other filter and with `--fingerprints`, so
+`ogle incidents --stale 30d --fingerprints | ogle resolve -` batch-clears drift Ogle hasn't seen in
+a month. A legacy incident with **no recorded age** can't be proven stale, so `--stale` skips it
+rather than guessing.
+
+`--sort {severity,count,datasets,recent}` picks the ordering axis. The default `severity` is the
 triage order (worst first, recurrence as tiebreak); `count` surfaces the most-recurring
-(chronic/flapping) drift first; `datasets` surfaces the widest blast radius first. Every axis
+(chronic/flapping) drift first; `datasets` surfaces the widest blast radius first; `recent`
+surfaces the freshest sighting first (untimed/legacy records sink last). Every axis
 falls back to severity then fingerprint for a stable, deterministic order. It also redefines
 what `--limit` calls the "top N" (e.g. `--sort count --limit 3` = the three most-recurring),
 and is ignored by `--summary`/`--fail-on` (a rollup and a floor gate don't depend on order).

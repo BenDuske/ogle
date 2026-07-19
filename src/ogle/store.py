@@ -54,6 +54,7 @@ class _IncidentRecord:
     title: Optional[str] = None      # incident headline at last sighting
     datasets: int = 0                # number of datasets in the incident at last sighting
     serving: bool = False            # whether a serving path was impacted at last sighting
+    last_seen: Optional[float] = None  # epoch-seconds of the most recent sighting (None = legacy/untimed)
 
     def to_dict(self) -> dict:
         # Serialize provenance only when set so an old bare-count record round-trips
@@ -67,16 +68,20 @@ class _IncidentRecord:
             d["datasets"] = self.datasets
         if self.serving:
             d["serving"] = True
+        if self.last_seen is not None:
+            d["last_seen"] = self.last_seen
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "_IncidentRecord":
+        ls = data.get("last_seen")
         return cls(
             count=int(data.get("count", 0)),
             severity=data.get("severity"),
             title=data.get("title"),
             datasets=int(data.get("datasets", 0)),
             serving=bool(data.get("serving", False)),
+            last_seen=float(ls) if ls is not None else None,
         )
 
 
@@ -151,6 +156,7 @@ class BaselineStore:
         title: Optional[str] = None,
         datasets: int = 0,
         serving: bool = False,
+        now: Optional[float] = None,
     ) -> int:
         """Record one observation of an incident; return its running observation count.
 
@@ -162,6 +168,12 @@ class BaselineStore:
         caller supplies it — a bare `record_incident(fp)` never blanks provenance an
         earlier rich call captured, so a metadata-less dedup ping can't erase the record's
         human context.
+
+        `now` (epoch seconds) stamps `last_seen` for this sighting, giving the incident a
+        temporal axis (`ogle incidents` age display + `--stale` staleness hunt). It's
+        always refreshed when supplied — last_seen means *most recent* sighting — but a
+        `now=None` call never clears a timestamp an earlier call set, so an untimed dedup
+        ping can't erase age history (mirrors the provenance-refresh rule above).
         """
         rec = self.seen_incidents.get(fingerprint)
         if rec is None:
@@ -173,6 +185,8 @@ class BaselineStore:
             rec.title = title
             rec.datasets = datasets
             rec.serving = serving
+        if now is not None:
+            rec.last_seen = now
         return rec.count
 
     def forget_incident(self, fingerprint: str) -> None:

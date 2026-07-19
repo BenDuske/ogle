@@ -370,6 +370,58 @@ def _fmt_expiry(exp: float) -> str:
     return datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+# Duration suffixes shared by `--stale` parsing (and its help text). Kept in seconds so
+# the largest sensible unit reads first when we build the error message.
+_AGE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _parse_age(text: str) -> Optional[float]:
+    """Parse a compact duration like `3d`, `12h`, `30m`, `45s`, `2w` into seconds.
+
+    Returns the positive number of seconds, or None if `text` isn't a positive integer
+    followed by a single s/m/h/d/w unit. A bare number (no unit) is rejected on purpose:
+    an ambiguous `--stale 3` shouldn't silently mean seconds *or* days. Zero/negative are
+    also rejected — a staleness threshold of "0 ago" matches everything, which is never
+    what an operator means.
+    """
+    if not text:
+        return None
+    raw = text.strip().lower()
+    if len(raw) < 2:
+        return None
+    unit = raw[-1]
+    mult = _AGE_UNITS.get(unit)
+    if mult is None:
+        return None
+    try:
+        amount = int(raw[:-1])
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    return amount * mult
+
+
+def _fmt_age(seconds: float) -> str:
+    """A compact, human-readable relative age like `just now`, `5m`, `3h`, `2d`, `1w`.
+
+    Picks the largest whole unit that fits so `ogle incidents` reads at a glance ("last
+    seen 3h ago") without a wall of precision. Sub-minute ages collapse to `just now`;
+    a negative age (clock skew / a future stamp) also reads `just now` rather than a
+    nonsensical negative.
+    """
+    s = int(seconds)
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    if s < 604800:
+        return f"{s // 86400}d"
+    return f"{s // 604800}w"
+
+
 def cmd_mute(args: argparse.Namespace) -> int:
     """Mark a dataset as a known false positive so its drift stops paging.
 
@@ -868,6 +920,13 @@ _INCIDENT_SORTS = {
         _incident_severity_rank(r),
         r.get("fingerprint", ""),
     ),
+    # recent — most-recently-seen first (freshest drift on top). A record with no
+    # last_seen (legacy/untimed) sorts as -1 so it sinks under reverse=True, mirroring how
+    # unknown severity/rows sink elsewhere; fingerprint is the deterministic tiebreak.
+    "recent": lambda r: (
+        r["last_seen"] if r.get("last_seen") is not None else -1.0,
+        r.get("fingerprint", ""),
+    ),
 }
 
 
@@ -896,6 +955,7 @@ def _incident_passes(
     serving_only: bool,
     min_count: Optional[int] = None,
     needle: Optional[str] = None,
+    stale_before: Optional[float] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -905,7 +965,11 @@ def _incident_passes(
     `min_count` is a recurrence floor (None = no floor): keeps only incidents seen at least
     that many times, surfacing the chronic/flapping drift that keeps coming back. `needle`
     (None = no text filter) keeps only incidents whose title/fingerprint contains it
-    (case-insensitive). All filters are ANDed; passing none keeps everything.
+    (case-insensitive). `stale_before` (None = no staleness filter) keeps only incidents
+    whose last_seen is KNOWN and older than that epoch cutoff — the drift Ogle hasn't seen
+    recur lately, i.e. resolve/forget candidates. A record with no last_seen (legacy/untimed)
+    can't be proven stale, so it's dropped by the filter rather than guessed. All filters
+    are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
         return False
@@ -913,6 +977,10 @@ def _incident_passes(
         return False
     if needle is not None and not _incident_matches_needle(rec, needle):
         return False
+    if stale_before is not None:
+        ls = rec.get("last_seen")
+        if ls is None or ls >= stale_before:
+            return False
     if min_rank is not None:
         try:
             rank = Severity(rec.get("severity")).rank
@@ -1164,16 +1232,32 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     serving_only = getattr(args, "serving_only", False)
     min_count = getattr(args, "min_count", None)
     needle = getattr(args, "grep", None)
+
+    # `--stale AGE`: keep only drift last seen longer ago than AGE (e.g. `--stale 7d`) — the
+    # resolve/forget candidates that stopped recurring. Parsed against a single `now` so the
+    # cutoff and the age display below share one clock. A bad duration is a hard error (exit
+    # 2) rather than a silent no-op that would read as "nothing is stale".
+    now = time.time()
+    stale_raw = getattr(args, "stale", None)
+    stale_before: Optional[float] = None
+    if stale_raw is not None:
+        age = _parse_age(stale_raw)
+        if age is None:
+            _emit("_--stale wants a duration like 7d, 12h, 30m, or 2w._")
+            return 2
+        stale_before = now - age
+
     filtered = (
         getattr(args, "min_severity", None) is not None
         or serving_only
         or min_count is not None
         or needle is not None
+        or stale_before is not None
     )
     records = [
         r
         for r in all_records
-        if _incident_passes(r, min_rank, serving_only, min_count, needle)
+        if _incident_passes(r, min_rank, serving_only, min_count, needle, stale_before)
     ]
 
     limit = getattr(args, "limit", None)
@@ -1258,8 +1342,19 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         nd = int(r.get("datasets", 0))
         dpart = f" · {nd} dataset(s)" if nd else ""
         serv = " · ⚠️ serving" if r.get("serving") else ""
+        # Relative age of the most recent sighting, when Ogle has a timestamp for it.
+        # Legacy/untimed records simply omit it rather than fake an age. "just now" reads
+        # on its own; older ages take the "… ago" suffix.
+        ls = r.get("last_seen")
+        if ls is None:
+            apart = ""
+        else:
+            age = _fmt_age(now - ls)
+            apart = f" · last seen {age}" if age == "just now" else f" · last seen {age} ago"
         title = r.get("title") or "(drift)"
-        _emit(f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}  `{r['fingerprint']}`")
+        _emit(
+            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{apart}  `{r['fingerprint']}`"
+        )
     if gate_rc and not args.json:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
     return gate_rc
@@ -1681,11 +1776,20 @@ def build_parser() -> argparse.ArgumentParser:
         "(case-insensitive) — find specific drift in a large memory.",
     )
     incidents.add_argument(
+        "--stale",
+        metavar="AGE",
+        default=None,
+        help="Only show incidents last seen longer ago than AGE (e.g. 7d, 12h, 30m, 2w) — "
+        "drift that stopped recurring, i.e. resolve/forget candidates. Skips legacy "
+        "records with no recorded age.",
+    )
+    incidents.add_argument(
         "--sort",
-        choices=["severity", "count", "datasets"],
+        choices=["severity", "count", "datasets", "recent"],
         default="severity",
         help="Ordering axis: severity (default, worst first), count (most-recurring "
-        "first), or datasets (broadest blast radius first). Also defines --limit's top N.",
+        "first), datasets (broadest blast radius first), or recent (freshest sighting "
+        "first). Also defines --limit's top N.",
     )
     incidents.add_argument(
         "--summary",

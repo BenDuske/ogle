@@ -457,3 +457,69 @@ def test_save_overwrites_prior_good_baseline(tmp_path):
     s2.save()
 
     assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN).row_count == 5000
+
+
+# ---- incident last_seen: the temporal axis behind `ogle incidents` age/--stale ----------
+
+
+def test_record_incident_stamps_last_seen_when_now_given():
+    store = BaselineStore()
+    store.record_incident("fp", severity="high", now=1000.0)
+    (rec,) = store.incidents()
+    assert rec["last_seen"] == 1000.0
+
+
+def test_record_incident_refreshes_last_seen_to_latest_sighting():
+    store = BaselineStore()
+    store.record_incident("fp", now=1000.0)
+    store.record_incident("fp", now=2500.0)
+    (rec,) = store.incidents()
+    assert rec["count"] == 2            # recurrence still accrues
+    assert rec["last_seen"] == 2500.0   # last_seen = most recent sighting
+
+
+def test_record_incident_without_now_omits_last_seen():
+    # A sighting recorded without a clock (now=None) leaves the record untimed rather than
+    # inventing a timestamp — to_dict drops the key so old bare-count records round-trip.
+    store = BaselineStore()
+    store.record_incident("fp", severity="low")
+    (rec,) = store.incidents()
+    assert "last_seen" not in rec
+
+
+def test_record_incident_none_now_does_not_clear_existing_last_seen():
+    # An untimed dedup ping must not erase an age an earlier timed call captured (mirrors
+    # the provenance-refresh rule).
+    store = BaselineStore()
+    store.record_incident("fp", now=1000.0)
+    store.record_incident("fp")  # no now
+    (rec,) = store.incidents()
+    assert rec["last_seen"] == 1000.0
+
+
+def test_incident_last_seen_round_trips_through_disk(tmp_path):
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", now=1234.5)
+    s1.save()
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec["last_seen"] == 1234.5
+
+
+def test_incident_record_without_last_seen_loads_as_none(tmp_path):
+    # A store written by an older Ogle (no last_seen key) loads with last_seen absent —
+    # additive schema, no STORE_VERSION bump.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {"fp": {"count": 2, "severity": "high"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (rec,) = BaselineStore.load(p).incidents()
+    assert "last_seen" not in rec
+    assert rec["count"] == 2
