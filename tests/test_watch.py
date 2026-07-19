@@ -19,6 +19,7 @@ from ogle.watch import (
     EXIT_ERROR,
     EXIT_HEALTHY,
     EXIT_INCIDENT,
+    NotifyError,
     make_command_notifier,
     run_tick,
 )
@@ -136,6 +137,13 @@ def test_check_args_are_forwarded():
 
 
 # ---- command notifier -------------------------------------------------------------
+def _completed(returncode):
+    """A stand-in for subprocess.CompletedProcess exposing just `.returncode`."""
+    import types
+
+    return types.SimpleNamespace(returncode=returncode)
+
+
 def test_command_notifier_shells_and_passes_stdin(monkeypatch):
     calls = {}
 
@@ -143,14 +151,120 @@ def test_command_notifier_shells_and_passes_stdin(monkeypatch):
         calls["cmd"] = cmd
         calls["input"] = input
         calls["check"] = check
+        return _completed(0)
 
     monkeypatch.setattr("ogle.watch.subprocess.run", _fake_run)
     notify = make_command_notifier(["mail", "-s", "drift"])
     notify("the page body")
     assert calls["cmd"] == ["mail", "-s", "drift"]
     assert calls["input"] == "the page body"
-    # check=False so a failing pager never crashes the watch tick.
+    # check=False: we inspect the return code ourselves so a failing pager becomes a
+    # NotifyError (visible) rather than a raised CalledProcessError (crashes the tick).
     assert calls["check"] is False
+
+
+def test_command_notifier_raises_on_nonzero_exit(monkeypatch):
+    """A pager that exits non-zero must raise NotifyError, not silently 'succeed'."""
+    monkeypatch.setattr("ogle.watch.subprocess.run", lambda *a, **k: _completed(3))
+    notify = make_command_notifier(["pager", "--broken"])
+    with pytest.raises(NotifyError) as ei:
+        notify("body")
+    assert "exited 3" in str(ei.value)
+
+
+def test_command_notifier_raises_when_unspawnable(monkeypatch):
+    """A command that can't even start (OSError) is the classic misconfigured-pager trap."""
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("no such binary")
+
+    monkeypatch.setattr("ogle.watch.subprocess.run", _boom)
+    notify = make_command_notifier(["does-not-exist"])
+    with pytest.raises(NotifyError) as ei:
+        notify("body")
+    assert "could not run notifier" in str(ei.value)
+
+
+# ---- page delivery failure is surfaced, never silently dropped --------------------
+def _raiser(exc):
+    def _notify(_text):
+        raise exc
+
+    return _notify
+
+
+def test_incident_page_delivery_failure_falls_back_to_stderr(capsys):
+    """A notifier that fails must NOT report a clean page: page_delivered=False, the page
+    text still lands on stderr, and the reason is captured — not swallowed."""
+    out = run_tick(
+        [],
+        notifier=_raiser(NotifyError("notifier ['pager'] exited 3")),
+        run_check=_runner(EXIT_INCIDENT, stdout="HIGH drift on customers"),
+    )
+    assert out.action == "page"
+    assert out.paged is True             # a page was DISPATCHED
+    assert out.page_delivered is False   # …but it did NOT get through
+    assert "exited 3" in out.delivery_error
+    err = capsys.readouterr().err
+    assert "PAGE DELIVERY FAILED" in err
+    assert "HIGH drift on customers" in err  # the page text was not lost
+
+
+def test_unexpected_notifier_exception_is_contained(capsys):
+    """Even a non-NotifyError from a custom notifier must fall back, not crash the tick."""
+    out = run_tick(
+        [],
+        notifier=_raiser(ValueError("kaboom")),
+        run_check=_runner(EXIT_INCIDENT, stdout="drift story"),
+    )
+    assert out.page_delivered is False
+    assert "ValueError" in out.delivery_error
+    assert "drift story" in capsys.readouterr().err
+
+
+def test_successful_delivery_marks_page_delivered():
+    """The happy path: a working notifier -> page_delivered True, no delivery_error."""
+    note = _Recorder()
+    out = run_tick(
+        [], notifier=note, run_check=_runner(EXIT_INCIDENT, stdout="drift")
+    )
+    assert out.paged is True
+    assert out.page_delivered is True
+    assert out.delivery_error == ""
+
+
+def test_watch_subcommand_warns_on_delivery_failure(tmp_path, capsys, monkeypatch):
+    """End-to-end: `ogle watch --notify-cmd <broken>` on a real incident preserves the
+    check's exit code (1) but prints PAGE DELIVERY FAILED to stderr."""
+    # First run seeds the baseline (exit 0); a second run with a changed signature fires
+    # a NEW incident (exit 1). Simpler: force the incident via a fake check runner is not
+    # reachable through the CLI, so drive real drift.
+    monkeypatch.setattr("ogle.watch.subprocess.run", lambda *a, **k: _completed(127))
+    store = tmp_path / "store.json"
+    sig1 = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig1])
+    # seed
+    main(["watch", "--", "--store", str(store), "--signatures", str(sigs)])
+    # drift: drop a column -> HIGH schema drift -> new incident -> page attempted
+    sig2 = build_signature(CUSTOMERS_URN, schema_fields=[], row_count=10)
+    _write_sigs(tmp_path / "s.json", [sig2])
+    capsys.readouterr()  # clear
+    code = main(
+        [
+            "watch",
+            "--notify-cmd",
+            "does-not-matter",
+            "--",
+            "--store",
+            str(store),
+            "--signatures",
+            str(sigs),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 1                     # check contract preserved
+    assert "PAGED" in captured.out
+    assert "PAGE DELIVERY FAILED" in captured.err
 
 
 # ---- `ogle watch` subcommand: exit code is preserved end-to-end -------------------

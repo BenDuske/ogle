@@ -43,15 +43,26 @@ Notifier = Callable[[str], None]
 CheckRunner = Callable[[Sequence[str]], int]
 
 
+class NotifyError(RuntimeError):
+    """A notifier could not deliver a page (bad exit code or an un-spawnable command).
+
+    Raising — rather than swallowing — is the whole point: a page that never reached a
+    human is a production failure at least as bad as the drift it was meant to report, so
+    the tick must be able to SEE the delivery failure instead of reporting a false "PAGED".
+    """
+
+
 @dataclass
 class TickOutcome:
     """The result of one watch tick — everything a scheduler or test needs to branch."""
 
     code: int          # the underlying `ogle check` exit code (contract is preserved)
     action: str        # "ok" | "page" | "error"
-    paged: bool        # whether the notifier was actually invoked this tick
+    paged: bool        # whether a page was DISPATCHED this tick (attempted)
     report_text: str   # narrative captured from stdout (the human-facing drift story)
     error_text: str    # anything the check wrote to stderr (input/live-walk failures)
+    page_delivered: bool = True  # did the notifier actually succeed? (False on delivery failure)
+    delivery_error: str = ""     # why delivery failed, when it did
 
 
 def _default_check_runner(argv: Sequence[str]) -> int:
@@ -75,12 +86,45 @@ def make_command_notifier(notify_cmd: Sequence[str]) -> Notifier:
 
     This is the seam an operator uses to reach a real pager without Ogle depending on it:
     e.g. `--notify-cmd openclaw message send --channel whatsapp --target +1555…`.
+
+    Delivery is verified: a command that can't be spawned (`OSError`, e.g. the pager binary
+    isn't on PATH) or that exits non-zero raises `NotifyError`. `run_tick` catches that and
+    falls back to a loud stderr page, so a broken pager surfaces as a *visible* delivery
+    failure instead of a silently-dropped alert reported as "PAGED".
     """
+    cmd = list(notify_cmd)
 
     def _notify(text: str) -> None:
-        subprocess.run(list(notify_cmd), input=text, text=True, check=False)
+        try:
+            proc = subprocess.run(cmd, input=text, text=True, check=False)
+        except OSError as exc:
+            # Un-spawnable command (not found, not executable, …) — the classic silent-page
+            # trap when a pager is misconfigured on a headless scheduler.
+            raise NotifyError(f"could not run notifier {cmd!r}: {exc}") from exc
+        if proc.returncode != 0:
+            raise NotifyError(f"notifier {cmd!r} exited {proc.returncode}")
 
     return _notify
+
+
+def _deliver(notifier: Notifier, text: str) -> "tuple[bool, str]":
+    """Invoke `notifier`, guaranteeing the page lands *somewhere* even if it fails.
+
+    Returns `(delivered, reason)`. On any notifier failure — a `NotifyError` from the
+    command notifier, or an unexpected exception from a custom one — the page text is still
+    written to stderr via the default notifier so it is never silently lost, and `delivered`
+    is False with a human-readable reason.
+    """
+    try:
+        notifier(text)
+        return True, ""
+    except NotifyError as exc:
+        reason = str(exc)
+    except Exception as exc:  # a custom notifier misbehaving must not swallow the page
+        reason = f"notifier raised {type(exc).__name__}: {exc}"
+    sys.stderr.write(f"PAGE DELIVERY FAILED ({reason}) — falling back to stderr:\n")
+    _stderr_notifier(text)
+    return False, reason
 
 
 def run_tick(
@@ -107,13 +151,15 @@ def run_tick(
     error_text = err.getvalue().rstrip()
 
     if code == EXIT_INCIDENT:
-        notifier(report_text or "ogle: a new drift incident fired (no narrative captured)")
-        return TickOutcome(code, "page", True, report_text, error_text)
+        delivered, derr = _deliver(
+            notifier, report_text or "ogle: a new drift incident fired (no narrative captured)"
+        )
+        return TickOutcome(code, "page", True, report_text, error_text, delivered, derr)
 
     if code == EXIT_ERROR:
         if page_on_error:
-            notifier(error_text or "ogle check failed (exit 2)")
-            return TickOutcome(code, "error", True, report_text, error_text)
+            delivered, derr = _deliver(notifier, error_text or "ogle check failed (exit 2)")
+            return TickOutcome(code, "error", True, report_text, error_text, delivered, derr)
         return TickOutcome(code, "error", False, report_text, error_text)
 
     # Healthy (0) or any unexpected non-contract code: treat as quiet, don't page.
@@ -169,6 +215,13 @@ def cmd_watch(args) -> int:
         outcome.action
     ]
     sys.stdout.write(f"ogle watch: {status} (exit {outcome.code})\n")
+    # A dispatched-but-undelivered page is an operational failure the scheduler must see:
+    # the exit code still honors the `ogle check` contract, but this loud stderr line means
+    # a broken pager can't hide behind a green "PAGED" status.
+    if outcome.paged and not outcome.page_delivered:
+        sys.stderr.write(
+            f"ogle watch: PAGE DELIVERY FAILED — {outcome.delivery_error}\n"
+        )
     return outcome.code
 
 
@@ -176,6 +229,7 @@ __all__ = [
     "EXIT_HEALTHY",
     "EXIT_INCIDENT",
     "EXIT_ERROR",
+    "NotifyError",
     "TickOutcome",
     "run_tick",
     "make_command_notifier",

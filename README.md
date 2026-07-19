@@ -493,8 +493,15 @@ ogle watch --notify-cmd mail -s "ogle drift" you@host \
 
 `--page-on-error` also pages on exit 2 (input/live-walk failure); by default those are
 logged but not paged, so a transient GMS outage doesn't cry wolf. `ogle watch` preserves
-the underlying `ogle check` exit code, so a cron/Task can still branch on it. Example
-cron line (every 15 min):
+the underlying `ogle check` exit code, so a cron/Task can still branch on it.
+
+**Delivery is verified — a broken pager can't hide behind a green "PAGED".** If the
+`--notify-cmd` command can't be spawned (not on `PATH`) or exits non-zero, `ogle watch`
+does **not** silently report success: it writes a loud `PAGE DELIVERY FAILED — <reason>`
+line to stderr **and** falls back to printing the full drift page to stderr, so the alert
+is never lost. The `ogle check` exit code is still preserved (a delivered-or-not page
+doesn't rewrite the contract), so wrap the tick in your own alert on that stderr marker if
+your scheduler swallows stderr. Example cron line (every 15 min):
 
 ```cron
 */15 * * * * cd /srv/ogle && ogle watch --notify-cmd /usr/local/bin/page-me -- \
