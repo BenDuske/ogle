@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +55,31 @@ def _emit(text: str, *, stream=None) -> None:
     stream = stream or sys.stdout
     enc = getattr(stream, "encoding", None) or "utf-8"
     stream.write(text.encode(enc, errors="replace").decode(enc) + "\n")
+
+
+def _atomic_write_text(target: Path, text: str) -> Path:
+    """Write `text` to `target` atomically (temp file in the same dir, then `os.replace`).
+
+    Mirrors `BaselineStore.save()`'s temp+replace so a concurrent reader never sees a
+    partial file. This matters for `ogle metrics --output`: node_exporter's textfile
+    collector polls a directory of `.prom` files on its own clock, so a plain `>` redirect
+    races the scraper — it can read a half-written file and drop the whole scrape. The
+    rename is atomic on the same filesystem, so the collector sees either the old file or
+    the complete new one, never a torn one. Always writes a trailing newline (Prometheus
+    exposition format wants the final sample newline-terminated).
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    blob = text if text.endswith("\n") else text + "\n"
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".ogle-metrics-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return target
 
 
 # ---------------------------------------------------------------------------------------
@@ -1578,12 +1605,24 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     to graph drift memory over time and alert on serving-path or high-severity growth.
     Always exits 0 — a metrics scrape must not fail on data levels; use `status --fail-on`
     or `incidents --fail-on` for CI/scheduled gating.
+
+    With `--output PATH` the exposition is written atomically to a file (for a
+    node_exporter textfile collector) instead of stdout; without it, prints to stdout for
+    a pushgateway / manual scrape.
     """
     store = BaselineStore.load(Path(args.store))
     totals = _baseline_totals(store)
     inc = _incident_summary(store.incidents())
     muted = store.muted(time.time())  # active snoozes only (expired excluded)
-    _emit(_render_prometheus(totals, inc, len(muted), str(args.store)))
+    text = _render_prometheus(totals, inc, len(muted), str(args.store))
+    out = getattr(args, "output", None)
+    if out:
+        path = _atomic_write_text(Path(out), text)
+        # Confirmation goes to STDERR so stdout can still be redirected/piped cleanly and a
+        # collector polling the file never sees this line.
+        _emit(f"wrote {path}", stream=sys.stderr)
+    else:
+        _emit(text)
     return 0
 
 
@@ -1886,6 +1925,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     metrics.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    metrics.add_argument(
+        "--output",
+        "-o",
+        metavar="PATH",
+        default=None,
+        help="Write the exposition atomically to PATH (temp + rename) instead of stdout — "
+        "the safe way to feed a node_exporter textfile collector, which polls the file on "
+        "its own clock and would otherwise race a plain `>` redirect. Point it at a "
+        "`.prom` file in the collector's directory, e.g. "
+        "`ogle metrics -o /var/lib/node_exporter/textfile/ogle.prom`.",
     )
     metrics.set_defaults(func=cmd_metrics)
 

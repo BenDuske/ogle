@@ -189,8 +189,15 @@ alert on it — the production-observability counterpart to the human snapshot:
 
 ```bash
 ogle metrics                                   # Prometheus text exposition on stdout
-ogle metrics --store prod.json > ogle.prom     # feed the node_exporter textfile collector
+ogle metrics -o /var/lib/node_exporter/textfile/ogle.prom   # atomic write for the collector
 ```
+
+For a **node_exporter textfile collector**, prefer `-o/--output` over a `> ogle.prom` redirect:
+the collector polls its directory on its own clock, so a plain redirect can be scraped
+mid-write and drop the whole file. `--output` writes to a temp file in the same directory and
+`os.replace`s it into place, so the collector always sees either the old file or the complete
+new one — never a torn one. The confirmation line goes to stderr, keeping stdout (and the
+`.prom` file) clean.
 
 Every series is a **gauge** (point-in-time store levels, so none carry the `_total` suffix
 Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /

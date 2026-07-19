@@ -185,3 +185,66 @@ def test_parser_wires_metrics_to_cmd(tmp_path):
     ns = build_parser().parse_args(["metrics", "--store", "x.json"])
     assert ns.func.__name__ == "cmd_metrics"
     assert ns.store == "x.json"
+    assert ns.output is None  # stdout by default
+
+
+# ---- --output (atomic textfile-collector target) -----------------------------------
+def test_output_flag_parses_with_short_alias():
+    ns = build_parser().parse_args(["metrics", "-o", "/tmp/ogle.prom"])
+    assert ns.output == "/tmp/ogle.prom"
+    ns = build_parser().parse_args(["metrics", "--output", "/tmp/ogle.prom"])
+    assert ns.output == "/tmp/ogle.prom"
+
+
+def test_output_writes_file_not_stdout(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    out = tmp_path / "ogle.prom"
+    rc = main(["metrics", "--store", str(store_path), "--output", str(out)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # stdout carries no metrics — they went to the file; a collector redirecting stdout
+    # elsewhere must not also get the exposition body.
+    assert captured.out.strip() == ""
+    # a confirmation lands on stderr (won't pollute a piped stdout / the .prom file)
+    assert str(out) in captured.err
+    body = out.read_text(encoding="utf-8")
+    assert "ogle_up{" in body
+    assert 'ogle_incidents_serving 1' in body
+
+
+def test_output_matches_stdout_render(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    # stdout render
+    main(["metrics", "--store", str(store_path)])
+    stdout_body = capsys.readouterr().out
+    # file render
+    out = tmp_path / "ogle.prom"
+    main(["metrics", "--store", str(store_path), "--output", str(out)])
+    file_body = out.read_text(encoding="utf-8")
+    # Same exposition, modulo the trailing newline _emit and the file both append.
+    assert file_body.strip() == stdout_body.strip()
+    assert file_body.endswith("\n")  # exposition wants a newline-terminated final sample
+
+
+def test_output_is_atomic_no_temp_left(tmp_path):
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    out = tmp_path / "sub" / "ogle.prom"  # also exercises parent-dir creation
+    assert main(["metrics", "--store", str(store_path), "--output", str(out)]) == 0
+    assert out.exists()
+    # temp file used during the atomic write is cleaned up — only the final file remains
+    leftovers = [p.name for p in out.parent.iterdir() if p.name.startswith(".ogle-metrics-")]
+    assert leftovers == []
+
+
+def test_output_overwrites_existing_atomically(tmp_path):
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    out = tmp_path / "ogle.prom"
+    out.write_text("stale content that must be fully replaced\n", encoding="utf-8")
+    assert main(["metrics", "--store", str(store_path), "--output", str(out)]) == 0
+    body = out.read_text(encoding="utf-8")
+    assert "stale content" not in body
+    assert "ogle_up{" in body
