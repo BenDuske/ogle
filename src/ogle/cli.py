@@ -1557,6 +1557,38 @@ def _store_file_age(path: Path, now: float) -> Optional[float]:
     return max(0.0, now - mtime)
 
 
+def _mute_breakdown(store: "BaselineStore", now: float) -> dict:
+    """Split the active mutes into permanent vs snoozed + the soonest snooze expiry.
+
+    `ogle_muted_active` counts every silenced dataset as one number, but the two kinds of
+    silence carry very different risk. A *permanent* mute is a STANDING blind spot — drift on
+    that dataset is suppressed with no end date, so a serving table quietly muted months ago
+    keeps hiding real drift forever: the same silently-blind failure class the store-age
+    heartbeat guards against, except chosen rather than accidental, which is exactly why it
+    should be visible on a dashboard. A *snooze* lapses on its own, and the next-expiry
+    countdown lets an operator anticipate the moment drift returns to the page.
+
+    Returns `{permanent, snoozed, next_expiry_seconds}`. Expired snoozes are excluded (they
+    silence nothing now); `next_expiry_seconds` is the seconds until the soonest active
+    snooze lapses, or `None` when nothing is snoozed (an honest "no countdown", never a
+    fabricated 0 that would read as "expiring right now"). Permanent and snoozed are disjoint
+    (a permanent mute supersedes a snooze on the same URN), so `permanent + snoozed` equals
+    the `ogle_muted_active` count.
+    """
+    permanent = len(store.muted_urns)
+    active_expiries = [
+        exp
+        for urn, exp in store.muted_until.items()
+        if exp > now and urn not in store.muted_urns
+    ]
+    next_expiry = (min(active_expiries) - now) if active_expiries else None
+    return {
+        "permanent": permanent,
+        "snoozed": len(active_expiries),
+        "next_expiry_seconds": next_expiry,
+    }
+
+
 def _render_prometheus(
     totals: dict,
     inc: dict,
@@ -1564,6 +1596,7 @@ def _render_prometheus(
     store_path: str,
     age_bounds: Optional[Tuple[float, float]] = None,
     store_age: Optional[float] = None,
+    mute_breakdown: Optional[dict] = None,
 ) -> str:
     """Render the store rollup as Prometheus text exposition format (v0.0.4).
 
@@ -1643,6 +1676,25 @@ def _render_prometheus(
         "Datasets currently muted (active snoozes only).",
         [(None, muted_count)],
     )
+    # Split the mute count by kind: a permanent mute is a STANDING blind spot (drift
+    # suppressed with no end date — alert if this creeps up on serving tables), while a
+    # snooze self-expires. `permanent + snoozed` == ogle_muted_active. Permanent is a count
+    # so an honest 0 is emitted; the snooze countdown emits only when something is snoozed.
+    mb = mute_breakdown or {"permanent": 0, "snoozed": 0, "next_expiry_seconds": None}
+    family(
+        "ogle_muted_permanent",
+        "Datasets muted permanently (indefinite silence — a standing blind spot).",
+        [(None, mb["permanent"])],
+    )
+    next_expiry = mb.get("next_expiry_seconds")
+    expiry_samples: list = []
+    if next_expiry is not None:
+        expiry_samples = [(None, f"{next_expiry:g}")]
+    family(
+        "ogle_muted_snooze_next_expiry_seconds",
+        "Seconds until the soonest active snooze lapses (drift returns to paging).",
+        expiry_samples,
+    )
     # Staleness of the drift memory itself: freshest = how recently ANY tracked drift
     # recurred (a proxy for "is drift active right now"); stalest = the longest-quiet
     # incident, a resolve/forget cleanup candidate. Both families always declare HELP/TYPE
@@ -1701,8 +1753,9 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     muted = store.muted(now)  # active snoozes only (expired excluded)
     age_bounds = _incident_age_bounds(records, now)
     store_age = _store_file_age(Path(args.store), now)
+    mute_breakdown = _mute_breakdown(store, now)
     text = _render_prometheus(
-        totals, inc, len(muted), str(args.store), age_bounds, store_age
+        totals, inc, len(muted), str(args.store), age_bounds, store_age, mute_breakdown
     )
     out = getattr(args, "output", None)
     if out:

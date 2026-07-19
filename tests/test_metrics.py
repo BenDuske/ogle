@@ -92,6 +92,8 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_recurring",
         "ogle_incidents_sightings",
         "ogle_muted_active",
+        "ogle_muted_permanent",
+        "ogle_muted_snooze_next_expiry_seconds",
         "ogle_incidents_last_seen_min_age_seconds",
         "ogle_incidents_last_seen_max_age_seconds",
         "ogle_store_age_seconds",
@@ -438,3 +440,98 @@ def test_metrics_cli_omits_store_age_sample_for_missing_store(tmp_path, capsys):
     assert "ogle_store_age_seconds" in helps
     assert types["ogle_store_age_seconds"] == "gauge"
     assert "ogle_store_age_seconds" not in samples
+
+
+# ---- mute breakdown: permanent (standing blind spot) + snooze countdown -------------
+def _mb(store, now):
+    from ogle.cli import _mute_breakdown
+
+    return _mute_breakdown(store, now)
+
+
+def test_mute_breakdown_splits_permanent_and_snoozed_disjoint():
+    s = BaselineStore(path="s.json")
+    s.mute(CUSTOMERS_URN)  # permanent
+    s.mute(ORDERS_URN, until=1000.0)  # active snooze
+    mb = _mb(s, now=500.0)
+    assert mb["permanent"] == 1
+    assert mb["snoozed"] == 1
+    # next-expiry is the countdown to the soonest active snooze (1000 - 500).
+    assert mb["next_expiry_seconds"] == 500.0
+    # Invariant the metric relies on: permanent + snoozed == active muted count.
+    assert mb["permanent"] + mb["snoozed"] == len(s.muted(500.0))
+
+
+def test_mute_breakdown_excludes_expired_snooze():
+    s = BaselineStore(path="s.json")
+    s.mute(ORDERS_URN, until=100.0)  # lapses before `now`
+    mb = _mb(s, now=500.0)
+    assert mb["snoozed"] == 0
+    # No active snooze → no countdown (honest None, not a fabricated 0 = "expiring now").
+    assert mb["next_expiry_seconds"] is None
+
+
+def test_mute_breakdown_next_expiry_is_the_soonest_snooze():
+    s = BaselineStore(path="s.json")
+    s.mute(CUSTOMERS_URN, until=900.0)
+    s.mute(ORDERS_URN, until=1500.0)
+    mb = _mb(s, now=500.0)
+    assert mb["snoozed"] == 2
+    assert mb["next_expiry_seconds"] == 400.0  # 900 - 500, the nearer expiry
+
+
+def test_render_permanent_emits_honest_zero_and_countdown_absent_when_no_snooze():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        mute_breakdown={"permanent": 0, "snoozed": 0, "next_expiry_seconds": None},
+    )
+    samples, types, helps = _parse_prom(text)
+    # Permanent is a count → honest 0 always emitted.
+    assert samples["ogle_muted_permanent"] == "0"
+    # Countdown family declared for a stable scrape shape, but no sample without a snooze.
+    assert "ogle_muted_snooze_next_expiry_seconds" in helps
+    assert types["ogle_muted_snooze_next_expiry_seconds"] == "gauge"
+    assert "ogle_muted_snooze_next_expiry_seconds" not in samples
+
+
+def test_render_emits_permanent_count_and_snooze_countdown():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        3,  # muted_active
+        "s.json",
+        mute_breakdown={"permanent": 2, "snoozed": 1, "next_expiry_seconds": 3600.0},
+    )
+    samples, _, _ = _parse_prom(text)
+    assert samples["ogle_muted_permanent"] == "2"
+    assert samples["ogle_muted_snooze_next_expiry_seconds"] == "3600"
+
+
+def test_render_omits_breakdown_defaults_to_zero_permanent():
+    # Back-compat: callers that don't pass a breakdown still render a valid all-zero split.
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+    )
+    samples, _, helps = _parse_prom(text)
+    assert samples["ogle_muted_permanent"] == "0"
+    assert "ogle_muted_snooze_next_expiry_seconds" in helps
+
+
+def test_metrics_cli_reports_permanent_mute_as_blind_spot(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = _seed_store(store_path)
+    s.mute(CUSTOMERS_URN)  # permanent — a standing blind spot
+    s.mute(ORDERS_URN, until=9_999_999_999.0)  # far-future snooze
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_muted_permanent"] == "1"
+    assert samples["ogle_muted_active"] == "2"  # permanent + active snooze
+    # The countdown is present and positive (snooze lapses in the far future).
+    assert float(samples["ogle_muted_snooze_next_expiry_seconds"]) > 0

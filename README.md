@@ -202,9 +202,10 @@ new one — never a torn one. The confirmation line goes to stderr, keeping stdo
 Every series is a **gauge** (point-in-time store levels, so none carry the `_total` suffix
 Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /
 `_rows_unknown`, `ogle_incidents_remembered{severity="high|medium|low|unknown"}`,
-`ogle_incidents_serving` / `_recurring` / `_sightings`, `ogle_muted_active`, the incident
-staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), and a monitor heartbeat
-`ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
+`ogle_incidents_serving` / `_recurring` / `_sightings`, `ogle_muted_active` (split into
+`ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
+incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), and a monitor
+heartbeat `ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
 `status --json` in the test suite), so a Grafana panel and the CLI snapshot never disagree.
 Unlike `status --fail-on`, `metrics` **always exits 0** — a scrape must not fail on data levels;
 keep gating on `status`/`incidents --fail-on`.
@@ -217,6 +218,15 @@ file's mtime only advances when `ogle check` actually runs, so alerting on
 `ogle_store_age_seconds > 2 × check_interval` fires when Ogle itself goes dark, independent of
 whether any drift is present. Before the first store write (no file yet) the family is declared
 but emits **no sample** — an honest "no data", not a fabricated zero age.
+
+**Mutes aren't all equal.** `ogle_muted_active` counts every silenced dataset as one number, but
+a *permanent* mute is a chosen **standing blind spot** — drift on that dataset is suppressed with
+no end date, so a serving table quietly muted months ago keeps hiding real drift forever.
+`ogle_muted_permanent` surfaces that count on its own (alert if it creeps up on serving assets),
+while `ogle_muted_snooze_next_expiry_seconds` counts down to the soonest *snooze* lapsing so you
+can anticipate drift returning to the page. The two split the active total exactly
+(`permanent + snoozed == ogle_muted_active`); the countdown emits **no sample** when nothing is
+snoozed rather than a fabricated `0` that would read as "expiring right now".
 
 ### Corruption-resilient store (unattended-safe)
 
