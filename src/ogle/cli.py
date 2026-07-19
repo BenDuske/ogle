@@ -1513,8 +1513,34 @@ def _baseline_totals(store: "BaselineStore") -> dict:
     }
 
 
+def _incident_age_bounds(
+    records: List[dict], now: float
+) -> Optional[Tuple[float, float]]:
+    """Freshest/stalest incident age (seconds) over incidents with a known `last_seen`.
+
+    Returns `(min_age, max_age)` — the most-recently-recurring incident's age and the
+    longest-quiet incident's age — or `None` when no incident carries a timestamp (a store
+    of only legacy/untimed dedups). Ages are clamped at 0 so a future stamp (clock skew)
+    reads as `just now` rather than a negative age, mirroring `_relative_age`. This reuses
+    the exact `last_seen` field `incidents --stale/--fresh` hunt on, so the metric and the
+    CLI can never disagree about what "stale" means.
+    """
+    ages = [
+        max(0.0, now - float(r["last_seen"]))
+        for r in records
+        if r.get("last_seen") is not None
+    ]
+    if not ages:
+        return None
+    return min(ages), max(ages)
+
+
 def _render_prometheus(
-    totals: dict, inc: dict, muted_count: int, store_path: str
+    totals: dict,
+    inc: dict,
+    muted_count: int,
+    store_path: str,
+    age_bounds: Optional[Tuple[float, float]] = None,
 ) -> str:
     """Render the store rollup as Prometheus text exposition format (v0.0.4).
 
@@ -1594,6 +1620,27 @@ def _render_prometheus(
         "Datasets currently muted (active snoozes only).",
         [(None, muted_count)],
     )
+    # Staleness of the drift memory itself: freshest = how recently ANY tracked drift
+    # recurred (a proxy for "is drift active right now"); stalest = the longest-quiet
+    # incident, a resolve/forget cleanup candidate. Both families always declare HELP/TYPE
+    # so the scrape shape is stable, but emit NO sample when the store holds only untimed
+    # (legacy) incidents — an honest "no data" beats a fabricated zero-age.
+    fresh_samples: list = []
+    stale_samples: list = []
+    if age_bounds is not None:
+        min_age, max_age = age_bounds
+        fresh_samples = [(None, f"{min_age:g}")]
+        stale_samples = [(None, f"{max_age:g}")]
+    family(
+        "ogle_incidents_last_seen_min_age_seconds",
+        "Age of the most recently re-seen incident (freshest recurring drift).",
+        fresh_samples,
+    )
+    family(
+        "ogle_incidents_last_seen_max_age_seconds",
+        "Age of the longest-quiet incident (stalest — resolve/forget candidate).",
+        stale_samples,
+    )
     return "\n".join(lines)
 
 
@@ -1610,11 +1657,14 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     node_exporter textfile collector) instead of stdout; without it, prints to stdout for
     a pushgateway / manual scrape.
     """
+    now = time.time()
     store = BaselineStore.load(Path(args.store))
+    records = store.incidents()
     totals = _baseline_totals(store)
-    inc = _incident_summary(store.incidents())
-    muted = store.muted(time.time())  # active snoozes only (expired excluded)
-    text = _render_prometheus(totals, inc, len(muted), str(args.store))
+    inc = _incident_summary(records)
+    muted = store.muted(now)  # active snoozes only (expired excluded)
+    age_bounds = _incident_age_bounds(records, now)
+    text = _render_prometheus(totals, inc, len(muted), str(args.store), age_bounds)
     out = getattr(args, "output", None)
     if out:
         path = _atomic_write_text(Path(out), text)

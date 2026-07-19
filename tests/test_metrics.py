@@ -92,6 +92,8 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_recurring",
         "ogle_incidents_sightings",
         "ogle_muted_active",
+        "ogle_incidents_last_seen_min_age_seconds",
+        "ogle_incidents_last_seen_max_age_seconds",
     }
     # Every family has exactly one HELP and one TYPE, and every one is a gauge.
     assert helps == families
@@ -248,3 +250,87 @@ def test_output_overwrites_existing_atomically(tmp_path):
     body = out.read_text(encoding="utf-8")
     assert "stale content" not in body
     assert "ogle_up{" in body
+
+
+# ---- staleness age gauges (freshest/stalest incident) ------------------------------
+def _inc_summary(records):
+    from ogle.cli import _incident_summary
+
+    return _incident_summary(records)
+
+
+def test_age_bounds_none_when_no_timed_incidents():
+    from ogle.cli import _incident_age_bounds
+
+    # legacy/untimed incidents (no last_seen) → no age series at all
+    assert _incident_age_bounds([{"count": 1}, {"count": 2}], now=100.0) is None
+
+
+def test_age_bounds_min_is_freshest_max_is_stalest():
+    from ogle.cli import _incident_age_bounds
+
+    now = 1000.0
+    records = [
+        {"last_seen": 990.0},  # 10s ago — freshest
+        {"last_seen": 700.0},  # 300s ago — stalest
+        {"last_seen": 950.0},  # 50s ago
+        {"count": 1},          # untimed — ignored
+    ]
+    assert _incident_age_bounds(records, now) == (10.0, 300.0)
+
+
+def test_age_bounds_clamps_future_stamp_to_zero():
+    from ogle.cli import _incident_age_bounds
+
+    # a last_seen in the future (clock skew) reads as age 0, never negative
+    assert _incident_age_bounds([{"last_seen": 1050.0}], now=1000.0) == (0.0, 0.0)
+
+
+def test_render_emits_age_gauges_when_timed():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        age_bounds=(10.0, 300.0),
+    )
+    samples, types, helps = _parse_prom(text)
+    assert types["ogle_incidents_last_seen_min_age_seconds"] == "gauge"
+    assert types["ogle_incidents_last_seen_max_age_seconds"] == "gauge"
+    assert samples["ogle_incidents_last_seen_min_age_seconds"] == "10"
+    assert samples["ogle_incidents_last_seen_max_age_seconds"] == "300"
+
+
+def test_render_declares_age_gauges_but_no_sample_when_untimed():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        age_bounds=None,
+    )
+    _, types, helps = _parse_prom(text)
+    # HELP/TYPE still declared (stable scrape shape) ...
+    assert "ogle_incidents_last_seen_min_age_seconds" in helps
+    assert "ogle_incidents_last_seen_max_age_seconds" in types
+    # ... but NO value line is emitted (honest "no data", not a fake zero age)
+    for ln in text.splitlines():
+        assert not (
+            ln
+            and not ln.startswith("#")
+            and ln.split()[0].startswith("ogle_incidents_last_seen_")
+        )
+
+
+def test_metrics_cli_emits_age_sample_for_timed_incident(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # stamp last_seen so the incident is timed; CLI uses wall-clock now, so assert
+    # presence + ordering rather than an exact (nondeterministic) age.
+    s.record_incident("hi", severity="high", title="H", datasets=1, now=1.0)
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    lo = float(samples["ogle_incidents_last_seen_min_age_seconds"])
+    hi = float(samples["ogle_incidents_last_seen_max_age_seconds"])
+    assert hi >= lo > 0  # a single ancient incident: both large, max >= min
