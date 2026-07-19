@@ -2245,3 +2245,229 @@ def test_show_composes_with_baselines_urns_selector(tmp_path, capsys):
     rc = main(["show", urn, "--store", str(store)])
     assert rc == 0
     assert "2 field(s)" in capsys.readouterr().out
+
+
+# ---- diff: read-only baseline vs candidate-signatures-file --------------------------
+def _seed_diff(store_path):
+    """One watched dataset: id:int, email:string (25% null), 1000 rows."""
+    BaselineStore(
+        path=store_path,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+            )
+        },
+    ).save()
+    return store_path
+
+
+def test_diff_identical_exits_zero(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 0
+    assert "no drift" in capsys.readouterr().out.lower()
+
+
+def test_diff_field_added_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string"), ("phone", "string")],
+              row_count=1000, field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "➕ `phone` : string" in out
+    assert "schema hash: `" in out and "→" in out  # hash flipped with the field set
+
+
+def test_diff_field_removed_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int")], row_count=1000)],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "➖ `email` : string" in capsys.readouterr().out
+
+
+def test_diff_type_changed_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "bigint"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "🔀 `id` : int → bigint" in capsys.readouterr().out
+
+
+def test_diff_null_fraction_changed_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.60})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "`email` : 25.0% → 60.0% null" in out
+    # A pure null-fraction move leaves the schema hash unchanged (hash is path+type only).
+    assert "schema hash: unchanged" in out
+
+
+def test_diff_null_fraction_below_rounding_gate_not_reported(tmp_path, capsys):
+    """A sub-0.1pp re-profiling jitter must not surface as drift."""
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.25 + 0.0004})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 0
+    assert "no drift" in capsys.readouterr().out.lower()
+
+
+def test_diff_null_fraction_appearing_is_reported(tmp_path, capsys):
+    """A field gaining a null profile it never had (unknown→known) is a real change."""
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.25, "id": 0.10})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "`id` : unknown → 10.0% null" in capsys.readouterr().out
+
+
+def test_diff_row_count_delta_shown(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "rows: 1000 → 1200 (+200)" in capsys.readouterr().out
+
+
+def test_diff_not_watched_exits_two(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(tmp_path / "c.json", [_sig(urn=ORDERS_URN, row_count=1)])
+    rc = main(["diff", ORDERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 2
+    assert "not watched" in capsys.readouterr().err.lower()
+
+
+def test_diff_empty_store_exits_two(tmp_path, capsys):
+    store = tmp_path / "s.json"  # never created
+    cand = _write_sigs(tmp_path / "c.json", [_sig()])
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 2
+    assert "store is empty" in capsys.readouterr().err.lower()
+
+
+def test_diff_urn_absent_from_signatures_exits_two(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    # File is valid but has a different dataset — nothing to compare for this URN.
+    cand = _write_sigs(tmp_path / "c.json", [_sig(urn=ORDERS_URN, row_count=1)])
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 2
+    assert "not present" in capsys.readouterr().err.lower()
+
+
+def test_diff_malformed_signatures_exits_two(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    bad = tmp_path / "c.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(bad)])
+    assert rc == 2
+    assert "valid json" in capsys.readouterr().err.lower()
+
+
+def test_diff_is_read_only_store_untouched(tmp_path):
+    """diff must never advance a baseline — the store bytes are identical after a drift."""
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    before = store.read_bytes()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string"), ("phone", "string")],
+              row_count=2000, field_null_fractions={"email": 0.9})],
+    )
+    main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert store.read_bytes() == before
+
+
+def test_diff_json_shape(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "bigint"), ("email", "string"), ("phone", "string")],
+              row_count=1200, field_null_fractions={"email": 0.60})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand),
+               "--json"])
+    assert rc == 1
+    d = json.loads(capsys.readouterr().out)["diff"]
+    assert d["urn"] == CUSTOMERS_URN
+    assert d["identical"] is False
+    assert [f["path"] for f in d["fields_added"]] == ["phone"]
+    assert d["fields_removed"] == []
+    assert d["fields_type_changed"][0] == {"path": "id", "old_type": "int",
+                                           "new_type": "bigint"}
+    assert d["null_fraction_changed"][0]["path"] == "email"
+    assert d["row_count"] == {"old": 1000, "new": 1200, "delta": 200, "changed": True}
+    assert d["schema_hash"]["changed"] is True
+
+
+def test_diff_json_identical_exits_zero(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand),
+               "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["diff"]["identical"] is True
+
+
+def test_diff_registered_in_help_signatures_required():
+    ns = build_parser().parse_args(
+        ["diff", CUSTOMERS_URN, "--signatures", "x.json"]
+    )
+    assert ns.func.__name__ == "cmd_diff"
+    assert ns.urn == CUSTOMERS_URN
+    assert ns.signatures == "x.json"
+    # --signatures is mandatory: omitting it is a parse error (exit 2 via SystemExit).
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["diff", CUSTOMERS_URN])

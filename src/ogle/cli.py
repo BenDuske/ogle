@@ -642,6 +642,184 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_frac(v: Optional[float]) -> str:
+    """A null fraction as a percent, or `unknown` when DataHub had no profile for it.
+
+    A missing fraction is NOT 0% — it means "not measured". Rendering it as `unknown`
+    keeps `ogle diff` from claiming a field went 0%→12% when really the baseline simply
+    never had a null profile to compare against.
+    """
+    return f"{v * 100:.1f}%" if v is not None else "unknown"
+
+
+def _diff_signatures(old: DatasetSignature, new: DatasetSignature) -> dict:
+    """Pure structural diff of two signatures (old baseline vs new candidate).
+
+    Returns the four field-level deltas plus row-count/schema-hash facets. Split out from
+    the command so the comparison logic is unit-testable with no store or file I/O.
+
+    Null-fraction changes are reported ONLY for fields present in both signatures — a
+    field that was added or removed already carries its null story on the add/remove line,
+    so re-reporting it here would be double-counting. A null fraction that appears or
+    disappears on a *surviving* field (known↔unknown) is a real change and is kept. The
+    0.1-percentage-point rounding gate drops float noise so a re-profiled-but-stable
+    column doesn't show as drift.
+    """
+    old_fields = {f.path: f.native_type for f in old.schema_fields}
+    new_fields = {f.path: f.native_type for f in new.schema_fields}
+
+    added = [
+        {"path": p, "native_type": new_fields[p]}
+        for p in sorted(new_fields.keys() - old_fields.keys())
+    ]
+    removed = [
+        {"path": p, "native_type": old_fields[p]}
+        for p in sorted(old_fields.keys() - new_fields.keys())
+    ]
+    common = sorted(old_fields.keys() & new_fields.keys())
+    type_changed = [
+        {"path": p, "old_type": old_fields[p], "new_type": new_fields[p]}
+        for p in common
+        if old_fields[p] != new_fields[p]
+    ]
+
+    null_changed = []
+    for p in common:
+        o = old.field_null_fractions.get(p)
+        n = new.field_null_fractions.get(p)
+        if o is None and n is None:
+            continue
+        # A fraction appearing/disappearing is a change; two known fractions must move by
+        # more than a rounded 0.1pp to count (drops re-profiling float jitter).
+        if o is None or n is None or round(o * 100, 1) != round(n * 100, 1):
+            null_changed.append({"path": p, "old": o, "new": n})
+
+    row_changed = old.row_count != new.row_count
+    row_delta = (
+        new.row_count - old.row_count
+        if old.row_count is not None and new.row_count is not None
+        else None
+    )
+    hash_changed = old.schema_hash != new.schema_hash
+    identical = not (
+        added or removed or type_changed or null_changed or row_changed
+    )
+
+    return {
+        "identical": identical,
+        "fields_added": added,
+        "fields_removed": removed,
+        "fields_type_changed": type_changed,
+        "null_fraction_changed": null_changed,
+        "row_count": {
+            "old": old.row_count,
+            "new": new.row_count,
+            "delta": row_delta,
+            "changed": row_changed,
+        },
+        "schema_hash": {
+            "old": old.schema_hash,
+            "new": new.schema_hash,
+            "changed": hash_changed,
+        },
+    }
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    """Explain the drift on ONE dataset: stored baseline vs a candidate signature file.
+
+    Read-only and side-effect-free — it never records an incident, advances a baseline, or
+    touches the store. Where `ogle check` walks live, scores, and *remembers*, `diff`
+    answers the narrower investigative question after a page: "what EXACTLY changed on this
+    table?" It reads the same offline signatures file `check --signatures` consumes (so the
+    dump you'd feed a dry-run doubles as the diff input) and prints the field-level delta —
+    fields added / removed / retyped, null-fraction moves, row-count change, and whether the
+    schema hash flipped.
+
+    Exit codes are the scriptable drift verdict: 0 = identical to baseline (no drift),
+    1 = differences found, 2 = can't compare (URN not watched, URN absent from the
+    signatures file, or the file is malformed). Keeping preconditions on 2 leaves 0/1 as a
+    clean `ogle diff <urn> --signatures new.json && echo unchanged` gate.
+    """
+    store = BaselineStore.load(Path(args.store))
+    urn = args.urn
+
+    old = store.get_baseline(urn)
+    if old is None:
+        if len(store) == 0:
+            print(
+                f"ogle diff: `{urn}` is not watched — store is empty; run `ogle check` first.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ogle diff: `{urn}` is not watched ({len(store)} dataset(s) tracked); "
+                "nothing to diff against.",
+                file=sys.stderr,
+            )
+        return 2
+
+    try:
+        signatures, _serving = load_signatures_file(Path(args.signatures))
+    except ValueError as exc:
+        print(f"ogle diff: {exc}", file=sys.stderr)
+        return 2
+
+    new = next((s for s in signatures if s.urn == urn), None)
+    if new is None:
+        print(
+            f"ogle diff: `{urn}` is not present in {args.signatures} "
+            f"({len(signatures)} signature(s) in the file).",
+            file=sys.stderr,
+        )
+        return 2
+
+    d = _diff_signatures(old, new)
+
+    if args.json:
+        _emit(json.dumps({"diff": {"urn": urn, **d}}, indent=2, sort_keys=True))
+        return 0 if d["identical"] else 1
+
+    if d["identical"]:
+        _emit(f"**diff `{urn}`** — identical to baseline (no drift).")
+        return 0
+
+    _emit(f"**diff `{urn}`** — baseline → candidate")
+    rc = d["row_count"]
+    if rc["changed"]:
+        if rc["delta"] is not None:
+            sign = "+" if rc["delta"] >= 0 else ""
+            _emit(f"- rows: {rc['old']} → {rc['new']} ({sign}{rc['delta']})")
+        else:
+            o = rc["old"] if rc["old"] is not None else "unknown"
+            n = rc["new"] if rc["new"] is not None else "unknown"
+            _emit(f"- rows: {o} → {n}")
+    else:
+        rpart = rc["old"] if rc["old"] is not None else "unknown"
+        _emit(f"- rows: unchanged ({rpart})")
+    sh = d["schema_hash"]
+    if sh["changed"]:
+        _emit(f"- schema hash: `{sh['old']}` → `{sh['new']}`")
+    else:
+        _emit(f"- schema hash: unchanged `{sh['old']}`")
+
+    if d["fields_added"] or d["fields_removed"] or d["fields_type_changed"]:
+        _emit("**schema:**")
+        for f in d["fields_added"]:
+            _emit(f"- ➕ `{f['path']}` : {f['native_type']}")
+        for f in d["fields_removed"]:
+            _emit(f"- ➖ `{f['path']}` : {f['native_type']}")
+        for f in d["fields_type_changed"]:
+            _emit(f"- 🔀 `{f['path']}` : {f['old_type']} → {f['new_type']}")
+
+    if d["null_fraction_changed"]:
+        _emit("**null fractions:**")
+        for f in d["null_fraction_changed"]:
+            _emit(f"- `{f['path']}` : {_fmt_frac(f['old'])} → {_fmt_frac(f['new'])} null")
+
+    return 1
+
+
 # Severity marks for the incident-memory view, keyed by the string the store persists
 # (the store stays decoupled from the scorer's Severity enum, so the CLI maps here).
 _INCIDENT_SEV_MARK = {"high": "\U0001f534", "medium": "\U0001f7e0", "low": "\U0001f7e1"}
@@ -1427,6 +1605,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show.add_argument("--json", action="store_true", help="Emit the full signature as JSON.")
     show.set_defaults(func=cmd_show)
+
+    # `ogle diff` — read-only field-level diff of one dataset: stored baseline vs a candidate
+    # signatures file. The investigative "what exactly changed?" step after a page; unlike
+    # `check` it records nothing and advances no baseline.
+    diff = sub.add_parser(
+        "diff",
+        help="Diff one dataset's stored baseline against a candidate signatures file (read-only).",
+    )
+    diff.add_argument(
+        "urn",
+        help="Dataset URN to diff (exact, as emitted by `ogle baselines --urns`).",
+    )
+    diff.add_argument(
+        "--signatures",
+        required=True,
+        metavar="FILE",
+        help="Candidate signatures JSON (same shape `ogle check --signatures` reads); the "
+        "URN's current signature is compared against its stored baseline.",
+    )
+    diff.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    diff.add_argument("--json", action="store_true", help="Emit the diff as JSON.")
+    diff.set_defaults(func=cmd_diff)
 
     # `ogle incidents` — inspect Ogle's cross-run incident memory (read-only): what drift
     # it's tracking, recurrence counts, serving impact. The visible side of the same

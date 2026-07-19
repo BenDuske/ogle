@@ -232,6 +232,27 @@ the dataset isn't watched — a scriptable "no such baseline" so `ogle show X >/
 branches cleanly. A dataset's remembered *drift* lives in `ogle incidents --grep <name>` (incidents
 are keyed by drift event, not URN); `show` is strictly the baseline signature + mute state.
 
+### Explaining a drift (`ogle diff`)
+
+Where `ogle show` prints the *stored* baseline, `ogle diff <urn>` compares that baseline against a
+**candidate** signatures file — the exact same JSON `ogle check --signatures` reads — and prints the
+field-level delta. It's the read-only investigative step after a page: "the baseline says one thing,
+this fresh dump says another — what **exactly** changed?" Unlike `check`, it records no incident and
+advances no baseline; it only reports:
+
+```bash
+ogle diff "urn:li:dataset:(dbt,shop.orders,PROD)" --signatures fresh.json          # human field-level diff
+ogle diff "urn:li:dataset:(dbt,shop.orders,PROD)" --signatures fresh.json --json   # machine-readable delta
+ogle diff X --signatures fresh.json && echo "no drift"                              # scriptable gate (exit 0/1)
+```
+
+The diff calls out fields **added** (`➕`), **removed** (`➖`), and **retyped** (`🔀 int → bigint`),
+**null-fraction** moves on surviving fields (`25.0% → 60.0% null`, with a 0.1pp rounding gate so
+re-profiling jitter isn't reported as drift), the **row-count** change with its delta, and whether the
+**schema hash** flipped. Exit codes are the drift verdict — **0** identical, **1** differences found,
+**2** can't compare (URN not watched, absent from the file, or a malformed file) — so preconditions
+stay off the 0/1 path and `ogle diff X --signatures f.json && …` branches cleanly.
+
 ### Pruning the watch-list (`ogle forget`)
 
 `ogle forget` is the write-side counterpart to `ogle baselines`: when a dataset is
