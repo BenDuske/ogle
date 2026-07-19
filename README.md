@@ -180,6 +180,26 @@ Unlike `incidents --fail-on`, it gates on the *whole* store (`status` has no fil
 `0` by default so the plain snapshot never pages unless a floor is asked for. Mirrors the exit-code
 contract of `check --fail-on` / `incidents --fail-on`.
 
+### Prometheus metrics (`ogle metrics`)
+
+`ogle status --json` answers "what is Ogle holding right now?" for a script; `ogle metrics`
+answers it for a **monitoring stack**. It renders the identical watch-list + incidents + mutes
+rollup as Prometheus text exposition format, so you can graph Ogle's drift memory over time and
+alert on it — the production-observability counterpart to the human snapshot:
+
+```bash
+ogle metrics                                   # Prometheus text exposition on stdout
+ogle metrics --store prod.json > ogle.prom     # feed the node_exporter textfile collector
+```
+
+Every series is a **gauge** (point-in-time store levels, so none carry the `_total` suffix
+Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /
+`_rows_unknown`, `ogle_incidents_remembered{severity="high|medium|low|unknown"}`,
+`ogle_incidents_serving` / `_recurring` / `_sightings`, and `ogle_muted_active`. The numbers are
+the same rollups `status` prints (verified against `status --json` in the test suite), so a
+Grafana panel and the CLI snapshot never disagree. Unlike `status --fail-on`, `metrics` **always
+exits 0** — a scrape must not fail on data levels; keep gating on `status`/`incidents --fail-on`.
+
 ### Corruption-resilient store (unattended-safe)
 
 The store is written atomically (temp file + `os.replace`), so Ogle itself never leaves a

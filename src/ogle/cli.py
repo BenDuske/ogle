@@ -1486,6 +1486,107 @@ def _baseline_totals(store: "BaselineStore") -> dict:
     }
 
 
+def _render_prometheus(
+    totals: dict, inc: dict, muted_count: int, store_path: str
+) -> str:
+    """Render the store rollup as Prometheus text exposition format (v0.0.4).
+
+    Pure function of the same rollups `status` prints, so a Prometheus/Grafana stack can
+    scrape Ogle's drift memory over time (node_exporter textfile collector or pushgateway)
+    and alert on it — the production-observability counterpart to the human `status`
+    snapshot. Everything is a gauge: these are point-in-time store levels, not monotonic
+    counters, so none carry the `_total` suffix Prometheus reserves for counters.
+    """
+
+    def esc(v: str) -> str:
+        # Prometheus label-value escaping: backslash, double-quote, newline.
+        return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    lines: List[str] = []
+
+    def family(name: str, help_text: str, samples) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+        for labels, value in samples:
+            if labels:
+                label_str = ",".join(
+                    f'{k}="{esc(str(v))}"' for k, v in labels.items()
+                )
+                lines.append(f"{name}{{{label_str}}} {value}")
+            else:
+                lines.append(f"{name} {value}")
+
+    family(
+        "ogle_up",
+        "1 if Ogle rendered metrics for this store.",
+        [({"store": store_path}, 1)],
+    )
+    family(
+        "ogle_watching_datasets",
+        "Datasets Ogle holds a baseline for.",
+        [(None, totals["watching"])],
+    )
+    family(
+        "ogle_watching_fields",
+        "Total schema fields across all baselines.",
+        [(None, totals["fields"])],
+    )
+    family(
+        "ogle_watching_rows",
+        "Summed row_count across baselines with a known count.",
+        [(None, totals["rows"])],
+    )
+    family(
+        "ogle_watching_rows_unknown",
+        "Baselines whose row_count is unknown (coverage gap).",
+        [(None, totals["unknown_rows"])],
+    )
+    sev = inc["by_severity"]
+    family(
+        "ogle_incidents_remembered",
+        "Remembered drift incidents, by severity.",
+        [({"severity": s}, sev[s]) for s in ("high", "medium", "low", "unknown")],
+    )
+    family(
+        "ogle_incidents_serving",
+        "Remembered incidents on a serving path.",
+        [(None, inc["serving"])],
+    )
+    family(
+        "ogle_incidents_recurring",
+        "Remembered incidents seen at least twice (flapping/chronic).",
+        [(None, inc["recurring"])],
+    )
+    family(
+        "ogle_incidents_sightings",
+        "Total observation count summed across all incidents.",
+        [(None, inc["total_sightings"])],
+    )
+    family(
+        "ogle_muted_active",
+        "Datasets currently muted (active snoozes only).",
+        [(None, muted_count)],
+    )
+    return "\n".join(lines)
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """Emit the store rollup as Prometheus text exposition format (read-only).
+
+    Machine-readable sibling of `status`: identical numbers, shaped for a monitoring stack
+    instead of a human reader. Point a Prometheus textfile collector / pushgateway at this
+    to graph drift memory over time and alert on serving-path or high-severity growth.
+    Always exits 0 — a metrics scrape must not fail on data levels; use `status --fail-on`
+    or `incidents --fail-on` for CI/scheduled gating.
+    """
+    store = BaselineStore.load(Path(args.store))
+    totals = _baseline_totals(store)
+    inc = _incident_summary(store.incidents())
+    muted = store.muted(time.time())  # active snoozes only (expired excluded)
+    _emit(_render_prometheus(totals, inc, len(muted), str(args.store)))
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """One-glance health snapshot of the whole store — both halves plus mutes.
 
@@ -1770,6 +1871,23 @@ def build_parser() -> argparse.ArgumentParser:
         "whole-store health gate). Gates on every remembered incident; independent of --json.",
     )
     status.set_defaults(func=cmd_status)
+
+    # `ogle metrics` — same rollup as `status`, in Prometheus text exposition format so a
+    # monitoring stack can scrape Ogle's drift memory over time (production observability).
+    metrics = sub.add_parser(
+        "metrics",
+        help="Emit the store rollup as Prometheus text metrics (read-only).",
+        description=(
+            "Machine-readable sibling of `status`: the same watch-list + incidents + mutes "
+            "rollup, rendered as Prometheus text exposition format. Point a node_exporter "
+            "textfile collector or a pushgateway at it to graph drift memory over time and "
+            "alert on serving-path / high-severity growth. Read-only; always exits 0."
+        ),
+    )
+    metrics.add_argument(
+        "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    metrics.set_defaults(func=cmd_metrics)
 
     # `ogle baselines` — inspect the OTHER half of the store (read-only): the datasets Ogle
     # has a signature for and will diff the next walk against. `incidents` shows remembered
