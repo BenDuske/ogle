@@ -477,6 +477,38 @@ def test_muted_empty_reports_none(tmp_path, capsys):
     assert "no muted datasets" in capsys.readouterr().out.lower()
 
 
+def test_muted_urns_plain_selector(tmp_path, capsys):
+    """`muted --urns` emits one URN per line (the pipe-side selector) — no prose header."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    main(["mute", ORDERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--store", str(store), "--urns"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Exactly the two URNs, one per line, sorted — nothing else (no "N muted" header).
+    assert out.splitlines() == sorted([CUSTOMERS_URN, ORDERS_URN])
+    assert "muted" not in out
+
+
+def test_muted_urns_overrides_json(tmp_path, capsys):
+    """--urns wins over --json (it IS the scriptable form), mirroring `baselines --urns`."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--store", str(store), "--urns", "--json"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == CUSTOMERS_URN  # plain line, not JSON
+
+
+def test_muted_urns_silent_on_empty(tmp_path, capsys):
+    """Empty set → SILENT (clean pipe), not the human 'no muted datasets' line."""
+    store = tmp_path / "baselines.json"
+    rc = main(["muted", "--store", str(store), "--urns"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
 def test_check_on_muted_dataset_stays_quiet_exit_zero(tmp_path, capsys):
     """End-to-end: a muted dataset that collapses must NOT page (exit 0, 'silenced' tail)."""
     store = tmp_path / "baselines.json"

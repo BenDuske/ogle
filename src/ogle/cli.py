@@ -429,7 +429,15 @@ def cmd_muted(args: argparse.Namespace) -> int:
     """List the datasets currently muted in the store (expired snoozes excluded)."""
     store = BaselineStore.load(Path(args.store))
     now = time.time()
-    urns = store.muted(now)
+    urns = store.muted(now)  # active mutes only — expired snoozes excluded
+    # `--urns`: plain machine output — just each muted URN, one per line. The write-side
+    # selector symmetric with `baselines --urns`/`incidents --fingerprints`: turns the mute
+    # list into a pipe for bulk `unmute`/`show`. Overrides --json (this IS the scriptable
+    # form) and stays SILENT on an empty set so a pipe gets a clean stream, not a prose line.
+    if getattr(args, "urns", False):
+        for urn in urns:
+            _emit(urn)
+        return 0
     if args.json:
         entries = []
         for urn in urns:
@@ -1532,6 +1540,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
     )
     muted.add_argument("--json", action="store_true", help="Emit the list as JSON.")
+    muted.add_argument(
+        "--urns",
+        action="store_true",
+        help="Print ONLY the muted URNs (one per line) — pipe into a write-side command, "
+        "e.g. `ogle muted --urns | xargs -n1 ogle unmute` to lift a whole false-positive "
+        "campaign at once. Overrides --json; silent on an empty set.",
+    )
     muted.set_defaults(func=cmd_muted)
 
     # `ogle status` — one-glance rollup of the whole store (read-only): the watch-list, the
