@@ -1777,11 +1777,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     re-walking DataHub. Reuses `_incident_summary` so the severity/serving/recurring counts
     match what `incidents --summary` reports on the same store.
     """
+    now = time.time()
     store = BaselineStore.load(Path(args.store))
     totals = _baseline_totals(store)
     incident_records = store.incidents()
     inc = _incident_summary(incident_records)
-    muted = store.muted(time.time())  # active snoozes only (expired excluded)
+    muted = store.muted(now)  # active snoozes only (expired excluded)
+    # Same permanent-vs-snooze split `metrics` exposes as gauges, surfaced here for the human
+    # reader: a *permanent* mute is a standing blind spot (drift suppressed with no end date),
+    # a *snooze* lapses on its own — collapsing them to one number hides which is which.
+    # permanent + snoozed == len(muted) (they're disjoint), so `muted` stays the parity anchor.
+    mute_split = _mute_breakdown(store, now)
 
     # CI/scheduled health gate. Turns the whole-store rollup into an exit-code check so a
     # cron/CI wrapper that runs `ogle status` to answer "what is Ogle holding right now?" can
@@ -1802,6 +1808,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "baselines": totals,
                         "incidents": inc,
                         "muted": len(muted),
+                        "muted_permanent": mute_split["permanent"],
+                        "muted_snoozed": mute_split["snoozed"],
                     }
                 },
                 indent=2,
@@ -1834,7 +1842,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"- ⚠️ serving-path: {inc['serving']} · 🔁 recurring: {inc['recurring']} · "
         f"total sightings: {inc['total_sightings']}"
     )
-    _emit(f"- 🔇 muted: {len(muted)} active")
+    # Break the mute count into its two risk kinds so a permanent standing blind spot never
+    # hides inside a bland "N active". Only shown when something is muted; the ⛔ permanent
+    # count leads because that's the one an operator must justify (drift page-able never).
+    muted_line = f"- 🔇 muted: {len(muted)} active"
+    if muted:
+        muted_line += (
+            f" (⛔ {mute_split['permanent']} permanent · "
+            f"💤 {mute_split['snoozed']} snoozed)"
+        )
+    _emit(muted_line)
     if gate_rc:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
     return gate_rc

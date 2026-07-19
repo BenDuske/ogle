@@ -2068,6 +2068,37 @@ def test_status_json_shape(tmp_path, capsys):
     assert payload["store"] == str(store)
 
 
+def test_status_json_splits_muted_permanent_and_snoozed(tmp_path, capsys):
+    # status --json must expose the same permanent-vs-snooze split metrics does, and the two
+    # kinds sum back to the flat `muted` count (they're disjoint) — the parity anchor.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:perm")  # permanent standing blind spot
+    s.mute("urn:snooze", until=time.time() + 3600)  # self-expiring snooze
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["muted"] == 2
+    assert payload["muted_permanent"] == 1
+    assert payload["muted_snoozed"] == 1
+    assert payload["muted_permanent"] + payload["muted_snoozed"] == payload["muted"]
+
+
+def test_status_text_flags_permanent_blind_spot(tmp_path, capsys):
+    # A permanent mute is a standing blind spot; the human snapshot must call it out, not
+    # bury it inside a bland "N active".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:perm")
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "muted: 1 active" in out
+    assert "1 permanent" in out
+
+
 def test_status_json_counts_unknown_rows(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     s = BaselineStore(

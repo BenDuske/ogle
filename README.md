@@ -168,7 +168,11 @@ ogle status --fail-on high     # exit 1 if any remembered incident is high+ (CI/
 The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
 with an `(N unknown)` note when some baselines have no captured row count), **incidents
 remembered** (broken out 🔴 high / 🟠 medium / 🟡 low / • unknown), **serving-path / recurring /
-total sightings**, and **muted** (active snoozes only — expired ones are excluded). The severity
+total sightings**, and **muted** — which, when anything is silenced, splits into `⛔ N permanent`
+(a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
+same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't
+hide inside a bland "N active". `--json` carries the split as `muted_permanent`/`muted_snoozed`
+(disjoint — they sum back to `muted`). The severity
 and serving counts reuse the same rollup as `incidents --summary`, so the two always agree on the
 same store. An untouched store reports `is empty — run ogle check to start watching` rather than a
 wall of zeros.
