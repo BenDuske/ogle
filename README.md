@@ -313,6 +313,8 @@ ogle incidents --serving-only           # only incidents that touch a serving pa
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
 ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
+ogle incidents --fresh 1h               # only drift seen within the last hour (currently-active set)
+ogle incidents --fresh 7d --stale 1h    # window: seen between 7d and 1h ago (--fresh + --stale compose)
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ogle incidents --sort count             # order by recurrence (most-recurring drift first)
 ogle incidents --sort datasets          # order by blast radius (most datasets first)
@@ -350,6 +352,13 @@ seconds or days). It composes with every other filter and with `--fingerprints`,
 `ogle incidents --stale 30d --fingerprints | ogle resolve -` batch-clears drift Ogle hasn't seen in
 a month. A legacy incident with **no recorded age** can't be proven stale, so `--stale` skips it
 rather than guessing.
+
+`--fresh AGE` is the mirror image: it keeps only incidents **last seen within AGE** — the drift
+still recurring lately, i.e. the currently-active set an operator triages during a live incident
+(`ogle incidents --fresh 1h --serving-only` = serving-path drift seen in the last hour). Same
+duration grammar and the same "no recorded age can't be proven fresh, so it's skipped" rule as
+`--stale`. Because the two bound opposite ends, they compose into a **window**:
+`ogle incidents --fresh 7d --stale 1h` shows only drift last seen between 7 days and 1 hour ago.
 
 `--sort {severity,count,datasets,recent}` picks the ordering axis. The default `severity` is the
 triage order (worst first, recurrence as tiebreak); `count` surfaces the most-recurring

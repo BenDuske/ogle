@@ -1027,6 +1027,7 @@ def _incident_passes(
     min_count: Optional[int] = None,
     needle: Optional[str] = None,
     stale_before: Optional[float] = None,
+    fresh_after: Optional[float] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -1039,8 +1040,12 @@ def _incident_passes(
     (case-insensitive). `stale_before` (None = no staleness filter) keeps only incidents
     whose last_seen is KNOWN and older than that epoch cutoff — the drift Ogle hasn't seen
     recur lately, i.e. resolve/forget candidates. A record with no last_seen (legacy/untimed)
-    can't be proven stale, so it's dropped by the filter rather than guessed. All filters
-    are ANDed; passing none keeps everything.
+    can't be proven stale, so it's dropped by the filter rather than guessed. `fresh_after`
+    (None = no freshness filter) is the mirror image: keeps only incidents whose last_seen is
+    KNOWN and at/after that epoch cutoff — the drift still recurring lately, i.e. the
+    currently-active set for live triage. A legacy/untimed record can't be proven fresh
+    either, so it's likewise dropped. `stale_before` + `fresh_after` compose into a window
+    (seen between the two ages). All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
         return False
@@ -1051,6 +1056,10 @@ def _incident_passes(
     if stale_before is not None:
         ls = rec.get("last_seen")
         if ls is None or ls >= stale_before:
+            return False
+    if fresh_after is not None:
+        ls = rec.get("last_seen")
+        if ls is None or ls < fresh_after:
             return False
     if min_rank is not None:
         try:
@@ -1318,17 +1327,33 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             return 2
         stale_before = now - age
 
+    # `--fresh AGE`: the inverse of `--stale` — keep only drift last seen at/within AGE (e.g.
+    # `--fresh 1h`), the currently-active set an operator triages during a live incident.
+    # Shares the same `now` and duration grammar; a bad duration is the same hard error (exit
+    # 2). Composes with --stale to bound a window (seen between the two ages).
+    fresh_raw = getattr(args, "fresh", None)
+    fresh_after: Optional[float] = None
+    if fresh_raw is not None:
+        age = _parse_age(fresh_raw)
+        if age is None:
+            _emit("_--fresh wants a duration like 7d, 12h, 30m, or 2w._")
+            return 2
+        fresh_after = now - age
+
     filtered = (
         getattr(args, "min_severity", None) is not None
         or serving_only
         or min_count is not None
         or needle is not None
         or stale_before is not None
+        or fresh_after is not None
     )
     records = [
         r
         for r in all_records
-        if _incident_passes(r, min_rank, serving_only, min_count, needle, stale_before)
+        if _incident_passes(
+            r, min_rank, serving_only, min_count, needle, stale_before, fresh_after
+        )
     ]
 
     limit = getattr(args, "limit", None)
@@ -1864,6 +1889,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show incidents last seen longer ago than AGE (e.g. 7d, 12h, 30m, 2w) — "
         "drift that stopped recurring, i.e. resolve/forget candidates. Skips legacy "
         "records with no recorded age.",
+    )
+    incidents.add_argument(
+        "--fresh",
+        metavar="AGE",
+        default=None,
+        help="Only show incidents last seen within AGE (e.g. 1h, 30m, 2d) — the drift still "
+        "recurring lately, i.e. the currently-active set for live triage. Inverse of --stale; "
+        "combine the two to bound a window. Skips legacy records with no recorded age.",
     )
     incidents.add_argument(
         "--sort",

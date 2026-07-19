@@ -2634,6 +2634,68 @@ def test_incidents_stale_and_recent_registered_in_help():
     assert ns.sort == "recent"
 
 
+# ---- incidents --fresh: inverse of --stale, the currently-active set ----------------------
+
+
+def test_incidents_fresh_filters_out_old(tmp_path, capsys):
+    # --fresh is the mirror of --stale: keep only drift seen WITHIN the window, dropping the
+    # gone-quiet ones. The live-triage view.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("old_fp", severity="high", title="OLD", now=_ANCIENT)
+    s.record_incident("fresh_fp", severity="high", title="FRESH", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fresh", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fresh_fp"]  # only drift seen recently survives
+
+
+def test_incidents_fresh_skips_untimed_records(tmp_path, capsys):
+    # A record with no last_seen can't be proven fresh either, so --fresh drops it rather
+    # than guessing — only the demonstrably-recent one comes through.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("untimed_fp", severity="high", title="UNTIMED")  # no now
+    s.record_incident("fresh_fp", severity="high", title="FRESH", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fresh", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fresh_fp"]
+
+
+def test_incidents_fresh_bad_duration_is_error(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--fresh", "soon"]) == 2
+    assert "duration" in capsys.readouterr().out
+
+
+def test_incidents_stale_and_fresh_compose_into_window(tmp_path, capsys):
+    # --stale 1h (older than 1h) AND --fresh 7d (within 7d) bound a window: only the drift
+    # last seen BETWEEN 7d and 1h ago survives — the ancient one fails --fresh, the just-now
+    # one fails --stale, the 2d-old one lands in the window.
+    now = time.time()
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("ancient_fp", severity="high", title="ANCIENT", now=_ANCIENT)
+    s.record_incident("mid_fp", severity="high", title="MID", now=now - 2 * 86400)
+    s.record_incident("justnow_fp", severity="high", title="NOW", now=now)
+    s.save()
+    assert main(
+        ["incidents", "--store", str(store_path), "--stale", "1h", "--fresh", "7d", "--json"]
+    ) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["mid_fp"]
+
+
+def test_incidents_fresh_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--fresh", "1h"])
+    assert ns.func.__name__ == "cmd_incidents"
+    assert ns.fresh == "1h"
+
+
 def test_parse_age_accepts_units():
     assert _parse_age("45s") == 45
     assert _parse_age("30m") == 1800
