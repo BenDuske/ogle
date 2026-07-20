@@ -1233,6 +1233,12 @@ def _incident_summary(records: List[dict]) -> dict:
     the shape is stable regardless of what the store holds.
     """
     by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    # Serving incidents split by severity — the serving ∩ severity cross-tab the flat
+    # `serving` total can't express. `serving="high"` is the load-bearing production page
+    # ("a deployed model is being fed drifted data right now"); a flat serving count hides
+    # it, since one low-severity serving incident + one high non-serving incident reads as
+    # serving=1, high=1 with ZERO high-serving incidents. sum(serving_by_severity) == serving.
+    serving_by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
     serving = 0
     recurring = 0
     total_sightings = 0
@@ -1242,6 +1248,7 @@ def _incident_summary(records: List[dict]) -> dict:
         by_severity[key] += 1
         if r.get("serving"):
             serving += 1
+            serving_by_severity[key] += 1
         count = int(r.get("count", 0))
         total_sightings += count
         if count >= 2:
@@ -1250,6 +1257,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "total": len(records),
         "by_severity": by_severity,
         "serving": serving,
+        "serving_by_severity": serving_by_severity,
         "recurring": recurring,
         "total_sightings": total_sightings,
     }
@@ -1758,6 +1766,18 @@ def _render_prometheus(
         "ogle_incidents_serving",
         "Remembered incidents on a serving path.",
         [(None, inc["serving"])],
+    )
+    # Serving incidents split by severity — the page-worthy cross-tab the flat total above
+    # can't express. `{severity="high"}` is a deployed model being fed drifted data right
+    # now: alert `ogle_incidents_serving_by_severity{severity="high"} > 0`. Mirrors the
+    # muted_active + muted_permanent pattern (keep the total, add the risk-highlighting
+    # companion); sum over the label == ogle_incidents_serving. Emitted for all four buckets
+    # (honest 0s) so the alert series always exists rather than vanishing when nothing is hot.
+    sbs = inc.get("serving_by_severity") or {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    family(
+        "ogle_incidents_serving_by_severity",
+        "Remembered serving-path incidents, by severity (serving AND severity).",
+        [({"severity": s}, sbs[s]) for s in ("high", "medium", "low", "unknown")],
     )
     family(
         "ogle_incidents_recurring",

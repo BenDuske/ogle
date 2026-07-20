@@ -89,6 +89,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_watching_rows_unknown",
         "ogle_incidents_remembered",
         "ogle_incidents_serving",
+        "ogle_incidents_serving_by_severity",
         "ogle_incidents_recurring",
         "ogle_incidents_sightings",
         "ogle_muted_active",
@@ -139,6 +140,66 @@ def test_metrics_values_match_store(tmp_path, capsys):
     assert samples["ogle_incidents_serving"] == "1"  # only "hi" is serving
     assert samples["ogle_incidents_recurring"] == "1"  # "hi" seen twice
     assert samples["ogle_incidents_sightings"] == "4"  # 2 + 1 + 1
+    # serving ∩ severity: the one serving incident ("hi") is high-severity; the medium/low
+    # incidents are non-serving. So the page-worthy cell reads high=1, the rest honest 0s.
+    assert samples['ogle_incidents_serving_by_severity{severity="high"}'] == "1"
+    assert samples['ogle_incidents_serving_by_severity{severity="medium"}'] == "0"
+    assert samples['ogle_incidents_serving_by_severity{severity="low"}'] == "0"
+    assert samples['ogle_incidents_serving_by_severity{severity="unknown"}'] == "0"
+
+
+def test_serving_by_severity_disambiguates_flat_totals(tmp_path, capsys):
+    """The whole point: flat serving + flat severity can't locate a high-serving incident.
+
+    A low-severity SERVING incident next to a high-severity NON-serving one gives
+    serving=1 and remembered{high}=1 — yet there is ZERO high-severity serving drift.
+    Only the cross-tab tells the operator the deployed model is (or isn't) actually hot.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("lo", severity="low", title="LOW", datasets=1, serving=True)
+    s.record_incident("hi", severity="high", title="HIGH", datasets=1, serving=False)
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # The misleading flat view: both look "present".
+    assert samples["ogle_incidents_serving"] == "1"
+    assert samples['ogle_incidents_remembered{severity="high"}'] == "1"
+    # The truth the cross-tab surfaces: no high-severity drift is on a serving path.
+    assert samples['ogle_incidents_serving_by_severity{severity="high"}'] == "0"
+    assert samples['ogle_incidents_serving_by_severity{severity="low"}'] == "1"
+
+
+def test_serving_by_severity_sums_to_flat_serving(tmp_path, capsys):
+    """Invariant: the labeled split is a partition of the flat serving total."""
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    split = sum(
+        int(samples[f'ogle_incidents_serving_by_severity{{severity="{s}"}}'])
+        for s in ("high", "medium", "low", "unknown")
+    )
+    assert split == int(samples["ogle_incidents_serving"])
+
+
+def test_incident_summary_serving_by_severity_counts_only_serving():
+    """Pure-helper check: unknown/legacy severity on a serving path lands in `unknown`."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "serving": True, "count": 1},
+            {"severity": "high", "serving": False, "count": 1},
+            {"severity": None, "serving": True, "count": 1},  # legacy severity, serving
+        ]
+    )
+    assert inc["serving"] == 2
+    assert inc["serving_by_severity"]["high"] == 1  # only the serving high one
+    assert inc["serving_by_severity"]["unknown"] == 1  # legacy-severity serving incident
+    assert inc["serving_by_severity"]["medium"] == 0
 
 
 def test_metrics_matches_status_json_numbers(tmp_path, capsys):

@@ -206,7 +206,9 @@ new one — never a torn one. The confirmation line goes to stderr, keeping stdo
 Every series is a **gauge** (point-in-time store levels, so none carry the `_total` suffix
 Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /
 `_rows_unknown`, `ogle_incidents_remembered{severity="high|medium|low|unknown"}`,
-`ogle_incidents_serving` / `_recurring` / `_sightings`, `ogle_muted_active` (split into
+`ogle_incidents_serving` (split by severity in
+`ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` / `_sightings`,
+`ogle_muted_active` (split into
 `ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
 incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), and a monitor
 heartbeat `ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
@@ -231,6 +233,18 @@ while `ogle_muted_snooze_next_expiry_seconds` counts down to the soonest *snooze
 can anticipate drift returning to the page. The two split the active total exactly
 (`permanent + snoozed == ogle_muted_active`); the countdown emits **no sample** when nothing is
 snoozed rather than a fabricated `0` that would read as "expiring right now".
+
+**The page-worthy cell is serving × severity.** The single alert that matters most for a
+production ML monitor is "a *high-severity* drift is hitting a *serving* path right now" — a
+deployed model being fed drifted data. The flat `ogle_incidents_serving` (any severity) and
+`ogle_incidents_remembered{severity="high"}` (serving or not) **can't express it**: one
+low-severity serving incident next to one high-severity *non*-serving incident reads as
+`serving 1` and `remembered{high} 1`, yet there are **zero** high-severity serving incidents.
+`ogle_incidents_serving_by_severity{severity="…"}` is that cross-tab — alert on
+`ogle_incidents_serving_by_severity{severity="high"} > 0` for the real page. It's emitted for
+all four severity buckets (honest `0`s, so the alert series always exists) and sums exactly to
+`ogle_incidents_serving`, mirroring the `muted_active` + `muted_permanent` "keep the total, add
+the risk-highlighting split" shape.
 
 ### Corruption-resilient store (unattended-safe)
 
