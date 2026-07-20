@@ -1956,10 +1956,25 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"- 🧠 incidents remembered: {inc['total']} "
         f"(🔴 {sev['high']} · 🟠 {sev['medium']} · 🟡 {sev['low']} · • {sev['unknown']})"
     )
-    _emit(
-        f"- ⚠️ serving-path: {inc['serving']} · 🔁 recurring: {inc['recurring']} · "
+    # Surface the serving ∩ severity split the flat count hides — the same page-worthy
+    # cross-tab `metrics` exposes as ogle_incidents_serving_by_severity, brought to the human
+    # snapshot. A flat "serving-path: 1" can't tell an operator whether that's a high-severity
+    # production page or a benign low one; leading with 🔴 high (the load-bearing "a deployed
+    # model is being fed drifted data right now" count) closes that blind spot. Shown only when
+    # something is serving — mirrors the muted line's conditional risk-split — and the four
+    # buckets sum back to `serving`, the parity anchor.
+    serving_line = f"- ⚠️ serving-path: {inc['serving']}"
+    if inc["serving"]:
+        sbs = inc["serving_by_severity"]
+        serving_line += (
+            f" (🔴 {sbs['high']} · 🟠 {sbs['medium']} · "
+            f"🟡 {sbs['low']} · • {sbs['unknown']})"
+        )
+    serving_line += (
+        f" · 🔁 recurring: {inc['recurring']} · "
         f"total sightings: {inc['total_sightings']}"
     )
+    _emit(serving_line)
     # Break the mute count into its two risk kinds so a permanent standing blind spot never
     # hides inside a bland "N active". Only shown when something is muted; the ⛔ permanent
     # count leads because that's the one an operator must justify (drift page-able never).

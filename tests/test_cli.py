@@ -2044,6 +2044,37 @@ def test_status_rollup_human(tmp_path, capsys):
     assert "muted: 1 active" in out
 
 
+def test_status_serving_line_splits_by_severity(tmp_path, capsys):
+    # The human serving-path line must surface the serving ∩ severity split (the same
+    # cross-tab metrics exposes as ogle_incidents_serving_by_severity), not just a flat
+    # count — an operator has to see the load-bearing 🔴 high-serving page, not guess it.
+    # Here: one HIGH serving + one LOW serving → serving-path: 2 with high=1, low=1.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("high_serv", severity="high", title="H", datasets=2, serving=True)
+    s.record_incident("low_serv", severity="low", title="L", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Flat total kept (parity anchor) and the risk-split appended, high first.
+    assert "serving-path: 2 (🔴 1 · 🟠 0 · 🟡 1 · • 0)" in out
+
+
+def test_status_serving_split_suppressed_when_nothing_serves(tmp_path, capsys):
+    # Mirrors the muted line's conditional split: with zero serving incidents the line stays
+    # a bare "serving-path: 0" — no parenthetical wall of zeros on the human snapshot.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("low_only", severity="low", title="L", datasets=1)  # not serving
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "serving-path: 0 ·" in out  # bare count, immediately followed by the recurring sep
+    assert "serving-path: 0 (" not in out
+
+
 def test_status_empty_store_reports_empty(tmp_path, capsys):
     store = tmp_path / "baselines.json"  # never created
     rc = main(["status", "--store", str(store)])
