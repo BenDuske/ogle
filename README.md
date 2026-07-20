@@ -221,8 +221,9 @@ Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_field
 `ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` / `_sightings`,
 `ogle_muted_active` (split into
 `ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
-incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), and a monitor
-heartbeat `ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
+incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the baseline
+capture ages (`ogle_baseline_{newest,oldest}_capture_age_seconds` + the `ogle_baseline_capture_age_unknown`
+coverage gap), and a monitor heartbeat `ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
 `status --json` in the test suite), so a Grafana panel and the CLI snapshot never disagree.
 Unlike `status --fail-on`, `metrics` **always exits 0** — a scrape must not fail on data levels;
 keep gating on `status`/`incidents --fail-on`.
@@ -235,6 +236,18 @@ file's mtime only advances when `ogle check` actually runs, so alerting on
 `ogle_store_age_seconds > 2 × check_interval` fires when Ogle itself goes dark, independent of
 whether any drift is present. Before the first store write (no file yet) the family is declared
 but emits **no sample** — an honest "no data", not a fabricated zero age.
+
+**Orphan detection.** `ogle_store_age_seconds` catches Ogle going dark *everywhere at once*, but not a
+*single* dataset silently dropping out of the walk (renamed / de-provisioned / lineage pruned) while its
+baseline lingers as a blind spot. A clean walk refreshes a signature every time it still sees the dataset,
+so the baseline capture ages localize that: `ogle_baseline_oldest_capture_age_seconds` is the stalest
+watched signature — alert `ogle_baseline_oldest_capture_age_seconds > 2 × walk_interval` to page on an
+orphaned baseline, the Prometheus counterpart to `ogle baselines --sort age`/`--stale`.
+`ogle_baseline_newest_capture_age_seconds` bounds the fresh end, and `ogle_baseline_capture_age_unknown`
+is the coverage companion (like `ogle_watching_rows_unknown`): baselines with no parseable `computed_at`
+whose age can't be asserted, so a small oldest-age next to a large unknown reads as "most of the watch-list
+can't be checked for orphaning". Both age families are declared but emit **no sample** when no baseline
+carries a stamp — an honest "no data", never a fake zero.
 
 **Mutes aren't all equal.** `ogle_muted_active` counts every silenced dataset as one number, but
 a *permanent* mute is a chosen **standing blind spot** — drift on that dataset is suppressed with

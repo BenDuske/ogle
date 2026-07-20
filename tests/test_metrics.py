@@ -97,6 +97,9 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_muted_snooze_next_expiry_seconds",
         "ogle_incidents_last_seen_min_age_seconds",
         "ogle_incidents_last_seen_max_age_seconds",
+        "ogle_baseline_newest_capture_age_seconds",
+        "ogle_baseline_oldest_capture_age_seconds",
+        "ogle_baseline_capture_age_unknown",
         "ogle_store_age_seconds",
     }
     # Every family has exactly one HELP and one TYPE, and every one is a gauge.
@@ -412,6 +415,100 @@ def test_metrics_cli_emits_age_sample_for_timed_incident(tmp_path, capsys):
     lo = float(samples["ogle_incidents_last_seen_min_age_seconds"])
     hi = float(samples["ogle_incidents_last_seen_max_age_seconds"])
     assert hi >= lo > 0  # a single ancient incident: both large, max >= min
+
+
+# ---- baseline capture-age gauges (orphan detection / watch-list staleness) ---------
+def test_baseline_age_bounds_none_when_no_timestamped_baselines():
+    from ogle.cli import _baseline_age_bounds
+
+    # baselines built without a computed_at → age can't be asserted for any → bounds None,
+    # and every one counted as an unknown-age coverage gap.
+    s = BaselineStore()
+    s.baselines[CUSTOMERS_URN] = _sig()
+    s.baselines[ORDERS_URN] = _sig(ORDERS_URN)
+    out = _baseline_age_bounds(s, now=1000.0)
+    assert out == {"bounds": None, "unknown": 2}
+
+
+def test_baseline_age_bounds_min_is_newest_max_is_oldest():
+    from ogle.cli import _baseline_age_bounds
+
+    now = 1000.0
+    s = BaselineStore()
+    # newest capture (10s ago), oldest capture (300s ago), plus one untimed (unknown).
+    s.baselines[CUSTOMERS_URN] = _sig(computed_at="1970-01-01T00:16:30Z")  # epoch 990 → 10s
+    s.baselines[ORDERS_URN] = _sig(ORDERS_URN, computed_at="1970-01-01T00:11:40Z")  # 700 → 300s
+    untimed = "urn:li:dataset:(urn:li:dataPlatform:dbt,x.untimed,PROD)"
+    s.baselines[untimed] = _sig(untimed)  # no computed_at → unknown
+    out = _baseline_age_bounds(s, now)
+    assert out == {"bounds": (10.0, 300.0), "unknown": 1}
+
+
+def test_baseline_age_bounds_clamps_future_stamp_to_zero():
+    from ogle.cli import _baseline_age_bounds
+
+    # a capture stamp in the future (clock skew) reads as age 0, never negative.
+    s = BaselineStore()
+    s.baselines[CUSTOMERS_URN] = _sig(computed_at="1970-01-01T00:17:30Z")  # epoch 1050
+    out = _baseline_age_bounds(s, now=1000.0)
+    assert out == {"bounds": (0.0, 0.0), "unknown": 0}
+
+
+def test_render_emits_baseline_age_gauges_when_timestamped():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        baseline_age={"bounds": (10.0, 300.0), "unknown": 2},
+    )
+    samples, types, helps = _parse_prom(text)
+    assert types["ogle_baseline_newest_capture_age_seconds"] == "gauge"
+    assert types["ogle_baseline_oldest_capture_age_seconds"] == "gauge"
+    assert samples["ogle_baseline_newest_capture_age_seconds"] == "10"
+    assert samples["ogle_baseline_oldest_capture_age_seconds"] == "300"
+    # coverage-gap gauge always carries a value (honest count, even when bounds exist)
+    assert samples["ogle_baseline_capture_age_unknown"] == "2"
+
+
+def test_render_declares_baseline_age_gauges_but_no_sample_when_untimed():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        baseline_age={"bounds": None, "unknown": 3},
+    )
+    samples, types, helps = _parse_prom(text)
+    # HELP/TYPE always declared (stable scrape shape) ...
+    assert "ogle_baseline_newest_capture_age_seconds" in helps
+    assert "ogle_baseline_oldest_capture_age_seconds" in types
+    # ... but NO age value line is emitted (honest "no data", not a fake zero age) ...
+    for ln in text.splitlines():
+        assert not (
+            ln
+            and not ln.startswith("#")
+            and ln.split()[0].startswith("ogle_baseline_")
+            and ln.split()[0].endswith("_capture_age_seconds")
+        )
+    # ... while the coverage-gap count IS still emitted (a real 3).
+    assert samples["ogle_baseline_capture_age_unknown"] == "3"
+
+
+def test_metrics_cli_emits_baseline_age_for_timestamped_baseline(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # one ancient timestamped baseline + one untimed (coverage gap). CLI uses wall-clock now,
+    # so assert presence + ordering rather than an exact (nondeterministic) age.
+    s.baselines[CUSTOMERS_URN] = _sig(computed_at="2000-01-01T00:00:00Z")
+    s.baselines[ORDERS_URN] = _sig(ORDERS_URN)  # no computed_at → unknown
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    new = float(samples["ogle_baseline_newest_capture_age_seconds"])
+    old = float(samples["ogle_baseline_oldest_capture_age_seconds"])
+    assert old >= new > 0  # a single ancient baseline: both large, oldest >= newest
+    assert samples["ogle_baseline_capture_age_unknown"] == "1"
 
 
 # ---- store-age heartbeat (dead-man's-switch for the monitor itself) -----------------

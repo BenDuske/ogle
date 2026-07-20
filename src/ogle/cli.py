@@ -1812,6 +1812,39 @@ def _incident_age_bounds(
     return min(ages), max(ages)
 
 
+def _baseline_age_bounds(store: "BaselineStore", now: float) -> dict:
+    """Freshest/stalest baseline capture age + the unknown-age coverage gap.
+
+    The watch-list counterpart to `_incident_age_bounds`. A baseline's capture age is how
+    long ago Ogle last recorded that dataset's signature; since a clean walk refreshes the
+    signature every time it still sees the dataset, an OLD capture means Ogle stopped seeing
+    that URN (dropped from the walk / renamed / de-provisioned) while its baseline lingers —
+    a per-dataset blind spot the store-wide `ogle_store_age_seconds` heartbeat can't
+    localize. This is exactly the orphan signal the human `baselines --sort age`/`--stale`
+    view surfaces; exposing it as a gauge lets a Prometheus rule alert on it
+    (`ogle_baseline_oldest_capture_age_seconds > 2 * walk_interval`).
+
+    Returns `{"bounds": (min_age, max_age) | None, "unknown": int}`:
+      * `bounds` — the newest and oldest capture ages over baselines with a parseable
+        `computed_at`, or `None` when no baseline carries one (age can't be asserted for
+        any). Reuses `_baseline_age_seconds`, so the gauge and the CLI's `--stale` filter
+        can never disagree about a baseline's age (clock-skew clamp to 0 included).
+      * `unknown` — count of baselines whose capture age is unknown (no/unparseable stamp) —
+        a coverage gap mirroring `ogle_watching_rows_unknown`: a small oldest-age next to a
+        large `unknown` reads as "most of the watch-list can't be checked for orphaning".
+    """
+    ages: List[float] = []
+    unknown = 0
+    for urn in store.urns():
+        age = _baseline_age_seconds(store, urn, now)
+        if age is None:
+            unknown += 1
+        else:
+            ages.append(age)
+    bounds = (min(ages), max(ages)) if ages else None
+    return {"bounds": bounds, "unknown": unknown}
+
+
 def _store_file_age(path: Path, now: float) -> Optional[float]:
     """Seconds since the store file was last written (dead-man's-switch for the monitor).
 
@@ -1874,6 +1907,7 @@ def _render_prometheus(
     age_bounds: Optional[Tuple[float, float]] = None,
     store_age: Optional[float] = None,
     mute_breakdown: Optional[dict] = None,
+    baseline_age: Optional[dict] = None,
 ) -> str:
     """Render the store rollup as Prometheus text exposition format (v0.0.4).
 
@@ -2005,6 +2039,39 @@ def _render_prometheus(
         "Age of the longest-quiet incident (stalest — resolve/forget candidate).",
         stale_samples,
     )
+    # Baseline capture-age: the watch-list analog of the incident age gauges. `oldest` is the
+    # orphan signal — a baseline whose signature stopped refreshing means Ogle no longer sees
+    # that URN (dropped from the walk / renamed / de-provisioned) while its baseline lingers,
+    # a per-dataset blind spot `ogle_store_age_seconds` (store-wide) can't localize. Alert
+    # `ogle_baseline_oldest_capture_age_seconds > 2 * walk_interval`. Both age families
+    # declare HELP/TYPE always (stable scrape shape) but emit NO sample when no baseline
+    # carries a parseable `computed_at` — an honest "no data" over a fabricated zero, mirroring
+    # the incident age gauges. `unknown` is the coverage companion (like `..._rows_unknown`):
+    # baselines whose age can't be asserted, so a small oldest-age next to a large unknown
+    # reads as "most of the watch-list can't be checked for orphaning".
+    ba = baseline_age or {"bounds": None, "unknown": 0}
+    ba_bounds = ba.get("bounds")
+    ba_new_samples: list = []
+    ba_old_samples: list = []
+    if ba_bounds is not None:
+        ba_min, ba_max = ba_bounds
+        ba_new_samples = [(None, f"{ba_min:g}")]
+        ba_old_samples = [(None, f"{ba_max:g}")]
+    family(
+        "ogle_baseline_newest_capture_age_seconds",
+        "Age of the most recently captured baseline (freshest watched signature).",
+        ba_new_samples,
+    )
+    family(
+        "ogle_baseline_oldest_capture_age_seconds",
+        "Age of the stalest captured baseline (likeliest orphan — Ogle stopped seeing it).",
+        ba_old_samples,
+    )
+    family(
+        "ogle_baseline_capture_age_unknown",
+        "Baselines whose capture age is unknown (no/unparseable computed_at — coverage gap).",
+        [(None, ba.get("unknown", 0))],
+    )
     # Heartbeat: how long since the store file was last written = since `ogle check` last
     # ran. Unlike every gauge above (which describes drift), this describes OGLE — alert on
     # it to catch the monitor itself going dark while its other gauges freeze. Declared
@@ -2043,8 +2110,16 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     age_bounds = _incident_age_bounds(records, now)
     store_age = _store_file_age(Path(args.store), now)
     mute_breakdown = _mute_breakdown(store, now)
+    baseline_age = _baseline_age_bounds(store, now)
     text = _render_prometheus(
-        totals, inc, len(muted), str(args.store), age_bounds, store_age, mute_breakdown
+        totals,
+        inc,
+        len(muted),
+        str(args.store),
+        age_bounds,
+        store_age,
+        mute_breakdown,
+        baseline_age,
     )
     out = getattr(args, "output", None)
     if out:
