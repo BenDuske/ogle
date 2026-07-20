@@ -1242,6 +1242,60 @@ def test_incidents_summary_serving_split_suppressed_when_nothing_serves(tmp_path
     assert "serving-path: 0 (" not in out
 
 
+def test_incidents_summary_surfaces_open_drift_age(tmp_path, capsys):
+    # Parity with `status`: the --summary rollup must surface how long the (filtered) drift has
+    # sat — stalest first (resolve/forget candidate), freshest trailing (live-incident signal),
+    # from the same `last_seen` field status and the age gauges read. One incident 10d ago, one
+    # 1h ago → oldest ~1w+ / freshest ~1h, verbatim status wording.
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    now = time.time()
+    s.record_incident("old_fp", severity="low", title="O", datasets=1, now=now - 10 * 86400)
+    s.record_incident("new_fp", severity="high", title="N", datasets=1, now=now - 3600)
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "oldest open drift: 1w ago" in out
+    assert "freshest: 1h ago" in out
+
+
+def test_incidents_summary_age_line_suppressed_on_untimed_store(tmp_path, capsys):
+    # A legacy/untimed incident carries no last_seen → no age to report; the line is omitted
+    # rather than fabricated, mirroring status.
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    s.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary"]) == 0
+    assert "oldest open drift" not in capsys.readouterr().out
+
+
+def test_incidents_summary_json_exposes_open_drift_age(tmp_path, capsys):
+    # --summary --json carries the raw age bounds (seconds) under the same key names status'
+    # --json uses, so a monitor reads one shape across both commands; null on an untimed store
+    # so "no data" is distinguishable from "age 0".
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    now = time.time()
+    s.record_incident("old_fp", severity="low", title="O", datasets=1, now=now - 10 * 86400)
+    s.record_incident("new_fp", severity="high", title="N", datasets=1, now=now - 3600)
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["oldest_incident_age_seconds"] >= 10 * 86400 - 5
+    assert 3600 - 5 <= summary["freshest_incident_age_seconds"] <= 3600 + 60
+
+    # Null on an untimed store rather than a fabricated 0.
+    store2 = tmp_path / "b2.json"
+    s2 = BaselineStore(path=store2)
+    s2.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s2.save()
+    assert main(["incidents", "--store", str(store2), "--summary", "--json"]) == 0
+    summary2 = json.loads(capsys.readouterr().out)["summary"]
+    assert summary2["oldest_incident_age_seconds"] is None
+    assert summary2["freshest_incident_age_seconds"] is None
+
+
 def test_incidents_summary_unknown_severity_bucket(tmp_path, capsys):
     # A legacy bare-count record (no severity) lands in the `unknown` bucket, not dropped.
     store_path = tmp_path / "baselines.json"

@@ -1539,8 +1539,21 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     # so capping it would under-count severity/serving/recurring totals.
     if getattr(args, "summary", False):
         summary = _incident_summary(records)
+        # Open-drift age span — parity with `status`, which surfaces the same stalest/freshest
+        # `last_seen`-derived ages (and the ogle_incident_age_seconds gauges). The rollup that
+        # describes the filtered set should say whether that drift is a live incident (freshest
+        # = minutes) or a resolve-candidate festering for weeks (stalest = 12d) — a flat count
+        # can't. Reuses `now` (shared with --stale/--fresh, so the cutoff and this age display
+        # can't disagree) and returns `None` on a legacy/untimed store rather than a fabricated
+        # age.
+        age_bounds = _incident_age_bounds(records, now)
         if args.json:
-            _emit(json.dumps({"summary": summary}, indent=2, sort_keys=True))
+            summary_out = dict(summary)
+            summary_out["oldest_incident_age_seconds"] = age_bounds[1] if age_bounds else None
+            summary_out["freshest_incident_age_seconds"] = (
+                age_bounds[0] if age_bounds else None
+            )
+            _emit(json.dumps({"summary": summary_out}, indent=2, sort_keys=True))
             return gate_rc
         if not records:
             # Same empty-vs-filtered distinction as the list view so a hidden set never
@@ -1569,6 +1582,15 @@ def cmd_incidents(args: argparse.Namespace) -> int:
                 f"🟡 {sbs['low']} · • {sbs['unknown']})"
             )
         _emit(serving_line)
+        # Stalest leads (the resolve/forget nudge), freshest trails (live-incident signal) —
+        # verbatim wording from `status` so the two rollups read identically. Skipped on a
+        # legacy/untimed store, mirroring status (no fabricated age).
+        if age_bounds is not None:
+            fresh_age, stale_age = age_bounds
+            _emit(
+                f"- ⏳ oldest open drift: {_fmt_age(stale_age)} ago · "
+                f"freshest: {_fmt_age(fresh_age)} ago"
+            )
         _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:

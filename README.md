@@ -408,6 +408,15 @@ Each incident line carries the **age of its most recent sighting** (`last seen 3
 recurring, still-happening problem apart from one that quietly stopped. Incidents remembered by an
 older Ogle (before age-tracking) simply omit the age rather than fake one.
 
+`--summary` collapses the (filtered) set into an aggregate rollup — total remembered, the
+severity break-out, the serving-path count with its own severity split, recurring / total
+sightings, and the **open-drift age span** (`oldest open drift: 12d ago · freshest: 30m ago`):
+the same stalest/freshest `last_seen`-derived ages `ogle status` reports, so the two rollups read
+identically and an operator can tell a live incident (freshest = minutes) from a resolve-candidate
+festering for weeks (stalest = 12d) without leaving the summary. `--json` carries the raw seconds
+as `oldest_incident_age_seconds`/`freshest_incident_age_seconds` (both `null` on a legacy/untimed
+store — "no data", never a fabricated age).
+
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
 `check --fail-on` so a busy operator can focus on what pages first — `--min-count` surfaces the
 chronic drift that keeps recurring despite being "seen." When a filter empties a non-empty memory,
