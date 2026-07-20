@@ -734,7 +734,19 @@ def cmd_muted(args: argparse.Namespace) -> int:
         urns = [u for u in all_urns if store.mute_expiry(u) is not None]
     else:
         urns = all_urns
-    filtered = want_permanent or want_snoozed
+    # `--unexplained`: keep only mutes with NO recorded reason — the accountability audit for
+    # the `mute --reason` note. A silence nobody documented is exactly the standing blind spot
+    # Ogle exists to surface: an operator auditing `muted --permanent` can't justify "why is
+    # this dataset's drift suppressed forever?" when no note was ever attached. Orthogonal to
+    # the permanent/snoozed split (composes with either, or stands alone), so
+    # `muted --permanent --unexplained --urns` is the pipe of undocumented standing blind spots
+    # to re-annotate or lift. Keyed on `mute_reason(urn) is None` — the same field the human/
+    # json views print — so the filter and the display can never disagree. (`mute` stores a
+    # blank/whitespace `--reason` as None, so "" never counts as explained.)
+    want_unexplained = getattr(args, "unexplained", False)
+    if want_unexplained:
+        urns = [u for u in urns if store.mute_reason(u) is None]
+    filtered = want_permanent or want_snoozed or want_unexplained
     # `--urns`: plain machine output — just each muted URN, one per line. The write-side
     # selector symmetric with `baselines --urns`/`incidents --fingerprints`: turns the mute
     # list into a pipe for bulk `unmute`/`show`. Overrides --json (this IS the scriptable
@@ -756,7 +768,17 @@ def cmd_muted(args: argparse.Namespace) -> int:
         # view (e.g. --permanent on a store with only snoozes) never reads as an empty store —
         # mirrors how `incidents`/`baselines` separate a hidden set from a genuinely empty one.
         if filtered and all_urns:
-            kind = "permanent" if want_permanent else "snoozed"
+            # Name the active filter(s) so the empty line explains what was hidden. Order:
+            # "unexplained" qualifies the kind (e.g. "unexplained permanent"); either can
+            # stand alone.
+            parts = []
+            if want_unexplained:
+                parts.append("unexplained")
+            if want_permanent:
+                parts.append("permanent")
+            elif want_snoozed:
+                parts.append("snoozed")
+            kind = " ".join(parts)
             _emit(f"_no {kind} mutes ({len(all_urns)} muted)._")
         else:
             _emit("_no muted datasets._")
@@ -2579,6 +2601,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--snoozed",
         action="store_true",
         help="Show ONLY snoozed mutes (a timed silence that lapses on its own).",
+    )
+    # Orthogonal to the permanent/snoozed split — the accountability audit for the
+    # `mute --reason` note. Surfaces silences nobody documented; pairs with --permanent to
+    # find undocumented STANDING blind spots: `ogle muted --permanent --unexplained`.
+    muted.add_argument(
+        "--unexplained",
+        action="store_true",
+        help="Show ONLY mutes with no recorded --reason — the undocumented silences to "
+        "justify or lift. Composes with --permanent/--snoozed and --urns.",
     )
     muted.set_defaults(func=cmd_muted)
 

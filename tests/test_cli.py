@@ -666,6 +666,64 @@ def test_muted_permanent_and_snoozed_are_mutually_exclusive(tmp_path, capsys):
     assert "not allowed with" in capsys.readouterr().err.lower()
 
 
+# ---- muted --unexplained (undocumented-silence audit) -----------------------------
+def test_muted_unexplained_keeps_only_reasonless(tmp_path, capsys):
+    """`muted --unexplained` hides mutes that carry a --reason, keeps the undocumented ones."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "known noisy", "--store", str(store)])
+    main(["mute", ORDERS_URN, "--store", str(store)])  # no reason
+    capsys.readouterr()
+    rc = main(["muted", "--unexplained", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ORDERS_URN in out and CUSTOMERS_URN not in out
+    assert "1 muted" in out
+
+
+def test_muted_unexplained_composes_with_permanent(tmp_path, capsys):
+    """The standing-blind-spot audit: undocumented AND permanent, excluding a reasonless snooze."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])              # permanent, no reason
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])   # snooze, no reason
+    main(["mute", _Z_URN, "--reason", "documented", "--store", str(store)])  # permanent + reason
+    capsys.readouterr()
+    rc = main(["muted", "--permanent", "--unexplained", "--urns", "--store", str(store)])
+    assert rc == 0
+    # Only the undocumented permanent mute survives both filters (snooze + documented dropped).
+    assert capsys.readouterr().out.splitlines() == [CUSTOMERS_URN]
+
+
+def test_muted_blank_reason_counts_as_unexplained(tmp_path, capsys):
+    """A whitespace --reason persists as None, so the mute still shows under --unexplained."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "   ", "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--unexplained", "--urns", "--store", str(store)])
+    assert rc == 0
+    assert capsys.readouterr().out.splitlines() == [CUSTOMERS_URN]
+
+
+def test_muted_unexplained_empty_names_the_filter(tmp_path, capsys):
+    """When every mute is documented, the empty line says 'unexplained', not 'no mutes'."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "documented", "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["muted", "--unexplained", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no unexplained mutes" in out and "1 muted" in out
+
+
+def test_muted_unexplained_permanent_empty_names_both_filters(tmp_path, capsys):
+    """Composed filters hiding everything name the full qualifier ('unexplained permanent')."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "documented", "--store", str(store)])  # permanent+reason
+    capsys.readouterr()
+    rc = main(["muted", "--permanent", "--unexplained", "--store", str(store)])
+    assert rc == 0
+    assert "no unexplained permanent mutes" in capsys.readouterr().out.lower()
+
+
 # ---- mute reasons (the "why") -----------------------------------------------------
 def test_mute_with_reason_persists_and_reports(tmp_path, capsys):
     store = tmp_path / "baselines.json"

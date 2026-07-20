@@ -145,10 +145,14 @@ ogle mute '<urn>' --reason 'dashboard bounces every Monday — upstream ETL retr
 ogle muted            # list what's currently silenced (snoozes show their expiry + reason)
 ogle muted --permanent  # only the standing blind spots (no expiry) — the audit view
 ogle muted --snoozed    # only the timed mutes that lapse on their own
+ogle muted --unexplained  # only mutes with no --reason — the undocumented silences
 ogle unmute '<urn>'   # let it page again
 
 # audit-and-lift every standing blind spot at once:
 ogle muted --permanent --urns | xargs -n1 ogle unmute
+
+# find the standing blind spots nobody documented — permanent AND reasonless:
+ogle muted --permanent --unexplained
 ```
 
 A muted dataset is **still tracked** — its baseline keeps advancing, so an `unmute` later
@@ -162,7 +166,11 @@ justify — while a *snooze* clears itself, so `--permanent` is the view for exa
 never self-lapse, and it composes with `--urns` to feed a bulk `unmute`. An optional **`--reason`** attaches a human
 note to the mute — the "why" that a bare URN can't tell you — surfaced by `ogle muted` and
 `ogle show` and carried in their `--json`; it can annotate an already-muted URN after the
-fact, and is cleared automatically when the mute is lifted (unmute / forget / snooze expiry)
+fact, and is cleared automatically when the mute is lifted (unmute / forget / snooze expiry).
+**`ogle muted --unexplained`** is the accountability flip-side of `--reason`: it keeps only the
+mutes with *no* note recorded, so `ogle muted --permanent --unexplained` surfaces the
+standing blind spots nobody justified — the ones to document or lift (a blank/whitespace
+`--reason` never counts as explained, since `mute` stores it as no note)
 so a reason never outlives the mute it explains. `ogle check` reports how many muted datasets
 it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urns` in `--json`,
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
