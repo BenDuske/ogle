@@ -2126,6 +2126,64 @@ def test_status_json_shape(tmp_path, capsys):
     assert payload["store"] == str(store)
 
 
+def test_status_surfaces_incident_age_bounds(tmp_path, capsys):
+    # The human snapshot must surface how long drift has sat unresolved — stalest first (the
+    # resolve/forget candidate), freshest trailing (the live-incident signal). Uses the same
+    # `last_seen` field the metrics age gauges read. Here: one incident last seen 10d ago,
+    # one 1h ago → oldest ~1w+ / freshest ~1h.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    now = time.time()
+    s.record_incident("old_fp", severity="low", title="O", datasets=1, now=now - 10 * 86400)
+    s.record_incident("new_fp", severity="high", title="N", datasets=1, now=now - 3600)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "oldest open drift: 1w ago" in out
+    assert "freshest: 1h ago" in out
+
+
+def test_status_age_line_suppressed_on_untimed_store(tmp_path, capsys):
+    # A legacy/untimed incident (record_incident with no `now`) carries no last_seen, so there
+    # is no age to report — the line must be omitted rather than fabricated.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "oldest open drift" not in capsys.readouterr().out
+
+
+def test_status_json_exposes_incident_age_seconds(tmp_path, capsys):
+    # --json must carry the raw age bounds (seconds) for a monitor, matching the metrics gauges;
+    # null on an untimed store so a consumer can tell "no data" from "age 0".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    now = time.time()
+    s.record_incident("old_fp", severity="low", title="O", datasets=1, now=now - 10 * 86400)
+    s.record_incident("new_fp", severity="high", title="N", datasets=1, now=now - 3600)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["oldest_incident_age_seconds"] >= 10 * 86400 - 5
+    assert 3600 - 5 <= payload["freshest_incident_age_seconds"] <= 3600 + 60
+
+
+def test_status_json_age_seconds_null_on_untimed_store(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["oldest_incident_age_seconds"] is None
+    assert payload["freshest_incident_age_seconds"] is None
+
+
 def test_status_json_splits_muted_permanent_and_snoozed(tmp_path, capsys):
     # status --json must expose the same permanent-vs-snooze split metrics does, and the two
     # kinds sum back to the flat `muted` count (they're disjoint) — the parity anchor.

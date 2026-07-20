@@ -1918,6 +1918,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     # a *snooze* lapses on its own — collapsing them to one number hides which is which.
     # permanent + snoozed == len(muted) (they're disjoint), so `muted` stays the parity anchor.
     mute_split = _mute_breakdown(store, now)
+    # Freshest/stalest remembered-drift age (from `last_seen`, the same field
+    # `incidents --stale/--fresh` and the ogle_incident_age_seconds gauges read). Surfaced so
+    # the whole-store snapshot can distinguish a live incident (freshest = minutes) from a
+    # forgotten resolve-candidate festering for weeks (stalest = 12d) — a flat count can't.
+    # `None` on a legacy/untimed store, in which case no age line/field is emitted.
+    age_bounds = _incident_age_bounds(incident_records, now)
 
     # CI/scheduled health gate. Turns the whole-store rollup into an exit-code check so a
     # cron/CI wrapper that runs `ogle status` to answer "what is Ogle holding right now?" can
@@ -1940,6 +1946,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "muted": len(muted),
                         "muted_permanent": mute_split["permanent"],
                         "muted_snoozed": mute_split["snoozed"],
+                        # Stalest/freshest open-drift age in seconds (null on an untimed
+                        # store). Parity with the ogle_incident_age_seconds Prometheus gauges.
+                        "oldest_incident_age_seconds": age_bounds[1] if age_bounds else None,
+                        "freshest_incident_age_seconds": (
+                            age_bounds[0] if age_bounds else None
+                        ),
                     }
                 },
                 indent=2,
@@ -1987,6 +1999,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"total sightings: {inc['total_sightings']}"
     )
     _emit(serving_line)
+    # How long the remembered drift has been sitting: the stalest (longest-quiet) incident
+    # leads because that's the resolve/forget candidate an operator most needs nudged about —
+    # drift that stopped recurring weeks ago but was never cleared. Freshest trails as the
+    # live-incident signal. Same `last_seen`-derived ages the metrics gauges expose; shown
+    # only when at least one incident carries a timestamp (skipped on a legacy/untimed store).
+    if age_bounds is not None:
+        fresh_age, stale_age = age_bounds
+        _emit(
+            f"- ⏳ oldest open drift: {_fmt_age(stale_age)} ago · "
+            f"freshest: {_fmt_age(fresh_age)} ago"
+        )
     # Break the mute count into its two risk kinds so a permanent standing blind spot never
     # hides inside a bland "N active". Only shown when something is muted; the ⛔ permanent
     # count leads because that's the one an operator must justify (drift page-able never).
