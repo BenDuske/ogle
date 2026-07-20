@@ -2898,3 +2898,71 @@ def test_retract_cleared_catalog_dry_run_previews_without_applying(tmp_path, cap
     assert rc == 0
     assert "dry-run" in out and "NOTHING written" in out
     assert f"`{CUSTOMERS_URN}`" in out
+
+
+# ---- failed catalog writes are loud on stderr (not swallowed behind '(N failed)') ----
+def _tag_action(entity, tag="urn:li:tag:ogle-drift-flagged", reason="drift"):
+    from ogle.writeback import TagAction
+    return TagAction(entity_urn=entity, tag_urn=tag, reason=reason)
+
+
+def test_writeback_failures_warn_on_stderr(capsys):
+    """A backend write that lands in result.failed must name the un-tagged entities on
+    stderr — the '(N failed — see stderr)' note has to point at real output."""
+    from ogle.cli import _render_writeback
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    a1 = _tag_action(CUSTOMERS_URN)
+    a2 = _tag_action(CUSTOMERS_URN, tag="urn:li:tag:ogle-drift-high")
+    a3 = _tag_action(ORDERS_URN)
+    plan = WritebackPlan(actions=[a1, a2, a3])
+    result = WritebackResult(applied=[], unchanged=[], failed=[a1, a2, a3])
+
+    _render_writeback(plan, result, as_json=False)
+    cap = capsys.readouterr()
+    # stdout still shows the terse note...
+    assert "3 failed — see stderr" in cap.out
+    # ...and stderr now actually names both un-tagged entities + both tags on customers.
+    assert "WARNING" in cap.err
+    assert "could not tag 2 entity(ies)" in cap.err
+    assert CUSTOMERS_URN in cap.err and ORDERS_URN in cap.err
+    assert "ogle-drift-high" in cap.err
+
+
+def test_writeback_no_failures_is_silent_on_stderr(capsys):
+    """A clean write-back writes nothing to stderr — the warning is failure-only."""
+    from ogle.cli import _render_writeback
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    a1 = _tag_action(CUSTOMERS_URN)
+    result = WritebackResult(applied=[a1], unchanged=[], failed=[])
+    _render_writeback(WritebackPlan(actions=[a1]), result, as_json=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_writeback_failures_warn_even_in_json_mode(capsys):
+    """--json keeps stdout a clean JSON blob, but a swallowed failure still shouts on stderr
+    so a wrapper that only reads exit code / stdout can't miss it in the terminal."""
+    from ogle.cli import _render_writeback
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    a1 = _tag_action(CUSTOMERS_URN)
+    result = WritebackResult(applied=[], unchanged=[], failed=[a1])
+    _render_writeback(WritebackPlan(actions=[a1]), result, as_json=True)
+    cap = capsys.readouterr()
+    json.loads(cap.out)  # stdout is still valid JSON
+    assert "WARNING" in cap.err and CUSTOMERS_URN in cap.err
+
+
+def test_retract_failures_warn_on_stderr(capsys):
+    """Retraction reuses WritebackResult; a failed removal must name the entity it could
+    not CLEAR (verb + action wording differ from write-back)."""
+    from ogle.cli import _render_retract
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    a1 = _tag_action(CUSTOMERS_URN)
+    result = WritebackResult(applied=[], unchanged=[], failed=[a1])
+    _render_retract(WritebackPlan(actions=[a1]), result, as_json=False)
+    cap = capsys.readouterr()
+    assert "retract could not clear 1 entity(ies)" in cap.err
+    assert CUSTOMERS_URN in cap.err

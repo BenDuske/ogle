@@ -32,7 +32,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import __version__
 from .llm import build_narrator
@@ -386,7 +386,40 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if fail else 0
 
 
+def _warn_writeback_failures(result, *, verb: str) -> None:
+    """Loudly log which catalog writes failed — makes the '(N failed)' note real.
+
+    `apply`/`apply_retract` swallow a per-entity backend error into `result.failed` so one
+    broken URN never strands the batch. Without this, the only trace was a bare
+    '(N failed — see logs)' line pointing at logs that never existed — the affected
+    entities were left silently un-tagged (or un-cleared) while the operator read a
+    mostly-successful report: exactly the silently-blind failure Ogle exists to catch,
+    turned on Ogle's own outbound write. Emits one stderr line per failed entity (tags
+    grouped, first-seen order matching apply()'s per-entity batching) so stdout/`--json`
+    stay clean but a human or a log scrape sees precisely what did NOT reach DataHub.
+    """
+    if not result.failed:
+        return
+    by_entity: Dict[str, List[str]] = {}
+    order: List[str] = []
+    for a in result.failed:
+        if a.entity_urn not in by_entity:
+            order.append(a.entity_urn)
+        by_entity.setdefault(a.entity_urn, []).append(a.tag_urn)
+    action = "clear" if verb == "retract" else "tag"
+    _emit(
+        f"ogle check: WARNING — {verb} could not {action} {len(order)} entity(ies) "
+        f"({len(result.failed)} tag action(s)); these were NOT written to DataHub:",
+        stream=sys.stderr,
+    )
+    for entity_urn in order:
+        _emit(f"  - {entity_urn}  [{', '.join(by_entity[entity_urn])}]", stream=sys.stderr)
+
+
 def _render_writeback(plan, result, *, as_json: bool) -> None:
+    # Loud on stderr regardless of output mode — a swallowed catalog-write failure must
+    # never hide behind clean stdout or a JSON blob a wrapper might not inspect.
+    _warn_writeback_failures(result, verb="write-back")
     if as_json:
         _emit(
             json.dumps(
@@ -405,11 +438,12 @@ def _render_writeback(plan, result, *, as_json: bool) -> None:
     if result.unchanged:
         lines.append(f"_({len(result.unchanged)} already tagged, skipped)_")
     if result.failed:
-        lines.append(f"_({len(result.failed)} failed — see logs)_")
+        lines.append(f"_({len(result.failed)} failed — see stderr)_")
     _emit("\n".join(lines))
 
 
 def _render_retract(plan, result, *, as_json: bool) -> None:
+    _warn_writeback_failures(result, verb="retract")
     if as_json:
         _emit(
             json.dumps(
@@ -430,7 +464,7 @@ def _render_retract(plan, result, *, as_json: bool) -> None:
     if result.unchanged:
         lines.append(f"_({len(result.unchanged)} already clean, skipped)_")
     if result.failed:
-        lines.append(f"_({len(result.failed)} failed — see logs)_")
+        lines.append(f"_({len(result.failed)} failed — see stderr)_")
     _emit("\n".join(lines))
 
 

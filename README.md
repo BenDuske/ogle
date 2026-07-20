@@ -516,6 +516,13 @@ severity of the drifted datasets feeding it** — the finding that would page yo
 that colours the model. The flat tag is always stamped too, so coarse "everything Ogle
 flagged" grouping keeps working.
 
+A single unreachable or rejected entity never strands the batch: `--write-back` catches a
+per-entity backend error, records it, and keeps going. But a swallowed write is a silent
+blind spot — the asset you think is flagged isn't. So any failed write is **loud on stderr**,
+naming every entity (and tag) that did **not** reach DataHub, while stdout keeps the terse
+`(N failed — see stderr)` note and `--json` stays a clean parseable blob. The same applies to
+`--retract-cleared`. Never trust "done" without checking stderr.
+
 #### Clearing the flag when drift heals (`--retract-cleared`)
 
 A tag you never take back becomes noise: after a fix ships, `ogle-drift-flagged` lingers on
