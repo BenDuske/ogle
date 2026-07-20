@@ -289,22 +289,32 @@ next walk against. It answers "is this dataset actually under Ogle's eye?" and "
 tracking?" without re-walking DataHub:
 
 ```bash
-ogle baselines                       # every tracked dataset: field count, row count, schema hash
-ogle baselines --json                # machine-readable (urn, fields, row_count, schema_hash)
+ogle baselines                       # every tracked dataset: field count, row count, capture age, schema hash
+ogle baselines --json                # machine-readable (urn, fields, row_count, schema_hash, computed_at, age_seconds)
 ogle baselines --grep serving        # find tracked datasets by URN keyword (case-insensitive)
 ogle baselines --sort fields         # widest-schema datasets first (highest blast radius)
 ogle baselines --sort rows           # highest-volume datasets first
+ogle baselines --sort age            # stalest capture first — datasets most likely to have dropped out of the walk
+ogle baselines --stale 7d            # only baselines captured ≥7d ago — the orphan filter
 ogle baselines --urns                # plain URNs, one per line — a selector to pipe into a write-side command
 ogle baselines --grep staging --urns | xargs -n1 ogle mute   # mute a whole class of tracked datasets
+ogle baselines --stale 14d --urns | xargs -n1 ogle forget    # prune baselines the walk stopped refreshing
 ```
 
-`--sort {urn,fields,rows}` picks the ordering axis. The default `urn` is alphabetical (the
+`--sort {urn,fields,rows,age}` picks the ordering axis. The default `urn` is alphabetical (the
 stable order for scripting); `fields` and `rows` surface the **highest-blast-radius** watched
 datasets first — the widest schemas and highest-volume tables, where a silent schema or volume
-shift does the most damage. Ties break on URN ascending (deterministic run to run), and a
-baseline with no signature or unknown row count sinks last. `--sort` is honored by `--urns` and
-`--json` too, so `ogle baselines --sort rows --urns | head -5` is "the five biggest tables I'm
-watching."
+shift does the most damage; `age` surfaces the **stalest captures** first. Ties break on URN
+ascending (deterministic run to run), and a baseline with no signature / unknown row count /
+unknown capture age sinks last. `--sort` is honored by `--urns` and `--json` too, so
+`ogle baselines --sort rows --urns | head -5` is "the five biggest tables I'm watching."
+
+`--stale DURATION` (e.g. `7d`, `12h`, `2w`) keeps only baselines whose capture stamp is at least
+that old — the **orphan filter**. Ogle refreshes a signature on every clean walk that still sees
+the dataset, so a stamp older than your walk cadence means Ogle *stopped seeing* that URN (dropped
+from the walk, renamed, de-provisioned) while its baseline lingers — a per-dataset blind spot the
+store-wide freshness heartbeat can't localize. Baselines with **no capture timestamp are excluded**
+(staleness can't be asserted, so Ogle never guesses one). A bad duration is a hard error (exit 2).
 
 `--urns` mirrors `incidents --fingerprints`: it turns the read-side watch-list into a selector
 for the write side (`ogle mute`, or feeding `ogle check --models`). It honors `--grep`/`--sort`,

@@ -760,6 +760,49 @@ def _baseline_row_count(store: "BaselineStore", urn: str) -> int:
     return -1
 
 
+def _parse_iso_epoch(text: Optional[str]) -> Optional[float]:
+    """Best-effort parse of a `computed_at` provenance string into epoch seconds.
+
+    `computed_at` is free-form (usually DataHub's profile timestamp, e.g.
+    `2026-07-16T00:00:00Z`), so this degrades gracefully: anything that isn't a parseable
+    ISO-8601 instant returns None and the caller treats the baseline's age as *unknown*
+    rather than guessing. A trailing `Z` is normalized to `+00:00` for `fromisoformat`; a
+    naive stamp (no offset) is assumed UTC so a bare date still yields a real age.
+    """
+    if not text:
+        return None
+    raw = text.strip()
+    if raw[-1:] in ("Z", "z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _baseline_age_seconds(
+    store: "BaselineStore", urn: str, now: float
+) -> Optional[float]:
+    """Age in seconds of a baseline's capture stamp, or None when unknown/unparseable.
+
+    Old baselines matter because Ogle refreshes a signature on every clean walk that still
+    sees the dataset — so a *stale* capture stamp means Ogle has stopped seeing that URN
+    (dropped from the walk / renamed / de-provisioned) while its baseline lingers. That's a
+    per-dataset blind spot the store-wide freshness heartbeat can't localize. A future stamp
+    (clock skew) clamps to 0 rather than reading negative.
+    """
+    sig = store.get_baseline(urn)
+    if sig is None:
+        return None
+    epoch = _parse_iso_epoch(sig.computed_at)
+    if epoch is None:
+        return None
+    return max(0.0, now - epoch)
+
+
 def cmd_baselines(args: argparse.Namespace) -> int:
     """List the datasets Ogle has a baseline signature for — the *other* half of the store.
 
@@ -772,30 +815,63 @@ def cmd_baselines(args: argparse.Namespace) -> int:
     """
     store = BaselineStore.load(Path(args.store))
     all_urns = store.urns()  # already sorted for stable output
+    now = time.time()
+
+    # `--stale DURATION`: keep only baselines whose capture stamp is at least DURATION old —
+    # the orphan/blind-spot filter (Ogle refreshes a signature every clean walk it still sees
+    # the dataset, so an old stamp means it dropped out of the walk). Parsed with the same
+    # `_parse_age` grammar as `incidents --stale`; a bad value is a hard error (exit 2) rather
+    # than silently listing everything. A baseline whose age is UNKNOWN (no/unparseable
+    # `computed_at`) is excluded — staleness can't be asserted, and "never guess" holds here
+    # as it does for scoring. Applied BEFORE sorting so every view shares the filtered set.
+    stale_raw = getattr(args, "stale", None)
+    stale_threshold: Optional[float] = None
+    if stale_raw is not None:
+        stale_threshold = _parse_age(stale_raw)
+        if stale_threshold is None:
+            _emit("_--stale wants a duration like 7d, 12h, 30m, or 2w._")
+            return 2
 
     # `--grep`: substring match on the URN (case-insensitive), mirroring `incidents --grep`.
     # An all-whitespace needle matches NOTHING (a fat-fingered `--grep ""` is a slip, not a
     # wildcard), same as the incidents view.
     needle = getattr(args, "grep", None)
-    filtered = needle is not None
+    filtered = needle is not None or stale_threshold is not None
     if needle is not None:
         low = needle.strip().lower()
         urns = [u for u in all_urns if low and low in u.lower()]
     else:
         urns = list(all_urns)
 
+    if stale_threshold is not None:
+        urns = [
+            u
+            for u in urns
+            if (age := _baseline_age_seconds(store, u, now)) is not None
+            and age >= stale_threshold
+        ]
+
     # `--sort` picks the ordering axis (default `urn` = the alphabetical order the store
     # already returns; the stable baseline for scripting). `fields`/`rows` put the
     # highest-blast-radius datasets first — the widest schemas and highest-volume tables,
-    # where silent drift matters most — with URN ascending as the deterministic tiebreak
+    # where silent drift matters most. `age` puts the STALEST capture first — the datasets
+    # most likely to have fallen out of the walk. URN ascending is the deterministic tiebreak
     # (negate the metric so it descends while the URN stays ascending). A baseline with no
-    # signature or unknown row_count sorts last (-1), mirroring how `incidents --sort` sinks
-    # unknown severity. Applied here so --urns/--json/human views all share one order.
+    # signature / unknown row_count / unknown age sorts last (-1), mirroring how
+    # `incidents --sort` sinks unknown severity. Applied here so --urns/--json/human share it.
     sort_axis = getattr(args, "sort", None) or "urn"
     if sort_axis == "fields":
         urns = sorted(urns, key=lambda u: (-_baseline_field_count(store, u), u))
     elif sort_axis == "rows":
         urns = sorted(urns, key=lambda u: (-_baseline_row_count(store, u), u))
+    elif sort_axis == "age":
+        urns = sorted(
+            urns,
+            key=lambda u: (
+                -(a if (a := _baseline_age_seconds(store, u, now)) is not None else -1.0),
+                u,
+            ),
+        )
 
     # `--urns`: plain machine output — just each URN, one per line, honoring --grep. Turns
     # the watch-list into a selector for a write-side command (`mute`/`check --models`).
@@ -810,12 +886,18 @@ def cmd_baselines(args: argparse.Namespace) -> int:
         entries = []
         for u in urns:
             sig = store.get_baseline(u)
+            age = _baseline_age_seconds(store, u, now)
             entries.append(
                 {
                     "urn": u,
                     "fields": len(sig.schema_fields) if sig else 0,
                     "row_count": sig.row_count if sig else None,
                     "schema_hash": sig.schema_hash if sig else None,
+                    # Provenance: when Ogle last captured this signature, plus its derived
+                    # age so a scripted staleness check needn't re-parse the timestamp.
+                    # Both None when `computed_at` is absent/unparseable (age unknown).
+                    "computed_at": sig.computed_at if sig else None,
+                    "age_seconds": int(age) if age is not None else None,
                 }
             )
         _emit(json.dumps({"baselines": entries}, indent=2, sort_keys=True))
@@ -837,7 +919,12 @@ def cmd_baselines(args: argparse.Namespace) -> int:
         rc = sig.row_count if sig else None
         rpart = f" · {rc} rows" if rc is not None else ""
         hpart = f"  `{sig.schema_hash[:12]}`" if sig else ""
-        _emit(f"- `{u}` — {nf} field(s){rpart}{hpart}")
+        # Show the capture age only when known — keeps the line clean for baselines with no
+        # `computed_at` provenance, and surfaces the staleness signal `--sort age`/`--stale`
+        # act on the moment it's available.
+        age = _baseline_age_seconds(store, u, now)
+        apart = f" · captured {_fmt_age(age)} ago" if age is not None else ""
+        _emit(f"- `{u}` — {nf} field(s){rpart}{apart}{hpart}")
     return 0
 
 
@@ -2393,11 +2480,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines.add_argument(
         "--sort",
-        choices=["urn", "fields", "rows"],
+        choices=["urn", "fields", "rows", "age"],
         default="urn",
         help="Ordering axis: urn (default, alphabetical), fields (widest schema first), "
-        "or rows (highest volume first) — surface the highest-blast-radius watched datasets. "
-        "Honored by --urns/--json too.",
+        "rows (highest volume first) — surface the highest-blast-radius watched datasets — "
+        "or age (stalest capture first, the datasets most likely to have dropped out of the "
+        "walk). Honored by --urns/--json too.",
+    )
+    baselines.add_argument(
+        "--stale",
+        metavar="DURATION",
+        default=None,
+        help="Only show baselines captured at least DURATION ago (e.g. 7d, 12h, 2w) — the "
+        "orphan filter: a stamp older than your walk cadence means Ogle stopped seeing that "
+        "dataset. Baselines with no capture timestamp are excluded (age can't be asserted).",
     )
     baselines.add_argument("--json", action="store_true", help="Emit the list as JSON.")
     baselines.add_argument(

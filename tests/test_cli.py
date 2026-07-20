@@ -881,6 +881,122 @@ def test_baselines_sort_rows_sinks_unknown_rowcount_last(tmp_path, capsys):
     assert lines == [_Z_URN, _A_URN]  # 5 rows first, unknown (None) last
 
 
+# ---- `ogle baselines --sort age` / `--stale`: the stale-capture / orphan view ------
+def _iso_ago(seconds: float) -> str:
+    """A UTC ISO-8601 `computed_at` stamp `seconds` in the past (Z-suffixed)."""
+    from datetime import datetime, timedelta, timezone
+
+    dt = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _seed_aged(store_path):
+    """Three baselines with distinct capture ages: fresh (1h), mid (3d), old (2w)."""
+    BaselineStore(
+        path=store_path,
+        baselines={
+            _A_URN: _sig(urn=_A_URN, computed_at=_iso_ago(3600)),        # 1h
+            _M_URN: _sig(urn=_M_URN, computed_at=_iso_ago(3 * 86400)),   # 3d
+            _Z_URN: _sig(urn=_Z_URN, computed_at=_iso_ago(14 * 86400)),  # 2w
+        },
+    ).save()
+
+
+def test_baselines_sort_age_stalest_first(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_aged(store)
+    rc = main(["baselines", "--store", str(store), "--sort", "age", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN, _M_URN, _A_URN]  # 2w (stalest) -> 3d -> 1h
+
+
+def test_baselines_sort_age_sinks_unknown_stamp_last(tmp_path, capsys):
+    """A baseline with no computed_at (age unknown) sorts LAST under --sort age."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            _A_URN: _sig(urn=_A_URN, computed_at=None),           # unknown
+            _Z_URN: _sig(urn=_Z_URN, computed_at=_iso_ago(3600)),  # known, fresh
+        },
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--sort", "age", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN, _A_URN]  # known age first, unknown last
+
+
+def test_baselines_stale_filters_recent_captures(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_aged(store)
+    # Threshold 7d: only the 2-week-old baseline survives; the 1h and 3d ones are too fresh.
+    rc = main(["baselines", "--store", str(store), "--stale", "7d", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN]
+
+
+def test_baselines_stale_excludes_unknown_stamp(tmp_path, capsys):
+    """A baseline with no computed_at can't be proven stale — it's excluded, never guessed."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            _A_URN: _sig(urn=_A_URN, computed_at=None),                 # unknown age
+            _Z_URN: _sig(urn=_Z_URN, computed_at=_iso_ago(30 * 86400)),  # 30d old
+        },
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--stale", "7d", "--urns"])
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN]  # unknown-stamp _A_URN excluded
+
+
+def test_baselines_stale_bad_duration_is_hard_error(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_aged(store)
+    rc = main(["baselines", "--store", str(store), "--stale", "soon"])
+    assert rc == 2
+    assert "duration" in capsys.readouterr().out.lower()
+
+
+def test_baselines_stale_composes_with_grep(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_aged(store)
+    # _M_URN and _Z_URN are both old enough for 2d, but --grep narrows to z_zed.
+    rc = main(
+        ["baselines", "--store", str(store), "--stale", "2d", "--grep", "z_zed", "--urns"]
+    )
+    assert rc == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == [_Z_URN]
+
+
+def test_baselines_json_carries_age_and_provenance(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    stamp = _iso_ago(3600)
+    BaselineStore(
+        path=store, baselines={_A_URN: _sig(urn=_A_URN, computed_at=stamp)}
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--json"])
+    assert rc == 0
+    entry = json.loads(capsys.readouterr().out)["baselines"][0]
+    assert entry["computed_at"] == stamp
+    assert entry["age_seconds"] is not None and entry["age_seconds"] >= 3500
+
+
+def test_baselines_json_null_age_when_no_stamp(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    BaselineStore(
+        path=store, baselines={_A_URN: _sig(urn=_A_URN, computed_at=None)}
+    ).save()
+    rc = main(["baselines", "--store", str(store), "--json"])
+    assert rc == 0
+    entry = json.loads(capsys.readouterr().out)["baselines"][0]
+    assert entry["computed_at"] is None and entry["age_seconds"] is None
+
+
 # ---- `ogle incidents`: the cross-run incident-memory view -------------------------
 def test_incidents_empty_store_reports_none(tmp_path, capsys):
     store = tmp_path / "baselines.json"  # never created
