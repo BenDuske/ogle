@@ -139,7 +139,10 @@ ogle mute 'urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)'
 ogle mute '<urn>' --for 7          # snooze 7 days
 ogle mute '<urn>' --for-hours 4    # snooze 4 hours
 
-ogle muted            # list what's currently silenced (snoozes show their expiry)
+# ...and record WHY, so the silence isn't a mystery weeks later:
+ogle mute '<urn>' --reason 'dashboard bounces every Monday — upstream ETL retry'
+
+ogle muted            # list what's currently silenced (snoozes show their expiry + reason)
 ogle unmute '<urn>'   # let it page again
 ```
 
@@ -147,7 +150,11 @@ A muted dataset is **still tracked** — its baseline keeps advancing, so an `un
 diffs against fresh state, not stale — it just never contributes to an incident. A **snooze**
 (`--for` / `--for-hours`) is a mute that lapses on its own: once the expiry passes it pages
 again automatically, and `ogle check` self-cleans the dead entry from the store. A permanent
-mute always wins over a snooze for the same URN. `ogle check` reports how many muted datasets
+mute always wins over a snooze for the same URN. An optional **`--reason`** attaches a human
+note to the mute — the "why" that a bare URN can't tell you — surfaced by `ogle muted` and
+`ogle show` and carried in their `--json`; it can annotate an already-muted URN after the
+fact, and is cleared automatically when the mute is lifted (unmute / forget / snooze expiry)
+so a reason never outlives the mute it explains. `ogle check` reports how many muted datasets
 it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urns` in `--json`,
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
 false positives) as a first-class operator control.

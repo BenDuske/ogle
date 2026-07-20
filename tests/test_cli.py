@@ -479,8 +479,9 @@ def test_muted_json_shape(tmp_path, capsys):
     rc = main(["muted", "--store", str(store), "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    # A permanent mute carries a null expiry; snoozes carry an epoch `until`.
-    assert payload == {"muted": [{"urn": CUSTOMERS_URN, "until": None}]}
+    # A permanent mute carries a null expiry; snoozes carry an epoch `until`. A mute set
+    # without --reason carries a null `reason`.
+    assert payload == {"muted": [{"urn": CUSTOMERS_URN, "until": None, "reason": None}]}
 
 
 def test_muted_empty_reports_none(tmp_path, capsys):
@@ -582,6 +583,56 @@ def test_muted_json_reports_snooze_expiry(tmp_path, capsys):
     entry = payload["muted"][0]
     assert entry["urn"] == ORDERS_URN
     assert entry["until"] is not None and entry["until"] > time.time()
+
+
+# ---- mute reasons (the "why") -----------------------------------------------------
+def test_mute_with_reason_persists_and_reports(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(
+        ["mute", CUSTOMERS_URN, "--reason", "bounces every Monday", "--store", str(store)]
+    )
+    assert rc == 0
+    assert "bounces every Monday" in capsys.readouterr().out
+    assert BaselineStore.load(store).mute_reason(CUSTOMERS_URN) == "bounces every Monday"
+
+
+def test_mute_blank_reason_is_treated_as_none(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--reason", "   ", "--store", str(store)])
+    assert rc == 0
+    assert BaselineStore.load(store).mute_reason(CUSTOMERS_URN) is None
+
+
+def test_mute_reason_annotates_already_muted(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(
+        ["mute", CUSTOMERS_URN, "--reason", "root-caused upstream", "--store", str(store)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already muted" in out and "root-caused upstream" in out
+    assert BaselineStore.load(store).mute_reason(CUSTOMERS_URN) == "root-caused upstream"
+
+
+def test_muted_human_and_json_surface_reason(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "noisy dashboard", "--store", str(store)])
+    capsys.readouterr()
+    main(["muted", "--store", str(store)])
+    assert "noisy dashboard" in capsys.readouterr().out
+    main(["muted", "--store", str(store), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["muted"][0]["reason"] == "noisy dashboard"
+
+
+def test_unmute_then_remute_starts_reasonless(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--reason", "temporary", "--store", str(store)])
+    main(["unmute", CUSTOMERS_URN, "--store", str(store)])
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    assert BaselineStore.load(store).mute_reason(CUSTOMERS_URN) is None
 
 
 def test_check_purges_lapsed_snooze_and_pages(tmp_path, capsys):
@@ -2299,10 +2350,11 @@ def _seed_show(store_path, **mute):
             ORDERS_URN: _sig(urn=ORDERS_URN, schema_fields=[("oid", "int")], row_count=0),
         },
     )
+    reason = mute.get("reason")
     if mute.get("permanent"):
-        s.mute(CUSTOMERS_URN)
+        s.mute(CUSTOMERS_URN, reason=reason)
     elif mute.get("until") is not None:
-        s.mute(CUSTOMERS_URN, until=mute["until"])
+        s.mute(CUSTOMERS_URN, until=mute["until"], reason=reason)
     s.save()
     return s
 
@@ -2392,6 +2444,25 @@ def test_show_reports_snooze_with_expiry(tmp_path, capsys):
     ds = json.loads(capsys.readouterr().out)["dataset"]
     assert ds["muted"] is True
     assert ds["muted_until"] == pytest.approx(until)
+
+
+def test_show_surfaces_mute_reason_human_and_json(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store, permanent=True, reason="known noisy dashboard")
+    main(["show", CUSTOMERS_URN, "--store", str(store)])
+    assert "known noisy dashboard" in capsys.readouterr().out
+    main(["show", CUSTOMERS_URN, "--store", str(store), "--json"])
+    ds = json.loads(capsys.readouterr().out)["dataset"]
+    assert ds["mute_reason"] == "known noisy dashboard"
+
+
+def test_show_unmuted_reports_null_reason(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_show(store)  # not muted
+    rc = main(["show", CUSTOMERS_URN, "--store", str(store), "--json"])
+    assert rc == 0
+    ds = json.loads(capsys.readouterr().out)["dataset"]
+    assert ds["muted"] is False and ds["mute_reason"] is None
 
 
 def test_show_unknown_row_count_reads_plainly(tmp_path, capsys):

@@ -640,20 +640,30 @@ def cmd_mute(args: argparse.Namespace) -> int:
         seconds = amount * 86400 if days is not None else amount * 3600
         until = time.time() + seconds
 
+    # A blank/whitespace-only --reason is a slip, not a note — treat it as none so it never
+    # persists junk (mirrors how --grep treats all-whitespace as no filter).
+    reason = getattr(args, "reason", None)
+    if reason is not None:
+        reason = reason.strip() or None
+
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
-    newly = store.mute(args.urn, until=until)
+    newly = store.mute(args.urn, until=until, reason=reason)
     try:
         store.save(store_path)
     except Exception as exc:
         print(f"ogle mute: could not save store: {exc}", file=sys.stderr)
         return 2
+    rpart = f" (reason: {reason})" if reason else ""
     if not newly:
-        _emit(f"_already muted: {args.urn}_")
+        # Already muted — but a fresh --reason still lands, so acknowledge that rather than
+        # implying nothing happened.
+        note = f" — reason updated: {reason}" if reason else ""
+        _emit(f"_already muted: {args.urn}{note}_")
     elif until is not None:
-        _emit(f"🔇 snoozed {args.urn} until {_fmt_expiry(until)}")
+        _emit(f"🔇 snoozed {args.urn} until {_fmt_expiry(until)}{rpart}")
     else:
-        _emit(f"🔇 muted {args.urn}")
+        _emit(f"🔇 muted {args.urn}{rpart}")
     return 0
 
 
@@ -690,7 +700,8 @@ def cmd_muted(args: argparse.Namespace) -> int:
         entries = []
         for urn in urns:
             exp = store.mute_expiry(urn)
-            entries.append({"urn": urn, "until": exp})  # until=None -> permanent
+            # until=None -> permanent; reason=None -> no note recorded.
+            entries.append({"urn": urn, "until": exp, "reason": store.mute_reason(urn)})
         _emit(json.dumps({"muted": entries}, indent=2, sort_keys=True))
         return 0
     if not urns:
@@ -700,7 +711,9 @@ def cmd_muted(args: argparse.Namespace) -> int:
     for urn in urns:
         exp = store.mute_expiry(urn)
         suffix = f" — snoozed until {_fmt_expiry(exp)}" if exp is not None else ""
-        _emit(f"- `{urn}`{suffix}")
+        reason = store.mute_reason(urn)
+        rpart = f" — _{reason}_" if reason else ""
+        _emit(f"- `{urn}`{suffix}{rpart}")
     return 0
 
 
@@ -804,12 +817,18 @@ def _mute_state(store: "BaselineStore", urn: str, now: float) -> dict:
 
     `muted` is the effective silence right now (permanent OR an unexpired snooze); `snoozed`
     distinguishes a timed mute from a permanent one; `until` is the snooze expiry (epoch
-    seconds) or None for permanent/not-muted. Reuses the store's own `is_muted`/`mute_expiry`
-    so `show` reports exactly what `ogle check` would honor on the next walk.
+    seconds) or None for permanent/not-muted; `reason` is the human note recorded for the
+    mute (None when unmuted or no note was given). Reuses the store's own `is_muted`/
+    `mute_expiry`/`mute_reason` so `show` reports exactly what `ogle check` would honor.
     """
     muted = store.is_muted(urn, now)
     until = store.mute_expiry(urn)
-    return {"muted": muted, "snoozed": muted and until is not None, "until": until}
+    return {
+        "muted": muted,
+        "snoozed": muted and until is not None,
+        "until": until,
+        "reason": store.mute_reason(urn) if muted else None,
+    }
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -869,6 +888,7 @@ def cmd_show(args: argparse.Namespace) -> int:
                         "computed_at": sig.computed_at,
                         "muted": mute["muted"],
                         "muted_until": mute["until"],
+                        "mute_reason": mute["reason"],
                     }
                 },
                 indent=2,
@@ -883,10 +903,11 @@ def cmd_show(args: argparse.Namespace) -> int:
     _emit(f"- hash: `{sig.schema_hash}`")
     if sig.computed_at:
         _emit(f"- captured: {sig.computed_at}")
+    rnote = f" — _{mute['reason']}_" if mute["reason"] else ""
     if mute["snoozed"]:
-        _emit(f"- 🔇 muted: snoozed until {_fmt_expiry(mute['until'])}")
+        _emit(f"- 🔇 muted: snoozed until {_fmt_expiry(mute['until'])}{rnote}")
     elif mute["muted"]:
-        _emit("- 🔇 muted: permanent")
+        _emit(f"- 🔇 muted: permanent{rnote}")
     else:
         _emit("- 🔔 muted: no")
     if fields:
@@ -2204,6 +2225,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="HOURS",
         help="Snooze for HOURS instead of DAYS (mutually exclusive with --for).",
+    )
+    mute.add_argument(
+        "--reason",
+        metavar="TEXT",
+        default=None,
+        help="A human note explaining WHY this is muted (e.g. \"dashboard bounces every "
+        "Monday\"). Surfaced by `ogle muted` and `ogle show` so a silence isn't a mystery "
+        "weeks later. Can annotate an already-muted URN; cleared when it's unmuted/forgotten.",
     )
     mute.set_defaults(func=cmd_mute)
 

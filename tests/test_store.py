@@ -322,6 +322,77 @@ def test_purge_expired_mutes_drops_only_lapsed():
     assert store.is_muted(CUSTOMERS_URN) is True
 
 
+def test_mute_reason_recorded_and_cleared():
+    store = BaselineStore()
+    assert store.mute(CUSTOMERS_URN, reason="bounces every Monday") is True
+    assert store.mute_reason(CUSTOMERS_URN) == "bounces every Monday"
+    # A later bare mute (no reason) must not blank the note — provenance-refresh rule.
+    store.mute(CUSTOMERS_URN)
+    assert store.mute_reason(CUSTOMERS_URN) == "bounces every Monday"
+    # Re-muting with a fresh reason updates it, even though the state didn't change.
+    assert store.mute(CUSTOMERS_URN, reason="root-caused: upstream ETL retry") is False
+    assert store.mute_reason(CUSTOMERS_URN) == "root-caused: upstream ETL retry"
+    # Unmuting drops the note so it never outlives the mute.
+    assert store.unmute(CUSTOMERS_URN) is True
+    assert store.mute_reason(CUSTOMERS_URN) is None
+
+
+def test_mute_reason_dropped_on_forget_and_expiry():
+    store = BaselineStore()
+    # forget_baseline clears an accompanying reason.
+    store.put_baseline(_sig(ORDERS_URN))
+    store.mute(ORDERS_URN, reason="decommissioning soon")
+    assert store.forget_baseline(ORDERS_URN) is True
+    assert store.mute_reason(ORDERS_URN) is None
+    # An expired snooze drops its note along with the snooze.
+    store.mute(CUSTOMERS_URN, until=100.0, reason="quiet during backfill")
+    assert store.mute_reason(CUSTOMERS_URN) == "quiet during backfill"
+    assert store.purge_expired_mutes(now=150.0) == [CUSTOMERS_URN]
+    assert store.mute_reason(CUSTOMERS_URN) is None
+
+
+def test_mute_reason_survives_save_load_only_while_muted(tmp_path):
+    p = tmp_path / "store.json"
+    s = BaselineStore(path=p)
+    s.mute(ORDERS_URN, reason="known noisy dashboard")
+    s.save()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["mute_reasons"] == {ORDERS_URN: "known noisy dashboard"}
+    reloaded = BaselineStore.load(p)
+    assert reloaded.mute_reason(ORDERS_URN) == "known noisy dashboard"
+    # A reason left behind for an unmuted URN is never persisted (orphan guard in to_dict),
+    # and a stray note hand-injected for a non-muted URN is dropped on the next save.
+    reloaded.unmute(ORDERS_URN)
+    reloaded.mute_reasons[CUSTOMERS_URN] = "stale orphan note"  # simulate a stray
+    reloaded.save()
+    data2 = json.loads(p.read_text(encoding="utf-8"))
+    assert data2["mute_reasons"] == {}
+
+
+def test_load_drops_orphan_mute_reason_for_unmuted_urn(tmp_path):
+    # A hand-edited/legacy file with a reason for a URN that isn't muted must not resurrect
+    # the note (mirrors the muted_until permanent-wins coercion guard).
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {},
+                "muted_urns": [CUSTOMERS_URN],
+                "mute_reasons": {
+                    CUSTOMERS_URN: "kept — still muted",
+                    ORDERS_URN: "orphan — not muted",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.mute_reason(CUSTOMERS_URN) == "kept — still muted"
+    assert store.mute_reason(ORDERS_URN) is None
+
+
 def test_snooze_survives_save_load_and_on_disk_shape(tmp_path):
     p = tmp_path / "store.json"
     s = BaselineStore(path=p)

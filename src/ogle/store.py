@@ -102,6 +102,12 @@ class BaselineStore:
     # "mute this for now" never silently becomes a permanent blind spot. Permanent mutes
     # live in `muted_urns` and always win over a snooze for the same URN.
     muted_until: Dict[str, float] = field(default_factory=dict)
+    # Optional human rationale per muted URN ("dashboard bounces every Monday, ignore").
+    # A mute with no note is a mystery weeks later — this is where the "why" lives so
+    # `ogle muted`/`ogle show` can explain a silence rather than just report it. Keyed by
+    # URN, cleared alongside the mute by unmute/forget/expiry, so a reason never outlives
+    # the mute it annotates.
+    mute_reasons: Dict[str, str] = field(default_factory=dict)
 
     # Runtime-only recovery status (NOT persisted — excluded from to_dict, and from
     # dataclass eq/repr so two stores with identical data still compare equal). Set by
@@ -142,6 +148,7 @@ class BaselineStore:
         existed = self.baselines.pop(urn, None) is not None
         self.muted_urns.discard(urn)
         self.muted_until.pop(urn, None)
+        self.mute_reasons.pop(urn, None)
         return existed
 
     def __len__(self) -> int:
@@ -215,16 +222,28 @@ class BaselineStore:
         return out
 
     # ---- muting (known false positives) --------------------------------------------
-    def mute(self, urn: str, until: Optional[float] = None) -> bool:
+    def mute(self, urn: str, until: Optional[float] = None, reason: Optional[str] = None) -> bool:
         """Mark a dataset as a known false positive so its drift never pages.
 
         `until` is an epoch-seconds expiry for a *snooze* (temporary mute); omit it for a
         permanent mute. A permanent mute supersedes any existing snooze for the same URN,
         and re-snoozing an already-permanent URN is a no-op (the stronger state stands).
 
-        Returns True if this changed the mute state, False if it was already covered by an
+        `reason` is an optional human note explaining the mute. It's recorded whenever
+        supplied — even for an already-muted URN, so `ogle mute foo --reason ...` can
+        annotate a silence after the fact — and a `reason=None` call never blanks a note an
+        earlier mute set (mirrors the provenance-refresh rule on `record_incident`). A
+        re-snooze/no-op that leaves the mute state unchanged can still update the note.
+
+        Returns True if this changed the mute *state*, False if it was already covered by an
         equal-or-stronger mute (so a CLI can say "already muted" rather than claim an action).
+        Setting a reason is a side effect and never affects this return value.
         """
+        if reason is not None:
+            # Only annotate a URN that is (or is becoming) muted, so no orphan note lingers
+            # for an unmuted dataset. The stronger-state guards below can still return False,
+            # but the URL ends this call muted either way, so recording the note is correct.
+            self.mute_reasons[urn] = reason
         if until is None:
             # Permanent mute wins over any snooze.
             self.muted_until.pop(urn, None)
@@ -246,6 +265,7 @@ class BaselineStore:
         had = urn in self.muted_urns or urn in self.muted_until
         self.muted_urns.discard(urn)
         self.muted_until.pop(urn, None)
+        self.mute_reasons.pop(urn, None)
         return had
 
     def is_muted(self, urn: str, now: Optional[float] = None) -> bool:
@@ -267,6 +287,10 @@ class BaselineStore:
         """The snooze expiry for `urn` (epoch seconds), or None if permanent / not muted."""
         return self.muted_until.get(urn)
 
+    def mute_reason(self, urn: str) -> Optional[str]:
+        """The human rationale recorded for `urn`'s mute, or None if none was given."""
+        return self.mute_reasons.get(urn)
+
     def purge_expired_mutes(self, now: float) -> List[str]:
         """Drop snoozes that have expired as of `now`; return the URNs freed (sorted).
 
@@ -275,6 +299,7 @@ class BaselineStore:
         expired = sorted(urn for urn, exp in self.muted_until.items() if exp <= now)
         for urn in expired:
             self.muted_until.pop(urn, None)
+            self.mute_reasons.pop(urn, None)  # drop the note with the snooze it annotated
         return expired
 
     def muted(self, now: Optional[float] = None) -> List[str]:
@@ -293,6 +318,13 @@ class BaselineStore:
             "seen_incidents": {fp: r.to_dict() for fp, r in self.seen_incidents.items()},
             "muted_urns": sorted(self.muted_urns),
             "muted_until": {urn: self.muted_until[urn] for urn in sorted(self.muted_until)},
+            # Persist a note only for a URN that is actually muted (permanent or snoozed) so
+            # a stray reason can never linger past its mute or bloat the file.
+            "mute_reasons": {
+                urn: self.mute_reasons[urn]
+                for urn in sorted(self.mute_reasons)
+                if urn in self.muted_urns or urn in self.muted_until
+            },
         }
 
     @classmethod
@@ -321,12 +353,21 @@ class BaselineStore:
             for urn, exp in dict(data.get("muted_until", {})).items()
             if urn not in muted
         }
+        # mute_reasons (introduced after muted_until) is likewise additive; older files lack
+        # it. Keep only notes whose URN is still muted in either form, so a hand-edited or
+        # legacy file can't resurrect an orphan reason for an unmuted dataset.
+        mute_reasons = {
+            urn: str(reason)
+            for urn, reason in dict(data.get("mute_reasons", {})).items()
+            if urn in muted or urn in muted_until
+        }
         return cls(
             path=path,
             baselines=baselines,
             seen_incidents=seen,
             muted_urns=muted,
             muted_until=muted_until,
+            mute_reasons=mute_reasons,
         )
 
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:
