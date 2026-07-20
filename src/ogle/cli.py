@@ -2198,6 +2198,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "muted": len(muted),
                         "muted_permanent": mute_split["permanent"],
                         "muted_snoozed": mute_split["snoozed"],
+                        # Seconds until the soonest active snooze lapses — when a
+                        # currently-silenced dataset's drift returns to paging. Parity with
+                        # the ogle_muted_snooze_next_expiry_seconds gauge. null when no
+                        # active snooze exists (only permanent mutes / nothing muted), so a
+                        # consumer can tell "no snooze pending" from "lapses in 0s".
+                        "muted_snooze_next_expiry_seconds": mute_split["next_expiry_seconds"],
                         # Stalest/freshest open-drift age in seconds (null on an untimed
                         # store). Parity with the ogle_incident_age_seconds Prometheus gauges.
                         "oldest_incident_age_seconds": age_bounds[1] if age_bounds else None,
@@ -2304,6 +2310,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             f" (⛔ {mute_split['permanent']} permanent · "
             f"💤 {mute_split['snoozed']} snoozed)"
         )
+        # When a snooze is pending, say WHEN the soonest one lapses — the moment a
+        # currently-silenced dataset's drift returns to paging. Human twin of the
+        # ogle_muted_snooze_next_expiry_seconds gauge; shown only when an active snooze
+        # exists (permanent-only mutes never lapse, so there's nothing to count down).
+        next_expiry = mute_split["next_expiry_seconds"]
+        if next_expiry is not None:
+            muted_line += f" · ⏰ next lifts in {_fmt_age(next_expiry)}"
     _emit(muted_line)
     # Monitor heartbeat: how long since `ogle check` last wrote the store. Every line above is
     # a drift level that freezes silently if the scheduled check stops running; this is the one

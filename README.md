@@ -182,8 +182,12 @@ cross-tab the `ogle_incidents_serving_by_severity` gauge exposes (the four bucke
 `serving-path`) — and **muted** — which, when anything is silenced, splits into `⛔ N permanent`
 (a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
 same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't
-hide inside a bland "N active". `--json` carries the split as `muted_permanent`/`muted_snoozed`
-(disjoint — they sum back to `muted`). The severity
+hide inside a bland "N active". When a snooze is pending, the line appends `⏰ next lifts in <age>`
+— the countdown to the *soonest* active snooze lapsing (when that silenced dataset's drift returns
+to paging), the human twin of the `ogle_muted_snooze_next_expiry_seconds` gauge. `--json` carries
+the split as `muted_permanent`/`muted_snoozed` (disjoint — they sum back to `muted`) plus
+`muted_snooze_next_expiry_seconds` (null when no snooze is active, so a consumer can tell "no snooze
+pending" from "lapses in 0s"). The severity
 and serving counts reuse the same rollup as `incidents --summary`, so the two always agree on the
 same store. An untouched store reports `is empty — run ogle check to start watching` rather than a
 wall of zeros.

@@ -2569,6 +2569,60 @@ def test_status_text_flags_permanent_blind_spot(tmp_path, capsys):
     assert "1 permanent" in out
 
 
+def test_status_json_exposes_snooze_next_expiry_seconds(tmp_path, capsys):
+    # --json must carry the seconds-until-soonest-snooze-lapses number so a monitor sees the
+    # same value as the ogle_muted_snooze_next_expiry_seconds gauge. Two snoozes → the SOONEST
+    # (30m) leads, not the later one (2h); a permanent mute never lapses so it's ignored.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:perm")  # permanent → no expiry, must not be picked
+    s.mute("urn:soon", until=time.time() + 1800)  # 30m → the soonest lapse
+    s.mute("urn:later", until=time.time() + 7200)  # 2h
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert 1800 - 5 <= payload["muted_snooze_next_expiry_seconds"] <= 1800 + 5
+
+
+def test_status_json_snooze_expiry_null_without_active_snooze(tmp_path, capsys):
+    # bounds null (not 0) when only permanent mutes exist, so a consumer can tell "no snooze
+    # pending" from "lapses in 0s" — parity with the gauge suppressing its sample.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:perm")  # permanent only
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["muted_snooze_next_expiry_seconds"] is None
+
+
+def test_status_text_surfaces_snooze_next_lapse(tmp_path, capsys):
+    # The human snapshot must say WHEN the soonest snooze lifts — the moment a silenced
+    # dataset's drift returns to paging — twin of the gauge. Permanent-only mutes show no
+    # countdown (nothing to lapse).
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:snooze", until=time.time() + 1830)  # ~30m (a hair over so floor→30m, not 29m)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "next lifts in 30m" in out
+
+
+def test_status_text_no_lapse_line_for_permanent_only_mute(tmp_path, capsys):
+    # A permanent-only mute has no expiry, so the countdown line must be absent (not "in 0s").
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.mute("urn:perm")
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "next lifts in" not in capsys.readouterr().out
+
+
 def test_status_json_counts_unknown_rows(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     s = BaselineStore(
