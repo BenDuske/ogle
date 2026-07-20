@@ -1996,6 +1996,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     # forgotten resolve-candidate festering for weeks (stalest = 12d) — a flat count can't.
     # `None` on a legacy/untimed store, in which case no age line/field is emitted.
     age_bounds = _incident_age_bounds(incident_records, now)
+    # Heartbeat: seconds since the store file was last written = since `ogle check` last ran.
+    # Every count above describes DRIFT; this one describes OGLE ITSELF. If the scheduled check
+    # crash-loops or its cron is removed, all those levels freeze at their last value while the
+    # snapshot still looks populated — the monitor going dark is invisible in the drift numbers
+    # alone. Surfaced here as the human-facing twin of the `ogle_store_age_seconds` gauge so a
+    # glance at `status` answers "is Ogle still running?". `None` before the first check writes
+    # a store (no file yet), in which case no heartbeat line/field is emitted.
+    store_age = _store_file_age(Path(args.store), now)
 
     # CI/scheduled health gate. Turns the whole-store rollup into an exit-code check so a
     # cron/CI wrapper that runs `ogle status` to answer "what is Ogle holding right now?" can
@@ -2024,6 +2032,10 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "freshest_incident_age_seconds": (
                             age_bounds[0] if age_bounds else None
                         ),
+                        # Seconds since the store file was last written (null before the
+                        # first check). Parity with the ogle_store_age_seconds gauge —
+                        # the monitor's own heartbeat, not a drift level.
+                        "store_age_seconds": store_age,
                     }
                 },
                 indent=2,
@@ -2092,6 +2104,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"💤 {mute_split['snoozed']} snoozed)"
         )
     _emit(muted_line)
+    # Monitor heartbeat: how long since `ogle check` last wrote the store. Every line above is
+    # a drift level that freezes silently if the scheduled check stops running; this is the one
+    # signal that catches Ogle itself going dark. Human twin of the ogle_store_age_seconds gauge
+    # an operator would alert on (`> 2 * check_interval`). Emitted only when the store file
+    # exists (a first run before any check has no honest heartbeat to report).
+    if store_age is not None:
+        _emit(f"- 🫀 last check: {_fmt_age(store_age)} ago")
     if gate_rc:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
     return gate_rc

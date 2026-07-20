@@ -2312,6 +2312,43 @@ def test_status_json_age_seconds_null_on_untimed_store(tmp_path, capsys):
     assert payload["freshest_incident_age_seconds"] is None
 
 
+def test_status_surfaces_store_age_heartbeat(tmp_path, capsys):
+    # The human snapshot must surface the monitor's own heartbeat — how long since `ogle check`
+    # last wrote the store. Every other line is a drift level that freezes silently if the check
+    # stops running; this is the one signal that catches Ogle going dark. Human twin of the
+    # ogle_store_age_seconds gauge. A just-saved store reads "just now".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp1", severity="high", title="H", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "last check: just now ago" in capsys.readouterr().out
+
+
+def test_status_json_exposes_store_age_seconds(tmp_path, capsys):
+    # --json must carry the raw store-file age (seconds) so a monitor sees the same heartbeat
+    # the ogle_store_age_seconds gauge exposes — a fresh store is a small non-negative number.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp1", severity="high", title="H", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["store_age_seconds"] is not None
+    assert 0 <= payload["store_age_seconds"] < 120
+
+
+def test_status_store_age_heartbeat_omitted_before_first_check(tmp_path, capsys):
+    # No store file yet → no honest heartbeat to report. The empty-store path prints the
+    # "is empty" notice and must not fabricate a "last check" line for a check that never ran.
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "last check" not in capsys.readouterr().out.lower()
+
+
 def test_status_json_splits_muted_permanent_and_snoozed(tmp_path, capsys):
     # status --json must expose the same permanent-vs-snooze split metrics does, and the two
     # kinds sum back to the flat `muted` count (they're disjoint) — the parity anchor.
