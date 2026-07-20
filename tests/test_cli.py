@@ -7,13 +7,14 @@ use the Task #2 shape where `customers` feeds the deployed `churn_predictor` (se
 """
 
 import json
+import sys
 import time
 
 import pytest
 
 import io
 
-from ogle.cli import _emit, _fmt_age, _parse_age, build_parser, load_signatures_file, main
+from ogle.cli import _emit, _fmt_age, _parse_age, _use_utf8_stdio, build_parser, load_signatures_file, main
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -344,6 +345,28 @@ def test_emit_survives_legacy_console_encoding():
     stream.flush()
     text = buf.getvalue().decode("cp1252")
     assert "drift detected" in text  # ran to completion; unencodable chars replaced
+
+
+def test_use_utf8_stdio_promotes_cp1252_stream(monkeypatch):
+    """A redirected cp1252 stdout is promoted to UTF-8 so emoji land as real bytes, not `?`."""
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict", newline="")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict", newline="")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    _use_utf8_stdio()
+    assert out.encoding.lower().replace("-", "") == "utf8"
+    assert err.encoding.lower().replace("-", "") == "utf8"
+    # And the promoted stream now carries emoji as UTF-8 bytes, not lossy replacements.
+    out.write("🔴 drift")
+    out.flush()
+    assert "🔴 drift" == out.buffer.getvalue().decode("utf-8")
+
+
+def test_use_utf8_stdio_tolerates_non_reconfigurable_stream(monkeypatch):
+    """Streams without `reconfigure` (e.g. pytest capture) are left alone, no crash."""
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    _use_utf8_stdio()  # must not raise
 
 
 def test_parser_check_defaults():

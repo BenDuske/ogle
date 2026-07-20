@@ -45,12 +45,41 @@ from .store import BaselineStore
 DEFAULT_STORE = "ogle-baselines.json"
 
 
+def _use_utf8_stdio() -> None:
+    """Promote stdout/stderr to UTF-8 so the emoji-bearing narrative renders, not `?`.
+
+    On Windows the default stdio encoding is the ANSI code page (cp1252) whenever output
+    is redirected or piped — so `ogle demo > alert.md` would previously lossily mangle every
+    severity marker (🔴/⚠️/✅) into `?`, even though every committed artifact under
+    `examples/` is UTF-8. Reconfiguring to UTF-8 makes piped/redirected output byte-for-byte
+    match those fixtures; an interactive console already uses the wide-char API and is
+    unaffected. `errors="replace"` stays as a last-ditch net so a stream that somehow can't
+    carry UTF-8 still never crashes the command. Best-effort: streams without `reconfigure`
+    (e.g. pytest's capture) are left as-is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        if (getattr(stream, "encoding", "") or "").lower().replace("-", "") == "utf8":
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # Stream is detached/closed or refuses reconfigure — leave _emit's per-write
+            # replace path to handle it.
+            pass
+
+
 def _emit(text: str, *, stream=None) -> None:
     """Print `text` without crashing on a legacy console encoding.
 
-    The narrative carries emoji severity markers; a Windows cp1252 terminal raises
-    UnicodeEncodeError on those. Encode to the stream's own encoding with errors="replace"
-    so the command still runs (and its exit code stays trustworthy) on any console.
+    `main()` promotes stdout/stderr to UTF-8 (see `_use_utf8_stdio`), which is the common
+    case. This remains the per-write safety net: the narrative carries emoji severity
+    markers, and a stream still pinned to cp1252 (e.g. a caller passing its own strict
+    stream) raises UnicodeEncodeError on those. Encode to the stream's own encoding with
+    errors="replace" so the command still runs (and its exit code stays trustworthy) on any
+    console.
     """
     stream = stream or sys.stdout
     enc = getattr(stream, "encoding", None) or "utf-8"
@@ -2550,6 +2579,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _use_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
