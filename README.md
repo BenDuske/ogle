@@ -247,7 +247,12 @@ orphaned baseline, the Prometheus counterpart to `ogle baselines --sort age`/`--
 is the coverage companion (like `ogle_watching_rows_unknown`): baselines with no parseable `computed_at`
 whose age can't be asserted, so a small oldest-age next to a large unknown reads as "most of the watch-list
 can't be checked for orphaning". Both age families are declared but emit **no sample** when no baseline
-carries a stamp — an honest "no data", never a fake zero.
+carries a stamp — an honest "no data", never a fake zero. The human `ogle status` snapshot carries the
+same signal as its twin: a `🕰️ oldest baseline capture: 1w ago · newest: 2h ago · N untimed` line
+(stalest first — the orphan candidate; the untimed count trails as a coverage caveat), shown only when
+at least one baseline is timestamped and mirrored in `--json` as `oldest_baseline_capture_age_seconds` /
+`newest_baseline_capture_age_seconds` / `baseline_capture_age_unknown` — so a glance at `status` catches
+an orphaning watch-list without a scrape, and the snapshot and the gauge can never disagree (shared code).
 
 **Mutes aren't all equal.** `ogle_muted_active` counts every silenced dataset as one number, but
 a *permanent* mute is a chosen **standing blind spot** — drift on that dataset is suppressed with

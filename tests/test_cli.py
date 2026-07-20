@@ -2465,6 +2465,79 @@ def test_status_store_age_heartbeat_omitted_before_first_check(tmp_path, capsys)
     assert "last check" not in capsys.readouterr().out.lower()
 
 
+def _seed_timestamped_baselines(store_path, now):
+    # Watch-list with two parseable-`computed_at` baselines (oldest ~10d, newest ~1h) plus one
+    # untimed, so status can surface capture-age bounds AND the untimed coverage caveat. Ages
+    # are anchored to the caller's `now` so `_fmt_age` renders deterministically (10d→1w, 1h→1h),
+    # mirroring the incident-age fixtures.
+    def _iso(epoch):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+    untimed = "urn:li:dataset:(urn:li:dataPlatform:dbt,x.untimed,PROD)"
+    s = BaselineStore(
+        path=store_path,
+        baselines={
+            CUSTOMERS_URN: _sig(computed_at=_iso(now - 10 * 86400)),  # oldest capture → 1w
+            ORDERS_URN: _sig(urn=ORDERS_URN, computed_at=_iso(now - 3600)),  # newest → 1h
+            untimed: _sig(urn=untimed),  # no computed_at → untimed (coverage gap)
+        },
+    )
+    s.save()
+    return s
+
+
+def test_status_surfaces_baseline_capture_age(tmp_path, capsys):
+    # The human snapshot must surface watch-list staleness — the stalest baseline capture leads
+    # (the orphan candidate: a URN the walk stopped refreshing), newest trails, and the untimed
+    # count trails as a coverage caveat. Same bounds `baselines --stale` / the metrics
+    # ogle_baseline_oldest_capture_age_seconds gauge read.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "oldest baseline capture: 1w ago" in out
+    assert "newest: 1h ago" in out
+    assert "1 untimed" in out
+
+
+def test_status_baseline_capture_line_suppressed_on_untimed_store(tmp_path, capsys):
+    # No baseline carries a computed_at (the default offline/legacy store) → age can't be
+    # asserted for any, so the line is omitted rather than fabricated — parity with the metrics
+    # gauge suppressing its sample on an all-untimed store (honest no-data over a fake age).
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # neither baseline has computed_at
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "baseline capture" not in capsys.readouterr().out
+
+
+def test_status_json_exposes_baseline_capture_age_seconds(tmp_path, capsys):
+    # --json must carry the raw capture-age bounds (seconds) + the untimed count so a monitor
+    # sees the same numbers as the ogle_baseline_*_capture_age_seconds gauges.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["oldest_baseline_capture_age_seconds"] >= 10 * 86400 - 5
+    assert 3600 - 5 <= payload["newest_baseline_capture_age_seconds"] <= 3600 + 60
+    assert payload["baseline_capture_age_unknown"] == 1
+
+
+def test_status_json_baseline_capture_age_null_on_untimed_store(tmp_path, capsys):
+    # bounds null (not 0) on an all-untimed store so a consumer can tell "no timestamped
+    # baseline" from "age 0"; the untimed count still reports how many can't be checked.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # 2 untimed baselines
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["oldest_baseline_capture_age_seconds"] is None
+    assert payload["newest_baseline_capture_age_seconds"] is None
+    assert payload["baseline_capture_age_unknown"] == 2
+
+
 def test_status_json_splits_muted_permanent_and_snoozed(tmp_path, capsys):
     # status --json must expose the same permanent-vs-snooze split metrics does, and the two
     # kinds sum back to the flat `muted` count (they're disjoint) — the parity anchor.

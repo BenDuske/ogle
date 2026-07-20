@@ -2166,6 +2166,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     # glance at `status` answers "is Ogle still running?". `None` before the first check writes
     # a store (no file yet), in which case no heartbeat line/field is emitted.
     store_age = _store_file_age(Path(args.store), now)
+    # Watch-list orphan signal: freshest/stalest baseline CAPTURE age + the untimed coverage
+    # gap. The store-age heartbeat above catches the whole monitor going dark, but a single
+    # baseline can go stale on its own — an old capture means Ogle stopped seeing that URN
+    # (dropped from the walk / renamed / de-provisioned) while its baseline lingers, a
+    # per-dataset blind spot the store-wide heartbeat can't localize. Same bounds the metrics
+    # ogle_baseline_*_capture_age_seconds gauges and the `baselines --sort age/--stale` view
+    # read (via the shared `_baseline_age_seconds`), so the snapshot and the gauge can never
+    # disagree. `bounds` is None on a store with no timestamped baseline (legacy/offline
+    # signatures with no computed_at), in which case no capture-age line is emitted.
+    baseline_age = _baseline_age_bounds(store, now)
 
     # CI/scheduled health gate. Turns the whole-store rollup into an exit-code check so a
     # cron/CI wrapper that runs `ogle status` to answer "what is Ogle holding right now?" can
@@ -2198,6 +2208,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                         # first check). Parity with the ogle_store_age_seconds gauge —
                         # the monitor's own heartbeat, not a drift level.
                         "store_age_seconds": store_age,
+                        # Stalest/freshest baseline CAPTURE age in seconds + the untimed
+                        # coverage gap. Parity with the ogle_baseline_*_capture_age_seconds
+                        # gauges — the orphan signal (old capture = a URN Ogle stopped
+                        # seeing). null bounds on a store with no timestamped baseline, so a
+                        # consumer can tell "no timestamped baseline" from "age 0".
+                        "oldest_baseline_capture_age_seconds": (
+                            baseline_age["bounds"][1] if baseline_age["bounds"] else None
+                        ),
+                        "newest_baseline_capture_age_seconds": (
+                            baseline_age["bounds"][0] if baseline_age["bounds"] else None
+                        ),
+                        "baseline_capture_age_unknown": baseline_age["unknown"],
                     }
                 },
                 indent=2,
@@ -2222,6 +2244,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"- 📊 watching: {totals['watching']} dataset(s) · "
         f"{totals['fields']} field(s) · {rpart}"
     )
+    # Watch-list staleness twin of the "oldest open drift" incident line below: how long ago
+    # Ogle last captured each baseline. The stalest leads because it's the orphan candidate —
+    # a URN whose baseline is aging because the walk no longer refreshes it (dropped/renamed/
+    # de-provisioned), the same signal `baselines --stale` surfaces and the metrics
+    # ogle_baseline_oldest_capture_age_seconds gauge alerts on. Shown only when at least one
+    # baseline carries a parseable computed_at (mirrors the gauge suppressing its sample on an
+    # all-untimed store — an honest no-data over a fabricated age); the untimed count trails as
+    # a coverage caveat so a small oldest next to many untimed reads as "most can't be checked".
+    if baseline_age["bounds"] is not None:
+        newest_cap, oldest_cap = baseline_age["bounds"]
+        cap_line = (
+            f"- 🕰️ oldest baseline capture: {_fmt_age(oldest_cap)} ago · "
+            f"newest: {_fmt_age(newest_cap)} ago"
+        )
+        if baseline_age["unknown"]:
+            cap_line += f" · {baseline_age['unknown']} untimed"
+        _emit(cap_line)
     _emit(
         f"- 🧠 incidents remembered: {inc['total']} "
         f"(🔴 {sev['high']} · 🟠 {sev['medium']} · 🟡 {sev['low']} · • {sev['unknown']})"
