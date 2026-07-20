@@ -608,6 +608,64 @@ def test_muted_json_reports_snooze_expiry(tmp_path, capsys):
     assert entry["until"] is not None and entry["until"] > time.time()
 
 
+# ---- muted --permanent / --snoozed filters ----------------------------------------
+def test_muted_permanent_filters_out_snoozes(tmp_path, capsys):
+    """`muted --permanent` keeps only the no-expiry standing blind spots."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])           # permanent
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])  # snooze
+    capsys.readouterr()
+    rc = main(["muted", "--permanent", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert CUSTOMERS_URN in out and ORDERS_URN not in out
+    assert "1 muted" in out
+
+
+def test_muted_snoozed_filters_out_permanent(tmp_path, capsys):
+    """`muted --snoozed` keeps only the timed mutes that lapse on their own."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])           # permanent
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])  # snooze
+    capsys.readouterr()
+    rc = main(["muted", "--snoozed", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ORDERS_URN in out and CUSTOMERS_URN not in out
+    assert "1 muted" in out
+
+
+def test_muted_permanent_composes_with_urns(tmp_path, capsys):
+    """The audit pipe: `muted --permanent --urns` emits only the permanent URNs, plain."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])           # permanent
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])  # snooze
+    capsys.readouterr()
+    rc = main(["muted", "--permanent", "--urns", "--store", str(store)])
+    assert rc == 0
+    assert capsys.readouterr().out.splitlines() == [CUSTOMERS_URN]  # snooze excluded, no header
+
+
+def test_muted_filter_empty_distinguishes_from_no_mutes(tmp_path, capsys):
+    """--permanent on a snooze-only store says which filter hid the mutes, not 'no mutes'."""
+    store = tmp_path / "baselines.json"
+    main(["mute", ORDERS_URN, "--for", "5", "--store", str(store)])  # snooze only
+    capsys.readouterr()
+    rc = main(["muted", "--permanent", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no permanent mutes" in out and "1 muted" in out
+
+
+def test_muted_permanent_and_snoozed_are_mutually_exclusive(tmp_path, capsys):
+    """argparse rejects both filters at once (a usage error, exit 2 via SystemExit)."""
+    store = tmp_path / "baselines.json"
+    with pytest.raises(SystemExit) as exc:
+        main(["muted", "--permanent", "--snoozed", "--store", str(store)])
+    assert exc.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err.lower()
+
+
 # ---- mute reasons (the "why") -----------------------------------------------------
 def test_mute_with_reason_persists_and_reports(tmp_path, capsys):
     store = tmp_path / "baselines.json"

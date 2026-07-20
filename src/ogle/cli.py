@@ -716,7 +716,25 @@ def cmd_muted(args: argparse.Namespace) -> int:
     """List the datasets currently muted in the store (expired snoozes excluded)."""
     store = BaselineStore.load(Path(args.store))
     now = time.time()
-    urns = store.muted(now)  # active mutes only — expired snoozes excluded
+    all_urns = store.muted(now)  # active mutes only — expired snoozes excluded
+    # `--permanent`/`--snoozed`: split the mute list into its two risk kinds — the same
+    # cross-tab `status` surfaces as "⛔ N permanent · 💤 M snoozed". A *permanent* mute
+    # (no expiry) is a standing blind spot an operator must justify — drift silenced with no
+    # end date — so `muted --permanent` is the audit view for exactly the mutes that never
+    # self-clear; a *snoozed* mute lapses on its own. Both compose with --urns so a whole
+    # class can feed `unmute` at once (`ogle muted --permanent --urns | xargs -n1 ogle
+    # unmute`). Permanence is keyed on the expiry epoch (None == permanent), the same field
+    # the human/json views read, so the filter and the display can never disagree. argparse
+    # makes the two flags mutually exclusive; neither set == the full list (unchanged).
+    want_permanent = getattr(args, "permanent", False)
+    want_snoozed = getattr(args, "snoozed", False)
+    if want_permanent:
+        urns = [u for u in all_urns if store.mute_expiry(u) is None]
+    elif want_snoozed:
+        urns = [u for u in all_urns if store.mute_expiry(u) is not None]
+    else:
+        urns = all_urns
+    filtered = want_permanent or want_snoozed
     # `--urns`: plain machine output — just each muted URN, one per line. The write-side
     # selector symmetric with `baselines --urns`/`incidents --fingerprints`: turns the mute
     # list into a pipe for bulk `unmute`/`show`. Overrides --json (this IS the scriptable
@@ -734,7 +752,14 @@ def cmd_muted(args: argparse.Namespace) -> int:
         _emit(json.dumps({"muted": entries}, indent=2, sort_keys=True))
         return 0
     if not urns:
-        _emit("_no muted datasets._")
+        # Distinguish "a filter hid every mute" from "nothing is muted at all" so a narrowed
+        # view (e.g. --permanent on a store with only snoozes) never reads as an empty store —
+        # mirrors how `incidents`/`baselines` separate a hidden set from a genuinely empty one.
+        if filtered and all_urns:
+            kind = "permanent" if want_permanent else "snoozed"
+            _emit(f"_no {kind} mutes ({len(all_urns)} muted)._")
+        else:
+            _emit("_no muted datasets._")
         return 0
     _emit(f"**{len(urns)} muted dataset(s):**")
     for urn in urns:
@@ -2538,6 +2563,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print ONLY the muted URNs (one per line) — pipe into a write-side command, "
         "e.g. `ogle muted --urns | xargs -n1 ogle unmute` to lift a whole false-positive "
         "campaign at once. Overrides --json; silent on an empty set.",
+    )
+    # Split the mute list into its two risk kinds (mutually exclusive; neither == the full
+    # list). `--permanent` is the audit view for standing blind spots — mutes with no end
+    # date that never self-clear; `--snoozed` shows only the timed mutes that lapse on their
+    # own. Composes with --urns/--json so a whole class can feed `unmute`.
+    muted_kind = muted.add_mutually_exclusive_group()
+    muted_kind.add_argument(
+        "--permanent",
+        action="store_true",
+        help="Show ONLY permanent mutes (no expiry) — the standing blind spots to audit. "
+        "Pairs with --urns: `ogle muted --permanent --urns | xargs -n1 ogle unmute`.",
+    )
+    muted_kind.add_argument(
+        "--snoozed",
+        action="store_true",
+        help="Show ONLY snoozed mutes (a timed silence that lapses on its own).",
     )
     muted.set_defaults(func=cmd_muted)
 

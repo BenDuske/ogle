@@ -143,14 +143,23 @@ ogle mute '<urn>' --for-hours 4    # snooze 4 hours
 ogle mute '<urn>' --reason 'dashboard bounces every Monday — upstream ETL retry'
 
 ogle muted            # list what's currently silenced (snoozes show their expiry + reason)
+ogle muted --permanent  # only the standing blind spots (no expiry) — the audit view
+ogle muted --snoozed    # only the timed mutes that lapse on their own
 ogle unmute '<urn>'   # let it page again
+
+# audit-and-lift every standing blind spot at once:
+ogle muted --permanent --urns | xargs -n1 ogle unmute
 ```
 
 A muted dataset is **still tracked** — its baseline keeps advancing, so an `unmute` later
 diffs against fresh state, not stale — it just never contributes to an incident. A **snooze**
 (`--for` / `--for-hours`) is a mute that lapses on its own: once the expiry passes it pages
 again automatically, and `ogle check` self-cleans the dead entry from the store. A permanent
-mute always wins over a snooze for the same URN. An optional **`--reason`** attaches a human
+mute always wins over a snooze for the same URN. **`ogle muted --permanent`** / **`--snoozed`**
+split the list into its two risk kinds (the same `⛔ permanent · 💤 snoozed` cross-tab `status`
+shows): a *permanent* mute silences drift with no end date — a standing blind spot to audit and
+justify — while a *snooze* clears itself, so `--permanent` is the view for exactly the mutes that
+never self-lapse, and it composes with `--urns` to feed a bulk `unmute`. An optional **`--reason`** attaches a human
 note to the mute — the "why" that a bare URN can't tell you — surfaced by `ogle muted` and
 `ogle show` and carried in their `--json`; it can annotate an already-muted URN after the
 fact, and is cleared automatically when the mute is lifted (unmute / forget / snooze expiry)
