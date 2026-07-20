@@ -1164,6 +1164,33 @@ def test_incidents_summary_text_render(tmp_path, capsys):
     assert "total sightings: 8" in out
 
 
+def test_incidents_summary_serving_line_splits_by_severity(tmp_path, capsys):
+    # Parity with `status`: the --summary serving-path line must surface the serving ∩ severity
+    # split (same cross-tab as ogle_incidents_serving_by_severity), not a flat count — the
+    # rollup can't hide the load-bearing 🔴 high-serving page. _seed_mixed_incidents gives one
+    # HIGH serving + one LOW serving (+ one MEDIUM non-serving) → serving-path: 2, high=1, low=1.
+    store_path = tmp_path / "baselines.json"
+    _seed_mixed_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    # Flat total kept (parity anchor) and the risk-split appended, high first; the non-serving
+    # medium is excluded so medium reads 0.
+    assert "serving-path: 2 (🔴 1 · 🟠 0 · 🟡 1 · • 0)" in out
+
+
+def test_incidents_summary_serving_split_suppressed_when_nothing_serves(tmp_path, capsys):
+    # Mirrors status' conditional split: with zero serving incidents the line stays a bare
+    # "serving-path: 0" — no parenthetical wall of zeros on the rollup.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("low_only", severity="low", title="L", datasets=1)  # not serving
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "serving-path: 0" in out
+    assert "serving-path: 0 (" not in out
+
+
 def test_incidents_summary_unknown_severity_bucket(tmp_path, capsys):
     # A legacy bare-count record (no severity) lands in the `unknown` bucket, not dropped.
     store_path = tmp_path / "baselines.json"

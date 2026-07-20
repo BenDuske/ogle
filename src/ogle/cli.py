@@ -1535,7 +1535,19 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             f"- 🔴 high: {sev['high']} · 🟠 medium: {sev['medium']} · "
             f"🟡 low: {sev['low']} · • unknown: {sev['unknown']}"
         )
-        _emit(f"- ⚠️ serving-path: {summary['serving']}")
+        # Serving ∩ severity split — parity with `status`, which surfaces the same page-worthy
+        # cross-tab (ogle_incidents_serving_by_severity). A flat "serving-path: N" can't tell an
+        # operator whether that serving drift is a 🔴 high-severity production page or a benign
+        # low one, so lead with 🔴 high. Shown only when something is serving (mirrors status'
+        # conditional risk-split); the four buckets sum back to `serving`, the parity anchor.
+        serving_line = f"- ⚠️ serving-path: {summary['serving']}"
+        if summary["serving"]:
+            sbs = summary["serving_by_severity"]
+            serving_line += (
+                f" (🔴 {sbs['high']} · 🟠 {sbs['medium']} · "
+                f"🟡 {sbs['low']} · • {sbs['unknown']})"
+            )
+        _emit(serving_line)
         _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:

@@ -446,9 +446,12 @@ it would under-count).
 
 `--summary` swaps the per-incident list for an at-a-glance rollup — total remembered, a count
 per severity, how many touch a serving path, how many are recurring (seen ≥2×), and the total
-sighting count. It describes the *filtered* set, so it composes with the triage flags (e.g.
-`ogle incidents --summary --serving-only` summarizes only the serving-path drift). Add `--json`
-for a machine-readable `{"summary": {...}}` shape.
+sighting count. When anything is serving, the serving-path count appends its own severity split
+`(🔴 high · 🟠 medium · 🟡 low · • unknown)` — the same page-worthy cross-tab `ogle status` and the
+`ogle_incidents_serving_by_severity` gauge surface, so the 🔴 *high-serving* page can't hide inside
+a flat total (the four buckets sum back to `serving-path`). It describes the *filtered* set, so it
+composes with the triage flags (e.g. `ogle incidents --summary --serving-only` summarizes only the
+serving-path drift). Add `--json` for a machine-readable `{"summary": {...}}` shape.
 
 `--fail-on {low,medium,high}` turns the read-only listing into a **health gate on the drift
 *memory***. Where `check --fail-on` gates on *new* drift surfaced this run, `incidents --fail-on`
