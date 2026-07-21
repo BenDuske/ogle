@@ -3295,6 +3295,38 @@ def test_incidents_untimed_record_shows_no_age(tmp_path, capsys):
     assert "last seen" not in capsys.readouterr().out
 
 
+def test_incidents_recurring_shows_first_seen_longevity(tmp_path, capsys):
+    # A drift that has recurred surfaces BOTH axes: how long it has been standing (first
+    # seen) and its most recent activity (last seen). Here: born 10d ago, last seen 1d ago.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    now = time.time()
+    s.record_incident("fp", severity="high", title="HIGH drift", now=now - 14 * 86400)
+    s.record_incident("fp", severity="high", title="HIGH drift", now=now - 86400)
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "first seen 2w ago" in out    # longevity — the whole standing life
+    assert "last seen 1d ago" in out     # recency — the newest sighting
+    # --json carries the raw epoch so a dashboard can compute its own age.
+    assert main(["incidents", "--store", str(store_path), "--json"]) == 0
+    (rec,) = json.loads(capsys.readouterr().out)["incidents"]
+    assert rec["first_seen"] < rec["last_seen"]
+
+
+def test_incidents_single_sighting_omits_redundant_first_seen(tmp_path, capsys):
+    # On a lone sighting first == last, so the human view shows only "last seen" — no
+    # redundant "first seen" clause. (--json still carries the field for machines.)
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", title="HIGH drift", now=time.time() - 86400)
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "last seen 1d ago" in out
+    assert "first seen" not in out
+
+
 def test_incidents_stale_filters_out_recent(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)

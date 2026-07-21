@@ -763,3 +763,71 @@ def test_incident_record_without_last_seen_loads_as_none(tmp_path):
     (rec,) = BaselineStore.load(p).incidents()
     assert "last_seen" not in rec
     assert rec["count"] == 2
+
+
+# ---- incident first_seen: the longevity axis behind `ogle incidents` "first seen X ago" ----
+
+
+def test_record_incident_stamps_first_seen_when_now_given():
+    store = BaselineStore()
+    store.record_incident("fp", severity="high", now=1000.0)
+    (rec,) = store.incidents()
+    assert rec["first_seen"] == 1000.0
+
+
+def test_record_incident_first_seen_frozen_while_last_seen_advances():
+    # first_seen is written once (the incident's birth); last_seen tracks the newest sighting.
+    store = BaselineStore()
+    store.record_incident("fp", now=1000.0)
+    store.record_incident("fp", now=2500.0)
+    store.record_incident("fp", now=9000.0)
+    (rec,) = store.incidents()
+    assert rec["first_seen"] == 1000.0   # never moves — measures the whole standing life
+    assert rec["last_seen"] == 9000.0    # moves to the most recent sighting
+
+
+def test_record_incident_without_now_omits_first_seen():
+    store = BaselineStore()
+    store.record_incident("fp", severity="low")
+    (rec,) = store.incidents()
+    assert "first_seen" not in rec
+
+
+def test_record_incident_first_seen_backfills_from_first_timed_sighting():
+    # An incident whose earliest sightings were untimed backfills first_seen to the FIRST
+    # clock it ever gets (best available), and a later timed call never moves it.
+    store = BaselineStore()
+    store.record_incident("fp")           # untimed
+    store.record_incident("fp", now=5000.0)
+    store.record_incident("fp", now=6000.0)
+    (rec,) = store.incidents()
+    assert rec["first_seen"] == 5000.0    # first timed sighting, not overwritten by 6000
+    assert rec["last_seen"] == 6000.0
+
+
+def test_incident_first_seen_round_trips_through_disk(tmp_path):
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", now=1234.5)
+    s1.save()
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec["first_seen"] == 1234.5
+
+
+def test_incident_record_without_first_seen_loads_as_none(tmp_path):
+    # A store written before first_seen existed loads with the key absent — additive schema,
+    # no STORE_VERSION bump (mirrors the last_seen back-compat contract).
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {"fp": {"count": 2, "severity": "high", "last_seen": 42.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (rec,) = BaselineStore.load(p).incidents()
+    assert "first_seen" not in rec
+    assert rec["last_seen"] == 42.0

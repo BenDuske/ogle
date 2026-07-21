@@ -55,6 +55,7 @@ class _IncidentRecord:
     datasets: int = 0                # number of datasets in the incident at last sighting
     serving: bool = False            # whether a serving path was impacted at last sighting
     last_seen: Optional[float] = None  # epoch-seconds of the most recent sighting (None = legacy/untimed)
+    first_seen: Optional[float] = None  # epoch-seconds of the FIRST sighting — the incident's longevity/standing (None = legacy/untimed)
 
     def to_dict(self) -> dict:
         # Serialize provenance only when set so an old bare-count record round-trips
@@ -70,11 +71,14 @@ class _IncidentRecord:
             d["serving"] = True
         if self.last_seen is not None:
             d["last_seen"] = self.last_seen
+        if self.first_seen is not None:
+            d["first_seen"] = self.first_seen
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "_IncidentRecord":
         ls = data.get("last_seen")
+        fs = data.get("first_seen")
         return cls(
             count=int(data.get("count", 0)),
             severity=data.get("severity"),
@@ -82,6 +86,7 @@ class _IncidentRecord:
             datasets=int(data.get("datasets", 0)),
             serving=bool(data.get("serving", False)),
             last_seen=float(ls) if ls is not None else None,
+            first_seen=float(fs) if fs is not None else None,
         )
 
 
@@ -196,6 +201,13 @@ class BaselineStore:
         always refreshed when supplied — last_seen means *most recent* sighting — but a
         `now=None` call never clears a timestamp an earlier call set, so an untimed dedup
         ping can't erase age history (mirrors the provenance-refresh rule above).
+
+        The same `now` stamps `first_seen` *set-if-absent* — the incident's longevity axis
+        (`ogle incidents` "first seen X ago"). Unlike last_seen it is written once and never
+        moved, so it measures the whole standing life of the drift (first detection → now),
+        not the latest sighting. It's dropped only when the incident is forgotten/resolved.
+        A first timed sighting on an incident whose earlier sightings were untimed backfills
+        first_seen to that clock (best available), never overwriting a stamp already set.
         """
         rec = self.seen_incidents.get(fingerprint)
         if rec is None:
@@ -209,6 +221,8 @@ class BaselineStore:
             rec.serving = serving
         if now is not None:
             rec.last_seen = now
+            if rec.first_seen is None:
+                rec.first_seen = now
         return rec.count
 
     def forget_incident(self, fingerprint: str) -> None:

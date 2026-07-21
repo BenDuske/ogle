@@ -1817,9 +1817,23 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         else:
             age = _fmt_age(now - ls)
             apart = f" · last seen {age}" if age == "just now" else f" · last seen {age} ago"
+        # Longevity axis — how long this drift has been STANDING since its first sighting.
+        # Only rendered once it has recurred (count ≥ 2): on a single sighting first == last,
+        # so it would just echo the "last seen" age. A festering incident (first seen 3w ago)
+        # reads differently from a burst seen 5× in an hour, which `count` alone can't convey.
+        # Omitted on legacy/untimed records rather than faking an age; leads `apart` so the
+        # pair reads chronologically ("first seen 3w ago · last seen 2h ago").
+        fs = r.get("first_seen")
+        if count >= 2 and fs is not None:
+            fage = _fmt_age(now - fs)
+            fpart = (
+                f" · first seen {fage}" if fage == "just now" else f" · first seen {fage} ago"
+            )
+        else:
+            fpart = ""
         title = r.get("title") or "(drift)"
         _emit(
-            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{apart}  `{r['fingerprint']}`"
+            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{fpart}{apart}  `{r['fingerprint']}`"
         )
     if gate_rc and not args.json:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")

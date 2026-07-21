@@ -461,6 +461,14 @@ Each incident line carries the **age of its most recent sighting** (`last seen 3
 recurring, still-happening problem apart from one that quietly stopped. Incidents remembered by an
 older Ogle (before age-tracking) simply omit the age rather than fake one.
 
+Once a drift has **recurred** (seen ≥2×), the line also carries **how long it has been standing**
+since its *first* sighting (`first seen 2w ago · last seen 3h ago`) — the **longevity** axis. This
+is written once at first detection and never moved, so it measures the whole life of the drift,
+which recurrence `count` alone can't: a burst seen 5× in an hour and a drift festering unresolved
+for three weeks both read as "seen 5×" without it. A single-sighting incident omits the clause
+(first == last, so it would just echo "last seen"); `--json` still carries the raw `first_seen`
+epoch for every timed record (`null`/absent on a legacy store), alongside `last_seen`.
+
 `--summary` collapses the (filtered) set into an aggregate rollup — total remembered, the
 severity break-out, the serving-path count with its own severity split, recurring / total
 sightings, and the **open-drift age span** (`oldest open drift: 12d ago · freshest: 30m ago`):
