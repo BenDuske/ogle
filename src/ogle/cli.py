@@ -1729,11 +1729,22 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # can't disagree) and returns `None` on a legacy/untimed store rather than a fabricated
         # age.
         age_bounds = _incident_age_bounds(records, now)
+        # Longevity twin of the recency bounds: the longest-STANDING / newest incident by
+        # first_seen (how long the drift has been standing), the rollup of the per-incident
+        # "first seen X ago" axis and parity with the ogle_incidents_first_seen_*_age_seconds
+        # gauges. `None` on a legacy/untimed store, same as age_bounds.
+        standing_bounds = _incident_standing_bounds(records, now)
         if args.json:
             summary_out = dict(summary)
             summary_out["oldest_incident_age_seconds"] = age_bounds[1] if age_bounds else None
             summary_out["freshest_incident_age_seconds"] = (
                 age_bounds[0] if age_bounds else None
+            )
+            summary_out["longest_standing_incident_age_seconds"] = (
+                standing_bounds[1] if standing_bounds else None
+            )
+            summary_out["newest_incident_standing_age_seconds"] = (
+                standing_bounds[0] if standing_bounds else None
             )
             _emit(json.dumps({"summary": summary_out}, indent=2, sort_keys=True))
             return gate_rc
@@ -1772,6 +1783,18 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             _emit(
                 f"- ⏳ oldest open drift: {_fmt_age(stale_age)} ago · "
                 f"freshest: {_fmt_age(fresh_age)} ago"
+            )
+        # Longevity twin of the recency line above: how long the drift has been STANDING
+        # (from first_seen), not how recently it recurred. The longest-standing leads because
+        # an incident whose standing age dwarfs its "oldest open drift" recency is chronic —
+        # recurring lately but first seen long ago, the festering problem never resolved.
+        # Same first_seen the per-incident "first seen X ago" line reads; skipped on a
+        # legacy/untimed store (no fabricated age).
+        if standing_bounds is not None:
+            new_standing, longest_standing = standing_bounds
+            _emit(
+                f"- 📈 longest-standing: {_fmt_age(longest_standing)} ago · "
+                f"newest: {_fmt_age(new_standing)} ago"
             )
         _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
@@ -1892,6 +1915,33 @@ def _incident_age_bounds(
     return min(ages), max(ages)
 
 
+def _incident_standing_bounds(
+    records: List[dict], now: float
+) -> Optional[Tuple[float, float]]:
+    """Youngest/oldest incident STANDING age (seconds) over incidents with a known `first_seen`.
+
+    The `first_seen` twin of `_incident_age_bounds` (which reads `last_seen`). Returns
+    `(min_age, max_age)` — the most-recently-*first-appeared* incident's standing age and the
+    *longest-standing* incident's age — or `None` when no incident carries a `first_seen` (a
+    store of only legacy/untimed dedups). Where the last_seen bounds measure RECENCY (how
+    recently drift recurred), these measure LONGEVITY (how long the drift has been standing
+    since it first appeared) — the rollup-level counterpart to the per-incident "first seen X
+    ago" line. Because `first_seen <= last_seen` always, the longest-standing age is `>=` the
+    stalest last_seen age, so the two together reveal a chronic incident: drift seen minutes
+    ago (fresh recency) that first appeared weeks ago (long standing) — a flat count, or the
+    recency bound alone, can't. Same clock-skew clamp to 0, and reuses the exact `first_seen`
+    field the per-incident view renders so the rollup and the list can never disagree.
+    """
+    ages = [
+        max(0.0, now - float(r["first_seen"]))
+        for r in records
+        if r.get("first_seen") is not None
+    ]
+    if not ages:
+        return None
+    return min(ages), max(ages)
+
+
 def _baseline_age_bounds(store: "BaselineStore", now: float) -> dict:
     """Freshest/stalest baseline capture age + the unknown-age coverage gap.
 
@@ -1988,6 +2038,7 @@ def _render_prometheus(
     store_age: Optional[float] = None,
     mute_breakdown: Optional[dict] = None,
     baseline_age: Optional[dict] = None,
+    standing_bounds: Optional[Tuple[float, float]] = None,
 ) -> str:
     """Render the store rollup as Prometheus text exposition format (v0.0.4).
 
@@ -2119,6 +2170,32 @@ def _render_prometheus(
         "Age of the longest-quiet incident (stalest — resolve/forget candidate).",
         stale_samples,
     )
+    # Standing age of the drift memory: the `first_seen` twin of the last_seen gauges above.
+    # Where last_seen measures RECENCY (how recently drift recurred), this measures LONGEVITY
+    # (how long the drift has been standing since it first appeared) — the rollup counterpart
+    # to the per-incident "first seen X ago" line. `max` is the chronic signal: an incident
+    # whose standing age dwarfs its last_seen age is drift recurring right now that first
+    # appeared long ago (alert `ogle_incidents_first_seen_max_age_seconds` climbing past a
+    # weeks threshold = a festering problem never resolved). Because first_seen <= last_seen,
+    # this max is always >= ogle_incidents_last_seen_max_age_seconds. Both families declare
+    # HELP/TYPE always for a stable scrape shape but emit NO sample on an all-untimed store —
+    # an honest "no data" over a fabricated zero, mirroring the last_seen gauges.
+    standing_new_samples: list = []
+    standing_old_samples: list = []
+    if standing_bounds is not None:
+        st_min, st_max = standing_bounds
+        standing_new_samples = [(None, f"{st_min:g}")]
+        standing_old_samples = [(None, f"{st_max:g}")]
+    family(
+        "ogle_incidents_first_seen_min_age_seconds",
+        "Standing age of the most recently first-seen incident (newest drift).",
+        standing_new_samples,
+    )
+    family(
+        "ogle_incidents_first_seen_max_age_seconds",
+        "Standing age of the longest-standing incident (first appeared longest ago — chronic).",
+        standing_old_samples,
+    )
     # Baseline capture-age: the watch-list analog of the incident age gauges. `oldest` is the
     # orphan signal — a baseline whose signature stopped refreshing means Ogle no longer sees
     # that URN (dropped from the walk / renamed / de-provisioned) while its baseline lingers,
@@ -2188,6 +2265,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     inc = _incident_summary(records)
     muted = store.muted(now)  # active snoozes only (expired excluded)
     age_bounds = _incident_age_bounds(records, now)
+    standing_bounds = _incident_standing_bounds(records, now)
     store_age = _store_file_age(Path(args.store), now)
     mute_breakdown = _mute_breakdown(store, now)
     baseline_age = _baseline_age_bounds(store, now)
@@ -2200,6 +2278,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         store_age,
         mute_breakdown,
         baseline_age,
+        standing_bounds,
     )
     out = getattr(args, "output", None)
     if out:
@@ -2238,6 +2317,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     # forgotten resolve-candidate festering for weeks (stalest = 12d) — a flat count can't.
     # `None` on a legacy/untimed store, in which case no age line/field is emitted.
     age_bounds = _incident_age_bounds(incident_records, now)
+    # Longevity twin of age_bounds: the longest-STANDING / newest incident by first_seen (how
+    # long drift has been standing since first appearing), not how recently it recurred. Same
+    # first_seen the per-incident `ogle incidents` "first seen X ago" line and the
+    # ogle_incidents_first_seen_*_age_seconds gauges read, so snapshot, list, and gauge can't
+    # disagree. `None` on a legacy/untimed store, in which case no standing line/field is emitted.
+    standing_bounds = _incident_standing_bounds(incident_records, now)
     # Heartbeat: seconds since the store file was last written = since `ogle check` last ran.
     # Every count above describes DRIFT; this one describes OGLE ITSELF. If the scheduled check
     # crash-loops or its cron is removed, all those levels freeze at their last value while the
@@ -2289,6 +2374,16 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "oldest_incident_age_seconds": age_bounds[1] if age_bounds else None,
                         "freshest_incident_age_seconds": (
                             age_bounds[0] if age_bounds else None
+                        ),
+                        # Longest-standing / newest incident STANDING age in seconds (from
+                        # first_seen; null on an untimed store). Parity with the
+                        # ogle_incidents_first_seen_*_age_seconds gauges — the longevity axis,
+                        # distinct from the last_seen recency fields above.
+                        "longest_standing_incident_age_seconds": (
+                            standing_bounds[1] if standing_bounds else None
+                        ),
+                        "newest_incident_standing_age_seconds": (
+                            standing_bounds[0] if standing_bounds else None
                         ),
                         # Seconds since the store file was last written (null before the
                         # first check). Parity with the ogle_store_age_seconds gauge —
@@ -2380,6 +2475,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         _emit(
             f"- ⏳ oldest open drift: {_fmt_age(stale_age)} ago · "
             f"freshest: {_fmt_age(fresh_age)} ago"
+        )
+    # Longevity twin of the recency line above: how long the drift has been STANDING (from
+    # first_seen), not how recently it recurred. The longest-standing leads because an incident
+    # whose standing age dwarfs its "oldest open drift" recency is chronic — recurring lately
+    # but first seen long ago, the festering problem never resolved. Same first_seen the
+    # per-incident "first seen X ago" line reads; skipped on a legacy/untimed store.
+    if standing_bounds is not None:
+        new_standing, longest_standing = standing_bounds
+        _emit(
+            f"- 📈 longest-standing: {_fmt_age(longest_standing)} ago · "
+            f"newest: {_fmt_age(new_standing)} ago"
         )
     # Break the mute count into its two risk kinds so a permanent standing blind spot never
     # hides inside a bland "N active". Only shown when something is muted; the ⛔ permanent

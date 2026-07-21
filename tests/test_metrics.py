@@ -7,6 +7,7 @@ suffix, label escaping) and the numeric values against a known store.
 """
 
 import json
+import time
 
 from ogle.cli import _render_prometheus, build_parser, main
 from ogle.signature import build_signature
@@ -97,6 +98,8 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_muted_snooze_next_expiry_seconds",
         "ogle_incidents_last_seen_min_age_seconds",
         "ogle_incidents_last_seen_max_age_seconds",
+        "ogle_incidents_first_seen_min_age_seconds",
+        "ogle_incidents_first_seen_max_age_seconds",
         "ogle_baseline_newest_capture_age_seconds",
         "ogle_baseline_oldest_capture_age_seconds",
         "ogle_baseline_capture_age_unknown",
@@ -415,6 +418,87 @@ def test_metrics_cli_emits_age_sample_for_timed_incident(tmp_path, capsys):
     lo = float(samples["ogle_incidents_last_seen_min_age_seconds"])
     hi = float(samples["ogle_incidents_last_seen_max_age_seconds"])
     assert hi >= lo > 0  # a single ancient incident: both large, max >= min
+
+
+# ---- incident standing-age gauges (longevity axis, from first_seen) ----------------
+def test_standing_bounds_none_when_no_timed_incidents():
+    from ogle.cli import _incident_standing_bounds
+
+    # legacy/untimed incidents (no first_seen) → no standing series at all
+    assert _incident_standing_bounds([{"count": 1}, {"count": 2}], now=100.0) is None
+
+
+def test_standing_bounds_min_is_newest_max_is_longest_standing():
+    from ogle.cli import _incident_standing_bounds
+
+    now = 1000.0
+    records = [
+        {"first_seen": 990.0},  # 10s ago — newest first appearance
+        {"first_seen": 700.0},  # 300s ago — longest-standing
+        {"first_seen": 950.0},  # 50s ago
+        {"count": 1},           # untimed — ignored
+    ]
+    assert _incident_standing_bounds(records, now) == (10.0, 300.0)
+
+
+def test_standing_bounds_clamps_future_stamp_to_zero():
+    from ogle.cli import _incident_standing_bounds
+
+    # a first_seen in the future (clock skew) reads as age 0, never negative
+    assert _incident_standing_bounds([{"first_seen": 1050.0}], now=1000.0) == (0.0, 0.0)
+
+
+def test_render_emits_standing_gauges_when_timed():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        standing_bounds=(10.0, 300.0),
+    )
+    samples, types, _ = _parse_prom(text)
+    assert types["ogle_incidents_first_seen_min_age_seconds"] == "gauge"
+    assert types["ogle_incidents_first_seen_max_age_seconds"] == "gauge"
+    assert samples["ogle_incidents_first_seen_min_age_seconds"] == "10"
+    assert samples["ogle_incidents_first_seen_max_age_seconds"] == "300"
+
+
+def test_render_declares_standing_gauges_but_no_sample_when_untimed():
+    text = _render_prometheus(
+        {"watching": 0, "fields": 0, "rows": 0, "unknown_rows": 0},
+        _inc_summary([]),
+        0,
+        "s.json",
+        standing_bounds=None,
+    )
+    _, types, helps = _parse_prom(text)
+    # HELP/TYPE still declared (stable scrape shape) ...
+    assert "ogle_incidents_first_seen_min_age_seconds" in helps
+    assert "ogle_incidents_first_seen_max_age_seconds" in types
+    # ... but NO value line is emitted (honest "no data", not a fake zero age)
+    for ln in text.splitlines():
+        assert not (
+            ln
+            and not ln.startswith("#")
+            and ln.split()[0].startswith("ogle_incidents_first_seen_")
+        )
+
+
+def test_metrics_cli_standing_age_max_exceeds_recency_for_chronic(tmp_path, capsys):
+    # A chronic incident first seen long ago but re-seen recently: its standing (first_seen)
+    # max must exceed its recency (last_seen) max — the whole point of the longevity axis.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    now = time.time()
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 14 * 86400)
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 3600)
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    standing_max = float(samples["ogle_incidents_first_seen_max_age_seconds"])
+    recency_max = float(samples["ogle_incidents_last_seen_max_age_seconds"])
+    assert standing_max >= 14 * 86400 - 60
+    assert standing_max > recency_max  # standing dwarfs recency for a chronic incident
 
 
 # ---- baseline capture-age gauges (orphan detection / watch-list staleness) ---------

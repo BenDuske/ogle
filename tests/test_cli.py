@@ -1597,6 +1597,73 @@ def test_incidents_summary_json_exposes_open_drift_age(tmp_path, capsys):
     assert summary2["freshest_incident_age_seconds"] is None
 
 
+def test_incidents_summary_surfaces_standing_age(tmp_path, capsys):
+    # Longevity axis (from first_seen) is distinct from recency (from last_seen): a chronic
+    # incident first seen 14d ago but recurring 1h ago has a SHORT recency and a LONG standing
+    # age. The rollup must surface both so "recurring lately but festering for weeks" is
+    # visible — the flat count and the recency line alone can't say it.
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    now = time.time()
+    # Chronic: first seen 14d ago, re-seen 1h ago (two sightings → first_seen pinned to 14d).
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 14 * 86400)
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 3600)
+    # Fresh single sighting 2h ago (first_seen == last_seen == 2h).
+    s.record_incident("fresh", severity="low", title="F", datasets=1, now=now - 2 * 3600)
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary"]) == 0
+    out = capsys.readouterr().out
+    # Recency: stalest last_seen = 2h (fresh incident), freshest = 1h (chronic re-seen).
+    assert "oldest open drift: 2h ago" in out
+    # Standing: longest first_seen = 2w (chronic), newest = 2h (fresh) — diverges from recency.
+    assert "longest-standing: 2w ago" in out
+    assert "newest: 2h ago" in out
+
+
+def test_incidents_summary_standing_line_suppressed_on_untimed_store(tmp_path, capsys):
+    # A legacy/untimed incident carries no first_seen → no standing age; the line is omitted
+    # rather than fabricated, mirroring the recency line.
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    s.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary"]) == 0
+    assert "longest-standing" not in capsys.readouterr().out
+
+
+def test_incidents_summary_json_exposes_standing_age(tmp_path, capsys):
+    # --summary --json carries the raw standing bounds (seconds) under the same key names
+    # status' --json uses, so a monitor reads one shape across both commands; null on an
+    # untimed store so "no data" is distinguishable from "age 0".
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    now = time.time()
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 14 * 86400)
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 3600)
+    s.record_incident("fresh", severity="low", title="F", datasets=1, now=now - 2 * 3600)
+    s.save()
+    assert main(["incidents", "--store", str(store), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    # Longest-standing = chronic's first_seen age (~14d); newest = fresh's (~2h).
+    assert summary["longest_standing_incident_age_seconds"] >= 14 * 86400 - 5
+    assert 2 * 3600 - 5 <= summary["newest_incident_standing_age_seconds"] <= 2 * 3600 + 60
+    # Standing >= recency always (first_seen <= last_seen): the chronic incident proves it.
+    assert (
+        summary["longest_standing_incident_age_seconds"]
+        >= summary["oldest_incident_age_seconds"]
+    )
+
+    # Null on an untimed store rather than a fabricated 0.
+    store2 = tmp_path / "b2.json"
+    s2 = BaselineStore(path=store2)
+    s2.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s2.save()
+    assert main(["incidents", "--store", str(store2), "--summary", "--json"]) == 0
+    summary2 = json.loads(capsys.readouterr().out)["summary"]
+    assert summary2["longest_standing_incident_age_seconds"] is None
+    assert summary2["newest_incident_standing_age_seconds"] is None
+
+
 def test_incidents_summary_unknown_severity_bucket(tmp_path, capsys):
     # A legacy bare-count record (no severity) lands in the `unknown` bucket, not dropped.
     store_path = tmp_path / "baselines.json"
@@ -2588,6 +2655,71 @@ def test_status_json_age_seconds_null_on_untimed_store(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)["status"]
     assert payload["oldest_incident_age_seconds"] is None
     assert payload["freshest_incident_age_seconds"] is None
+
+
+def test_status_surfaces_standing_age_bounds(tmp_path, capsys):
+    # The snapshot must surface LONGEVITY (from first_seen) alongside RECENCY (from last_seen):
+    # a chronic incident first seen 14d ago but re-seen 1h ago has a short recency and a long
+    # standing age. The longest-standing leads (the festering-problem signal). Here a chronic
+    # incident (first 14d ago, re-seen 1h) + a fresh single sighting (2h) → oldest open drift
+    # 2h, but longest-standing 2w — the two axes diverge.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    now = time.time()
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 14 * 86400)
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 3600)
+    s.record_incident("fresh", severity="low", title="F", datasets=1, now=now - 2 * 3600)
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "oldest open drift: 2h ago" in out
+    assert "longest-standing: 2w ago" in out
+    assert "newest: 2h ago" in out
+
+
+def test_status_standing_line_suppressed_on_untimed_store(tmp_path, capsys):
+    # No first_seen on a legacy/untimed incident → no standing age; the line is omitted, not
+    # fabricated, mirroring the recency line.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "longest-standing" not in capsys.readouterr().out
+
+
+def test_status_json_exposes_standing_age_seconds(tmp_path, capsys):
+    # --json carries the raw standing bounds (seconds), matching the first_seen gauges + the
+    # incidents --summary keys; null on an untimed store so "no data" != "age 0".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    now = time.time()
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 14 * 86400)
+    s.record_incident("chronic", severity="high", title="C", datasets=1, now=now - 3600)
+    s.record_incident("fresh", severity="low", title="F", datasets=1, now=now - 2 * 3600)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["longest_standing_incident_age_seconds"] >= 14 * 86400 - 5
+    assert 2 * 3600 - 5 <= payload["newest_incident_standing_age_seconds"] <= 2 * 3600 + 60
+    # Standing >= recency (first_seen <= last_seen).
+    assert (
+        payload["longest_standing_incident_age_seconds"]
+        >= payload["oldest_incident_age_seconds"]
+    )
+
+    store2 = tmp_path / "b2.json"
+    s2 = _seed_baselines(store2)
+    s2.record_incident("untimed", severity="low", title="U", datasets=1)  # no now=
+    s2.save()
+    rc = main(["status", "--store", str(store2), "--json"])
+    assert rc == 0
+    payload2 = json.loads(capsys.readouterr().out)["status"]
+    assert payload2["longest_standing_incident_age_seconds"] is None
+    assert payload2["newest_incident_standing_age_seconds"] is None
 
 
 def test_status_surfaces_store_age_heartbeat(tmp_path, capsys):

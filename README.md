@@ -246,7 +246,10 @@ Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_field
 `ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` / `_sightings`,
 `ogle_muted_active` (split into
 `ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
-incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the baseline
+incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the incident
+standing ages (`ogle_incidents_first_seen_{min,max}_age_seconds` — the longevity twin: alert
+`ogle_incidents_first_seen_max_age_seconds` climbing past a weeks threshold to page on a
+chronic, never-resolved incident), the baseline
 capture ages (`ogle_baseline_{newest,oldest}_capture_age_seconds` + the `ogle_baseline_capture_age_unknown`
 coverage gap), and a monitor heartbeat `ogle_store_age_seconds`. The numbers are the same rollups `status` prints (verified against
 `status --json` in the test suite), so a Grafana panel and the CLI snapshot never disagree.
@@ -477,6 +480,17 @@ identically and an operator can tell a live incident (freshest = minutes) from a
 festering for weeks (stalest = 12d) without leaving the summary. `--json` carries the raw seconds
 as `oldest_incident_age_seconds`/`freshest_incident_age_seconds` (both `null` on a legacy/untimed
 store — "no data", never a fabricated age).
+
+Alongside that recency span, the rollup also carries the **standing-age span** — the rollup-level
+counterpart to the per-incident longevity axis: `longest-standing: 3w ago · newest: 3h ago`, the
+oldest/newest `first_seen`-derived ages. Where the recency span says how recently drift *recurred*,
+this says how long it has been *standing* since first appearing, so a chronic incident recurring
+30m ago but first seen three weeks ago (`oldest open drift: 30m ago` yet `longest-standing: 3w ago`)
+reads as the festering problem it is — the two spans diverge exactly when it matters. Because
+`first_seen ≤ last_seen`, the longest-standing age is always ≥ the stalest recency age. `--json`
+carries `longest_standing_incident_age_seconds`/`newest_incident_standing_age_seconds` (`null` on an
+untimed store), and `ogle status` prints the same line + fields so snapshot and summary stay in
+lockstep.
 
 The `--min-severity {low,medium,high}`, `--serving-only`, and `--min-count N` filters mirror
 `check --fail-on` so a busy operator can focus on what pages first — `--min-count` surfaces the
