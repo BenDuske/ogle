@@ -308,3 +308,69 @@ def test_watch_parser_registered():
     ns = parser.parse_args(["watch", "--page-on-error", "--", "--signatures", "s.json"])
     assert ns.page_on_error is True
     assert ns.check_args == ["--signatures", "s.json"]
+
+
+def test_watch_json_flag_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(["watch", "--json", "--", "--signatures", "s.json"])
+    assert ns.json is True
+    # default off, so a bare `watch` keeps the human line
+    ns2 = parser.parse_args(["watch", "--", "--signatures", "s.json"])
+    assert ns2.json is False
+
+
+# ---- `ogle watch --json`: structured tick outcome for a scheduler -----------------
+def test_watch_json_healthy_tick(tmp_path, capsys):
+    """A healthy tick emits JSON (not the human line) with exit_rc 0 and nothing paged."""
+    sig = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig])
+    store = tmp_path / "store.json"
+    code = main(["watch", "--json", "--", "--store", str(store), "--signatures", str(sigs)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "ogle watch: healthy" not in out  # human line suppressed in JSON mode
+    payload = json.loads(out)["watch"]
+    assert payload["action"] == "ok"
+    assert payload["exit_rc"] == 0
+    assert payload["paged"] is False
+    assert payload["delivery_failed"] is False
+    assert payload["delivery_error"] == ""
+
+
+def test_watch_json_carries_delivery_failed_on_broken_pager(tmp_path, capsys, monkeypatch):
+    """A real incident with an un-spawnable pager: exit_rc 1, paged True, delivery_failed True,
+    and a non-empty delivery_error — the silently-dropped-page signal, machine-readable."""
+    monkeypatch.setattr("ogle.watch.subprocess.run", lambda *a, **k: _completed(127))
+    store = tmp_path / "store.json"
+    sig1 = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig1])
+    # seed the baseline (exit 0)
+    main(["watch", "--json", "--", "--store", str(store), "--signatures", str(sigs)])
+    # drop a column -> HIGH schema drift -> new incident -> page attempted
+    sig2 = build_signature(CUSTOMERS_URN, schema_fields=[], row_count=10)
+    _write_sigs(tmp_path / "s.json", [sig2])
+    capsys.readouterr()  # clear
+    code = main(
+        [
+            "watch",
+            "--json",
+            "--notify-cmd",
+            "does-not-matter",
+            "--",
+            "--store",
+            str(store),
+            "--signatures",
+            str(sigs),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    payload = json.loads(captured.out)["watch"]
+    assert payload["action"] == "page"
+    assert payload["exit_rc"] == 1
+    assert payload["paged"] is True
+    assert payload["page_delivered"] is False
+    assert payload["delivery_failed"] is True
+    assert payload["delivery_error"]  # non-empty reason
+    # the page still fell back to a loud stderr block (never silently lost)
+    assert "PAGE" in captured.err

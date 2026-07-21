@@ -744,6 +744,38 @@ your scheduler swallows stderr. Example cron line (every 15 min):
   --store /var/lib/ogle/baselines.json --gms http://localhost:8080 --discover
 ```
 
+**Structured output for a monitor (`--json`).** A scheduler that wants to gate on the
+tick without scraping the human line adds `--json`: the outcome goes to stdout as one
+object, the `PAGE:` fallback and delivery-failure notice still go to stderr, and the
+`ogle check` exit code is preserved.
+
+```bash
+ogle watch --json --notify-cmd /usr/local/bin/page-me -- \
+  --store baselines.json --signatures my-signatures.json
+```
+
+```json
+{
+  "watch": {
+    "action": "page",
+    "exit_rc": 1,
+    "paged": true,
+    "page_delivered": false,
+    "delivery_error": "could not run notifier ['page-me']: ...",
+    "delivery_failed": true,
+    "report_text": "## 🔴 HIGH drift across 1 dataset ...",
+    "error_text": ""
+  }
+}
+```
+
+`delivery_failed` is the load-bearing field: `true` means a page was dispatched but never
+delivered (the silently-dropped-alert failure the stderr marker also flags) — gate on it
+directly instead of parsing prose. `exit_rc` folds the `ogle check` contract into the
+payload so the verdict survives a stdout capture forwarded over a log/message bus, and
+`report_text` carries the same narrative the notifier would have — a JSON consumer can
+forward the drift story itself.
+
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md).

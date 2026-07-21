@@ -27,6 +27,7 @@ an operator wires their own pager (e.g. an OpenClaw `message send`).
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -191,6 +192,12 @@ def build_watch_args(parser_sub) -> None:
         help="Also page when the check exits 2 (input/live-walk failure). "
         "Default: log the error but do not page.",
     )
+    watch.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the tick outcome as JSON on stdout instead of the human status line "
+        "(exit code preserved). Carries the delivery_failed signal a scheduler can gate on.",
+    )
     # Everything after `--` is forwarded verbatim to `ogle check`.
     watch.add_argument(
         "check_args",
@@ -210,15 +217,50 @@ def cmd_watch(args) -> int:
         notifier=notifier,
         page_on_error=args.page_on_error,
     )
+    # A dispatched-but-undelivered page is an operational failure the scheduler must see:
+    # the exit code still honors the `ogle check` contract, but a broken pager must not hide
+    # behind a green "PAGED" status. In JSON mode the delivery_failed field carries it (stdout,
+    # machine-readable); in human mode a loud stderr line does. Computed once, surfaced either way.
+    delivery_failed = outcome.paged and not outcome.page_delivered
+
+    if getattr(args, "json", False):
+        # Structured twin of the human line for a scheduler/monitor wrapping `ogle watch`:
+        # the exit-code contract folded into exit_rc, plus the delivery_failed signal that
+        # otherwise only lives as scraped stderr text — so a wrapper can gate on a silently
+        # dropped page (paged but never delivered) without parsing prose. The narrative and
+        # captured stderr ride along so a JSON consumer can forward the drift story itself,
+        # the same text the notifier would have carried. exit_rc mirrors `status --json`'s
+        # folded verdict: it survives when the process exit code is lost over a log/message bus.
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "watch": {
+                        "action": outcome.action,      # ok | page | error
+                        "exit_rc": outcome.code,       # the preserved `ogle check` exit code
+                        "paged": outcome.paged,        # a page was dispatched this tick
+                        "page_delivered": outcome.page_delivered,
+                        "delivery_error": outcome.delivery_error,
+                        # Folded production-failure signal: dispatched but never delivered.
+                        # nonempty delivery_error iff this is true; distinct from a healthy
+                        # tick that never paged (paged False → delivery_failed False).
+                        "delivery_failed": delivery_failed,
+                        "report_text": outcome.report_text,
+                        "error_text": outcome.error_text,
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        return outcome.code
+
     # A single machine-greppable status line for the scheduler's own logs.
     status = {"ok": "healthy", "page": "PAGED (new incident)", "error": "check error"}[
         outcome.action
     ]
     sys.stdout.write(f"ogle watch: {status} (exit {outcome.code})\n")
-    # A dispatched-but-undelivered page is an operational failure the scheduler must see:
-    # the exit code still honors the `ogle check` contract, but this loud stderr line means
-    # a broken pager can't hide behind a green "PAGED" status.
-    if outcome.paged and not outcome.page_delivered:
+    if delivery_failed:
         sys.stderr.write(
             f"ogle watch: PAGE DELIVERY FAILED — {outcome.delivery_error}\n"
         )
