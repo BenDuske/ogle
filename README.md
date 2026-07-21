@@ -758,6 +758,19 @@ ogle watch --notify-cmd /usr/local/bin/page-me --notify-retries 2 -- \
   --store baselines.json --signatures my-signatures.json
 ```
 
+**Bounding a hung pager (`--notify-timeout`).** A retry rides out a pager that *fails*
+fast, but a pager that *hangs* — a network send with no timeout of its own — would wedge
+the whole watch tick and stall the scheduler behind it. `--notify-timeout SECONDS` bounds
+each delivery attempt: the pager child is killed at the limit and the timeout is treated as
+a transient failure, so it flows through the same fallback and — paired with
+`--notify-retries` — is re-attempted rather than dropped. Applies only to `--notify-cmd`;
+default is no limit.
+
+```bash
+ogle watch --notify-cmd /usr/local/bin/page-me --notify-timeout 15 --notify-retries 2 -- \
+  --store baselines.json --signatures my-signatures.json
+```
+
 **Structured output for a monitor (`--json`).** A scheduler that wants to gate on the
 tick without scraping the human line adds `--json`: the outcome goes to stdout as one
 object, the `PAGE:` fallback and delivery-failure notice still go to stderr, and the

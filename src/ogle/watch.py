@@ -89,7 +89,9 @@ def _stderr_notifier(text: str) -> None:
     sys.stderr.write("PAGE: ogle drift incident\n" + text + "\n")
 
 
-def make_command_notifier(notify_cmd: Sequence[str]) -> Notifier:
+def make_command_notifier(
+    notify_cmd: Sequence[str], *, timeout: Optional[float] = None
+) -> Notifier:
     """Build a notifier that shells `notify_cmd`, handing the page text on stdin.
 
     This is the seam an operator uses to reach a real pager without Ogle depending on it:
@@ -99,12 +101,31 @@ def make_command_notifier(notify_cmd: Sequence[str]) -> Notifier:
     isn't on PATH) or that exits non-zero raises `NotifyError`. `run_tick` catches that and
     falls back to a loud stderr page, so a broken pager surfaces as a *visible* delivery
     failure instead of a silently-dropped alert reported as "PAGED".
+
+    `timeout` (seconds) bounds each delivery attempt: a pager command that *hangs* — a
+    network send with no timeout of its own — would otherwise wedge the whole watch tick and
+    stall the scheduler. A timed-out attempt raises `NotifyError` (killing the child first),
+    so it flows through the same fallback + retry path as any other transient delivery
+    failure — a hang is exactly the kind of blip `--notify-retries` should ride out. Default
+    None = wait indefinitely (unchanged behavior).
     """
     cmd = list(notify_cmd)
 
     def _notify(text: str) -> None:
+        # encoding is pinned to UTF-8 (not the process locale): the narrative carries emoji
+        # severity markers (🔴/🟠), and piping them to the child via the default cp1252 stdin
+        # on a Windows console raises UnicodeEncodeError — a crash that would masquerade as a
+        # pager failure. errors="replace" keeps a stray un-encodable byte from ever dropping
+        # a page. (Mirrors the encoding-safe _emit used for the CLI's own stdout.)
+        run_kwargs = dict(input=text, encoding="utf-8", errors="replace", check=False)
+        if timeout is not None:
+            run_kwargs["timeout"] = timeout
         try:
-            proc = subprocess.run(cmd, input=text, text=True, check=False)
+            proc = subprocess.run(cmd, **run_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            # A hung pager: subprocess.run has already killed the child before re-raising.
+            # Treat as a transient delivery failure so retries/fallback handle it.
+            raise NotifyError(f"notifier {cmd!r} timed out after {timeout}s") from exc
         except OSError as exc:
             # Un-spawnable command (not found, not executable, …) — the classic silent-page
             # trap when a pager is misconfigured on a headless scheduler.
@@ -265,6 +286,15 @@ def build_watch_args(parser_sub) -> None:
         "recoverable failure isn't reported as a permanently dropped alert. Default: 0.",
     )
     watch.add_argument(
+        "--notify-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Bound each page-delivery attempt to SECONDS; a hung pager command is killed "
+        "and treated as a transient failure (so --notify-retries can re-attempt it) rather "
+        "than wedging the watch tick forever. Only applies to --notify-cmd. Default: no limit.",
+    )
+    watch.add_argument(
         "--json",
         action="store_true",
         help="Emit the tick outcome as JSON on stdout instead of the human status line "
@@ -283,12 +313,20 @@ def build_watch_args(parser_sub) -> None:
 
 def cmd_watch(args) -> int:
     """CLI handler: run one tick, print a one-line status, and PRESERVE the check's exit code."""
-    notifier = make_command_notifier(args.notify_cmd) if args.notify_cmd else None
     dry_run = getattr(args, "dry_run", False)
     notify_retries = getattr(args, "notify_retries", 0)
     if notify_retries < 0:
         sys.stderr.write("ogle watch: --notify-retries must be >= 0\n")
         return EXIT_ERROR
+    notify_timeout = getattr(args, "notify_timeout", None)
+    if notify_timeout is not None and notify_timeout <= 0:
+        sys.stderr.write("ogle watch: --notify-timeout must be > 0\n")
+        return EXIT_ERROR
+    notifier = (
+        make_command_notifier(args.notify_cmd, timeout=notify_timeout)
+        if args.notify_cmd
+        else None
+    )
     outcome = run_tick(
         args.check_args,
         notifier=notifier,

@@ -10,6 +10,7 @@ real GMS — the watch layer is pure glue over `ogle check`'s contract.
 """
 
 import json
+import subprocess
 
 import pytest
 
@@ -147,10 +148,9 @@ def _completed(returncode):
 def test_command_notifier_shells_and_passes_stdin(monkeypatch):
     calls = {}
 
-    def _fake_run(cmd, *, input, text, check):
+    def _fake_run(cmd, **kwargs):
         calls["cmd"] = cmd
-        calls["input"] = input
-        calls["check"] = check
+        calls.update(kwargs)
         return _completed(0)
 
     monkeypatch.setattr("ogle.watch.subprocess.run", _fake_run)
@@ -161,6 +161,22 @@ def test_command_notifier_shells_and_passes_stdin(monkeypatch):
     # check=False: we inspect the return code ourselves so a failing pager becomes a
     # NotifyError (visible) rather than a raised CalledProcessError (crashes the tick).
     assert calls["check"] is False
+    # stdin is encoded UTF-8, not the process locale, so an emoji-bearing narrative doesn't
+    # crash the pipe on a cp1252 Windows console.
+    assert calls["encoding"] == "utf-8"
+
+
+def test_command_notifier_pipes_emoji_narrative_without_crashing():
+    """Regression: 🔴 severity markers in the narrative must survive the stdin pipe.
+
+    Real subprocess (no mock): a locale-encoded pipe would raise UnicodeEncodeError under
+    a cp1252 console — the bug the live smoke caught. `sys.executable -c pass` is a portable
+    no-op pager that still forces the stdin encode to happen.
+    """
+    import sys
+
+    notify = make_command_notifier([sys.executable, "-c", "import sys; sys.stdin.read()"])
+    notify("🔴 HIGH drift on customers 🟠")  # must not raise
 
 
 def test_command_notifier_raises_on_nonzero_exit(monkeypatch):
@@ -582,6 +598,106 @@ def test_watch_negative_retries_rejected(tmp_path, capsys):
     )
     assert code == EXIT_ERROR
     assert "--notify-retries must be >= 0" in capsys.readouterr().err
+
+
+# ---- --notify-timeout: a hung pager must not wedge the tick -----------------------
+def test_command_notifier_passes_timeout_to_subprocess(monkeypatch):
+    """When a timeout is set it is handed to subprocess.run so the child is actually bounded."""
+    seen = {}
+
+    def _fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return _completed(0)
+
+    monkeypatch.setattr("ogle.watch.subprocess.run", _fake_run)
+    notify = make_command_notifier(["pager"], timeout=5.0)
+    notify("body")
+    assert seen["timeout"] == 5.0
+
+
+def test_command_notifier_no_timeout_omits_the_kwarg(monkeypatch):
+    """Default (no timeout): subprocess.run is called WITHOUT a timeout kwarg (wait forever)."""
+    seen = {}
+
+    def _fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return _completed(0)
+
+    monkeypatch.setattr("ogle.watch.subprocess.run", _fake_run)
+    notify = make_command_notifier(["pager"])
+    notify("body")
+    assert "timeout" not in seen  # unchanged call shape when the feature is off
+
+
+def test_command_notifier_timeout_raises_notifyerror(monkeypatch):
+    """A hung pager (TimeoutExpired) becomes a NotifyError — a transient, retryable failure."""
+
+    def _hang(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr("ogle.watch.subprocess.run", _hang)
+    notify = make_command_notifier(["pager", "--slow"], timeout=2.0)
+    with pytest.raises(NotifyError) as ei:
+        notify("body")
+    assert "timed out after 2.0s" in str(ei.value)
+
+
+def test_timeout_failure_is_retried_then_recovers(capsys):
+    """A timed-out delivery is a NotifyError, so --notify-retries rides it out and recovers."""
+    calls = {"n": 0}
+
+    def _notify(_text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # first attempt "hangs" and is surfaced as the timeout NotifyError
+            raise NotifyError("notifier ['pager'] timed out after 2.0s")
+        # second attempt lands
+
+    slept = []
+    out = run_tick(
+        [],
+        notifier=_notify,
+        notify_retries=1,
+        sleeper=slept.append,
+        run_check=_runner(EXIT_INCIDENT, stdout="HIGH drift"),
+    )
+    assert out.page_delivered is True   # recovered after the timeout blip
+    assert calls["n"] == 2
+    assert slept == [1]
+    assert "PAGE DELIVERY FAILED" not in capsys.readouterr().err
+
+
+def test_watch_notify_timeout_flag_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["watch", "--notify-timeout", "3.5", "--", "--signatures", "s.json"]
+    )
+    assert ns.notify_timeout == 3.5
+    ns2 = parser.parse_args(["watch", "--", "--signatures", "s.json"])
+    assert ns2.notify_timeout is None  # default: no limit
+
+
+def test_watch_nonpositive_timeout_rejected(tmp_path, capsys):
+    """A zero/negative --notify-timeout is a usage error (exit 2), not a silent no-op."""
+    store = tmp_path / "store.json"
+    sig = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig])
+    code = main(
+        [
+            "watch",
+            "--notify-cmd",
+            "true",
+            "--notify-timeout",
+            "0",
+            "--",
+            "--store",
+            str(store),
+            "--signatures",
+            str(sigs),
+        ]
+    )
+    assert code == EXIT_ERROR
+    assert "--notify-timeout must be > 0" in capsys.readouterr().err
 
 
 def test_watch_dry_run_human_line_says_would_page(tmp_path, capsys):
