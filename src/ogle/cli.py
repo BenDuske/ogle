@@ -2453,6 +2453,17 @@ def cmd_status(args: argparse.Namespace) -> int:
                         # first check). Parity with the ogle_store_age_seconds gauge —
                         # the monitor's own heartbeat, not a drift level.
                         "store_age_seconds": store_age,
+                        # Whether the --fail-on severity gate tripped (open drift at/above the
+                        # floor is remembered). null when --fail-on is not set, so a consumer can
+                        # tell "gate not evaluated" from "evaluated, passed" (false) — the exact
+                        # parity `heartbeat_stale` gives the heartbeat gate. exit_rc folds all
+                        # three gates into one code; without this field a JSON consumer could see
+                        # the severity gate fire ONLY by re-deriving the floor logic from
+                        # by_severity (which gate fired is otherwise unattributable), so surface
+                        # it as its own boolean the way the heartbeat/orphan gates already are.
+                        "drift_gate_tripped": (
+                            bool(gate_rc) if getattr(args, "fail_on", None) is not None else None
+                        ),
                         # Whether the --stale-after heartbeat gate tripped (store older than
                         # the threshold, or missing entirely). null when --stale-after is not
                         # set, so a consumer can tell "gate not evaluated" from "evaluated,

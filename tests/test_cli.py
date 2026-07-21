@@ -3081,6 +3081,47 @@ def test_status_json_heartbeat_stale_null_without_gate(tmp_path, capsys):
     assert payload["heartbeat_stale"] is None
 
 
+def test_status_json_exposes_drift_gate_tripped(tmp_path, capsys):
+    # Severity gate parity with heartbeat_stale: an open incident at/above the --fail-on floor
+    # sets drift_gate_tripped True and returns the combined exit, so a JSON consumer can attribute
+    # the exit to the severity gate without re-deriving the floor from by_severity.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["drift_gate_tripped"] is True
+
+
+def test_status_json_drift_gate_tripped_false_below_floor(tmp_path, capsys):
+    # Evaluated but passed: --fail-on set, only a below-floor incident → False (not null), the
+    # same "checked, healthy" signal heartbeat_stale gives on a fresh store. Exit stays 0.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("lo", severity="low", title="L", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["drift_gate_tripped"] is False
+
+
+def test_status_json_drift_gate_tripped_null_without_gate(tmp_path, capsys):
+    # Without --fail-on the field is null (gate not evaluated), distinct from false (evaluated,
+    # below floor) — so a consumer can tell "not checked" from "checked, healthy". A HIGH incident
+    # present but ungated stays exit 0, proving null tracks the gate flag, not the drift level.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["drift_gate_tripped"] is None
+
+
 def test_status_orphan_after_trips_when_a_baseline_is_stale(tmp_path, capsys):
     # The orphan gate: a baseline last refreshed LONGER ago than --orphan-after fails the run —
     # the per-dataset twin of --stale-after. The fixture's oldest capture is 10d; a 3d threshold
