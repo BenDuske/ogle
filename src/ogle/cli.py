@@ -1347,6 +1347,18 @@ _INCIDENT_SORTS = {
         r["last_seen"] if r.get("last_seen") is not None else -1.0,
         r.get("fingerprint", ""),
     ),
+    # standing — longest-STANDING first (oldest first_seen on top): the drift that has
+    # been open the longest, the longevity twin of `recent`. It reads first_seen, not
+    # last_seen, so a chronic incident first seen weeks ago leads even if it recurred a
+    # minute ago (which `recent` would bury). Oldest-first is ascending-by-first_seen, the
+    # opposite of every other key's reverse=True, so the key negates it (-first_seen) to
+    # bring the smallest/oldest epoch to the top; a record with no first_seen (legacy/
+    # untimed) can't be aged, so -inf sinks it last, mirroring how unknown last_seen sinks
+    # under `recent`. Fingerprint is the deterministic tiebreak.
+    "standing": lambda r: (
+        -r["first_seen"] if r.get("first_seen") is not None else float("-inf"),
+        r.get("fingerprint", ""),
+    ),
 }
 
 
@@ -1377,6 +1389,7 @@ def _incident_passes(
     needle: Optional[str] = None,
     stale_before: Optional[float] = None,
     fresh_after: Optional[float] = None,
+    standing_before: Optional[float] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -1394,7 +1407,13 @@ def _incident_passes(
     KNOWN and at/after that epoch cutoff — the drift still recurring lately, i.e. the
     currently-active set for live triage. A legacy/untimed record can't be proven fresh
     either, so it's likewise dropped. `stale_before` + `fresh_after` compose into a window
-    (seen between the two ages). All filters are ANDed; passing none keeps everything.
+    (seen between the two ages). `standing_before` (None = no longevity filter) is the
+    first_seen twin of `stale_before`: keeps only incidents whose FIRST sighting is KNOWN
+    and older than that epoch cutoff — long-standing drift that has been open a while,
+    regardless of how recently it recurred. Composes with `fresh_after` into the chronic-
+    active query (first seen long ago AND still recurring lately). A record with no
+    first_seen (legacy/untimed) can't be proven long-standing, so it's dropped, not guessed.
+    All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
         return False
@@ -1409,6 +1428,10 @@ def _incident_passes(
     if fresh_after is not None:
         ls = rec.get("last_seen")
         if ls is None or ls < fresh_after:
+            return False
+    if standing_before is not None:
+        fs = rec.get("first_seen")
+        if fs is None or fs >= standing_before:
             return False
     if min_rank is not None:
         try:
@@ -1697,6 +1720,21 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             return 2
         fresh_after = now - age
 
+    # `--standing AGE`: the first_seen twin of `--stale` — keep only drift FIRST seen longer
+    # ago than AGE (e.g. `--standing 2w`), the long-standing incidents that have been open a
+    # while irrespective of recent recurrence. Composed with `--fresh` it isolates the
+    # chronic-active class (first seen weeks ago AND still recurring lately) — the festering
+    # serving-path drift `--stale`/`--fresh` alone can't name. Shares `now` and the duration
+    # grammar; a bad duration is the same hard error (exit 2).
+    standing_raw = getattr(args, "standing", None)
+    standing_before: Optional[float] = None
+    if standing_raw is not None:
+        age = _parse_age(standing_raw)
+        if age is None:
+            _emit("_--standing wants a duration like 7d, 12h, 30m, or 2w._")
+            return 2
+        standing_before = now - age
+
     filtered = (
         getattr(args, "min_severity", None) is not None
         or serving_only
@@ -1704,12 +1742,20 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         or needle is not None
         or stale_before is not None
         or fresh_after is not None
+        or standing_before is not None
     )
     records = [
         r
         for r in all_records
         if _incident_passes(
-            r, min_rank, serving_only, min_count, needle, stale_before, fresh_after
+            r,
+            min_rank,
+            serving_only,
+            min_count,
+            needle,
+            stale_before,
+            fresh_after,
+            standing_before,
         )
     ]
 
@@ -3112,12 +3158,22 @@ def build_parser() -> argparse.ArgumentParser:
         "combine the two to bound a window. Skips legacy records with no recorded age.",
     )
     incidents.add_argument(
+        "--standing",
+        metavar="AGE",
+        default=None,
+        help="Only show incidents FIRST seen longer ago than AGE (e.g. 2w, 30d) — long-"
+        "standing drift open a while regardless of recent recurrence. Combine with --fresh "
+        "to find the chronic-active set (first seen long ago AND still recurring). Skips "
+        "legacy records with no recorded age.",
+    )
+    incidents.add_argument(
         "--sort",
-        choices=["severity", "count", "datasets", "recent"],
+        choices=["severity", "count", "datasets", "recent", "standing"],
         default="severity",
         help="Ordering axis: severity (default, worst first), count (most-recurring "
-        "first), datasets (broadest blast radius first), or recent (freshest sighting "
-        "first). Also defines --limit's top N.",
+        "first), datasets (broadest blast radius first), recent (freshest sighting "
+        "first), or standing (longest-open first, by first sighting). Also defines "
+        "--limit's top N.",
     )
     incidents.add_argument(
         "--summary",

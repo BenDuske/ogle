@@ -4147,3 +4147,118 @@ def test_retract_failures_warn_on_stderr(capsys):
     cap = capsys.readouterr()
     assert "retract could not clear 1 entity(ies)" in cap.err
     assert CUSTOMERS_URN in cap.err
+
+
+# ---- incidents --standing / --sort standing: the longevity axis (first_seen) --------------
+
+
+def test_incidents_standing_filters_out_recently_first_seen(tmp_path, capsys):
+    # --standing is the first_seen twin of --stale: keep only drift that has been OPEN a
+    # while (first seen longer ago than AGE), regardless of recent recurrence. The young
+    # incident is dropped even though it's just as active.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("longstanding_fp", severity="high", title="OLD", now=_ANCIENT)
+    s.record_incident("young_fp", severity="high", title="YOUNG", now=time.time())
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--standing", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["longstanding_fp"]  # only drift first seen long ago survives
+
+
+def test_incidents_standing_reads_first_seen_not_last_seen(tmp_path, capsys):
+    # The whole point of --standing: a chronic incident first seen 14d ago but re-seen 1
+    # second ago is LONG-STANDING even though it's fresh on last_seen. --stale (last_seen)
+    # would drop it; --standing keeps it. This is the chronic-active drift no last_seen
+    # filter can name.
+    now = time.time()
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("chronic_fp", severity="high", title="C", now=now - 14 * 86400)
+    s.record_incident("chronic_fp", severity="high", title="C", now=now)  # re-seen just now
+    s.save()
+    # Fresh on last_seen → --stale drops it entirely.
+    assert main(["incidents", "--store", str(store_path), "--stale", "1h", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+    # But long-standing on first_seen → --standing keeps it.
+    assert main(["incidents", "--store", str(store_path), "--standing", "7d", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["chronic_fp"]
+
+
+def test_incidents_standing_skips_untimed_records(tmp_path, capsys):
+    # A record with no first_seen can't be proven long-standing, so --standing drops it
+    # rather than guessing — only the demonstrably-old one comes through.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("untimed_fp", severity="high", title="UNTIMED")  # no now
+    s.record_incident("old_fp", severity="high", title="OLD", now=_ANCIENT)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--standing", "1h", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["old_fp"]
+
+
+def test_incidents_standing_bad_duration_is_error(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", now=_ANCIENT)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--standing", "soon"]) == 2
+    assert "duration" in capsys.readouterr().out
+
+
+def test_incidents_standing_and_fresh_compose_into_chronic_active(tmp_path, capsys):
+    # The killer query: --standing 7d (first seen > 7d ago) AND --fresh 1h (still recurring
+    # within the hour) isolates the chronic-active class. The young-but-active incident fails
+    # --standing; the old-but-quiet one fails --fresh; only the festering-and-still-firing one
+    # lands.
+    now = time.time()
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # Chronic-active: first seen 14d ago, re-seen just now.
+    s.record_incident("chronic_fp", severity="high", title="CHRONIC", now=now - 14 * 86400)
+    s.record_incident("chronic_fp", severity="high", title="CHRONIC", now=now)
+    # Young-active: first & last seen just now → fails --standing.
+    s.record_incident("young_fp", severity="high", title="YOUNG", now=now)
+    # Old-quiet: first & last seen 14d ago → fails --fresh.
+    s.record_incident("quiet_fp", severity="high", title="QUIET", now=now - 14 * 86400)
+    s.save()
+    assert main(
+        ["incidents", "--store", str(store_path), "--standing", "7d", "--fresh", "1h", "--json"]
+    ) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["chronic_fp"]
+
+
+def test_incidents_sort_standing_longest_open_first(tmp_path, capsys):
+    # --sort standing orders by first_seen ascending (oldest-open on top), the longevity twin
+    # of --sort recent (which orders by last_seen).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("younger_fp", severity="low", now=5000.0)
+    s.record_incident("older_fp", severity="low", now=1000.0)  # first seen earlier → leads
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--sort", "standing", "--json"]) == 0
+    order = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert order == ["older_fp", "younger_fp"]
+
+
+def test_incidents_sort_standing_sinks_untimed_last(tmp_path, capsys):
+    # A record with no first_seen can't be aged, so it sinks to the bottom under --sort
+    # standing, mirroring how --sort recent sinks an untimed last_seen.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("timed_fp", severity="low", now=1000.0)
+    s.record_incident("untimed_fp", severity="low")  # no now → sinks last
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--sort", "standing", "--json"]) == 0
+    order = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert order == ["timed_fp", "untimed_fp"]
+
+
+def test_incidents_standing_and_sort_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--standing", "2w", "--sort", "standing"])
+    assert ns.func.__name__ == "cmd_incidents"
+    assert ns.standing == "2w"
+    assert ns.sort == "standing"

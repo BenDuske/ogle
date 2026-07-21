@@ -487,10 +487,13 @@ ogle incidents --grep customers         # find drift by keyword (title or finger
 ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
 ogle incidents --fresh 1h               # only drift seen within the last hour (currently-active set)
 ogle incidents --fresh 7d --stale 1h    # window: seen between 7d and 1h ago (--fresh + --stale compose)
+ogle incidents --standing 2w            # only drift FIRST seen 2w+ ago (long-standing, regardless of recency)
+ogle incidents --standing 2w --fresh 1h # the chronic-active set: open for weeks AND still recurring
 ogle incidents --min-severity high --serving-only   # filters compose (AND)
 ogle incidents --sort count             # order by recurrence (most-recurring drift first)
 ogle incidents --sort datasets          # order by blast radius (most datasets first)
 ogle incidents --sort recent            # order by freshness (most-recently-seen drift first)
+ogle incidents --sort standing          # order by longevity (longest-open drift first, by first sighting)
 ogle incidents --limit 5                # triage cap: only the top 5 worst (severity, then recurrence)
 ogle incidents --summary                # aggregate rollup instead of the per-incident list
 ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
@@ -510,6 +513,19 @@ which recurrence `count` alone can't: a burst seen 5× in an hour and a drift fe
 for three weeks both read as "seen 5×" without it. A single-sighting incident omits the clause
 (first == last, so it would just echo "last seen"); `--json` still carries the raw `first_seen`
 epoch for every timed record (`null`/absent on a legacy store), alongside `last_seen`.
+
+That longevity axis is filterable and sortable, not just displayed. `--standing <age>` (e.g. `2w`,
+`30d`) is the **first_seen twin of `--stale`**: it keeps only drift that has been *open* longer than
+that age, irrespective of how recently it recurred — so `--standing 2w --fresh 1h` isolates the
+**chronic-active** class (first seen weeks ago **and** still firing this hour), the festering
+serving-path drift that `--stale`/`--fresh` alone can't name because one keys on recency and the
+other can't see age. `--sort standing` is the matching order (longest-open on top, the longevity twin
+of `--sort recent`). Both read the same `first_seen` the "first seen X ago" line and the
+`ogle_incidents_first_seen_*_age_seconds` gauges use; a legacy/untimed record can't be aged, so
+`--standing` drops it and `--sort standing` sinks it last (the same "never guess an age" rule as
+`--stale`). They compose with every other filter and with `--fingerprints`, so
+`ogle incidents --standing 30d --serving-only --fingerprints | ogle resolve -` clears the
+long-standing serving drift in one line.
 
 `--summary` collapses the (filtered) set into an aggregate rollup — total remembered, the
 severity break-out, the serving-path count with its own severity split, recurring / total
