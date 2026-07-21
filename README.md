@@ -77,6 +77,16 @@ deterministic summary if none is reachable, so it stays zero-key:
 ogle demo --narrate
 ```
 
+Add `--write-back` to also preview the **tag write-back** (feature #3) — the exact
+`urn ← tag` annotations `ogle check --write-back` would stamp on the drifted dataset in
+DataHub, rendered as a keyless dry-run that touches no catalog. Combine with `--narrate`
+to see all three flagship features in one command; `--write-back-severity` adds the
+per-severity tag (`ogle-drift-high`) to the preview:
+
+```bash
+ogle demo --narrate --write-back --write-back-severity
+```
+
 `ogle check` also runs against pre-computed signatures — no SDK, no quickstart — which is
 how it's unit-tested and how a scheduled job can feed signatures it pulled elsewhere:
 

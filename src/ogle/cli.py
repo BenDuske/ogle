@@ -570,6 +570,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
     drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
     _emit(render_report(drift, as_json=False))
 
+    # Optional showcase sections share a running step counter so their headings stay
+    # correctly numbered whether one, both, or neither is asked for (## 1/## 2 are fixed).
+    step = 2
+
     # Optional feature-#2 showcase: the same LLM root-cause narrator `ogle check --narrate`
     # exposes, so a judge sees BOTH flagship features from the one keyless command. `narrate`
     # falls back to the deterministic summary when the model is unreachable, so a laptop with
@@ -580,8 +584,25 @@ def cmd_demo(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"ogle demo: {exc}", file=sys.stderr)
             return 2
-        _emit("\n## 3. LLM root-cause summary\n")
+        step += 1
+        _emit(f"\n## {step}. LLM root-cause summary\n")
         _emit(narrate(drift.findings, llm=narrator))
+
+    # Optional feature-#3 showcase: the tag write-back `ogle check --write-back` applies to
+    # DataHub, rendered here as a keyless PREVIEW off the pure `plan_writeback` — the exact
+    # `urn ← tag` annotations Ogle would stamp on the drifted dataset (and, live, its
+    # downstream models). Nothing is written; the demo never touches a catalog. Closes the
+    # loop for a judge: detect drift → narrate root cause → and here's the write-back.
+    if getattr(args, "write_back", False) and drift.findings:
+        from .writeback import plan_writeback
+
+        plan = plan_writeback(
+            drift.findings,
+            severity_tags=getattr(args, "write_back_severity", False),
+        )
+        step += 1
+        _emit(f"\n## {step}. Tag write-back (keyless preview)\n")
+        _render_plan_preview(plan, as_json=False, retract=False)
 
     _emit(
         "\n---\n_Reproduces `examples/alerts/churn-orders-drift.md`. "
@@ -2867,6 +2888,23 @@ def build_parser() -> argparse.ArgumentParser:
             "SPEC picks the model (default: 'ollama' = local qwen3:latest); also "
             "'ollama:<model>' or '<...>@http://host:11434'. Falls back to the deterministic "
             "summary if the model is unreachable, so the demo stays keyless."
+        ),
+    )
+    demo.add_argument(
+        "--write-back",
+        action="store_true",
+        help=(
+            "Also show the tag write-back (feature #3) as a keyless PREVIEW after the alert "
+            "— the exact `urn <- tag` annotations `ogle check --write-back` would stamp on "
+            "the drifted dataset in DataHub. Nothing is written; the demo touches no catalog."
+        ),
+    )
+    demo.add_argument(
+        "--write-back-severity",
+        action="store_true",
+        help=(
+            "With --write-back, also preview the per-severity tags (e.g. `ogle-drift-high`) "
+            "alongside the flat drift tag, mirroring `ogle check --write-back-severity`."
         ),
     )
     demo.set_defaults(func=cmd_demo)

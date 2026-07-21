@@ -449,6 +449,60 @@ def test_parser_demo_narrate_defaults_to_ollama():
     assert args.narrate == "ollama"
 
 
+def test_demo_default_omits_writeback_preview(capsys):
+    """Plain `demo` stays lean — no feature-#3 section unless --write-back is asked for."""
+    main(["demo"])
+    out = capsys.readouterr().out
+    assert "Tag write-back" not in out
+
+
+def test_demo_write_back_shows_keyless_preview(capsys):
+    """`demo --write-back` previews feature #3 without touching a catalog (exit code holds)."""
+    rc = main(["demo", "--write-back"])
+    out = capsys.readouterr().out
+    assert rc == 1  # the alert still governs the exit code
+    assert "Tag write-back (keyless preview)" in out
+    assert "NOTHING written to DataHub" in out
+    # The drifted demo dataset is the entity that would be tagged.
+    assert "b2fd91.orders" in out
+    assert "urn:li:tag:ogle-drift-flagged" in out
+    # A keyless preview must not emit a per-severity tag unless explicitly asked.
+    assert "ogle-drift-high" not in out
+
+
+def test_demo_write_back_severity_adds_severity_tag(capsys):
+    """`--write-back-severity` layers the per-severity tag onto the keyless preview."""
+    rc = main(["demo", "--write-back", "--write-back-severity"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "urn:li:tag:ogle-drift-flagged" in out
+    assert "urn:li:tag:ogle-drift-high" in out  # demo drift is HIGH on a serving path
+
+
+def test_demo_narrate_and_write_back_number_sequentially(capsys, monkeypatch):
+    """Both optional sections requested → narrate is ## 3, write-back is ## 4 (no clash)."""
+    monkeypatch.setattr(
+        "ogle.cli.build_narrator", lambda spec: (lambda prompt: "INJECTED-LLM-SUMMARY")
+    )
+    main(["demo", "--narrate", "--write-back"])
+    out = capsys.readouterr().out
+    assert "## 3. LLM root-cause summary" in out
+    assert "## 4. Tag write-back (keyless preview)" in out
+
+
+def test_demo_never_writes_to_cwd_with_write_back(tmp_path, monkeypatch):
+    """Even the write-back preview stays read-only — no baseline file left behind."""
+    monkeypatch.chdir(tmp_path)
+    main(["demo", "--write-back"])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_parser_registers_demo_write_back_flags():
+    args = build_parser().parse_args(["demo", "--write-back", "--write-back-severity"])
+    assert args.write_back is True
+    assert args.write_back_severity is True
+
+
 # ---- mute / unmute / muted (known false positives) --------------------------------
 def test_mute_persists_and_reports(tmp_path, capsys):
     store = tmp_path / "baselines.json"
