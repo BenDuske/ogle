@@ -30,6 +30,7 @@ import io
 import json
 import subprocess
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence
@@ -42,6 +43,8 @@ EXIT_ERROR = 2
 Notifier = Callable[[str], None]
 # A check-runner takes the argv AFTER the "check" token and returns an exit code.
 CheckRunner = Callable[[Sequence[str]], int]
+# A sleeper waits `seconds` between delivery retries (injected so tests don't really sleep).
+Sleeper = Callable[[float], None]
 
 
 class NotifyError(RuntimeError):
@@ -112,21 +115,44 @@ def make_command_notifier(notify_cmd: Sequence[str]) -> Notifier:
     return _notify
 
 
-def _deliver(notifier: Notifier, text: str) -> "tuple[bool, str]":
+def _deliver(
+    notifier: Notifier,
+    text: str,
+    *,
+    retries: int = 0,
+    sleeper: Sleeper = time.sleep,
+) -> "tuple[bool, str]":
     """Invoke `notifier`, guaranteeing the page lands *somewhere* even if it fails.
 
     Returns `(delivered, reason)`. On any notifier failure — a `NotifyError` from the
     command notifier, or an unexpected exception from a custom one — the page text is still
     written to stderr via the default notifier so it is never silently lost, and `delivered`
     is False with a human-readable reason.
+
+    `retries` re-attempts delivery after a `NotifyError`, with a linear backoff
+    (`sleeper(1)`, `sleeper(2)`, …) between tries. A transient pager blip (a momentary 5xx,
+    a DNS hiccup) shouldn't become a *permanent* dropped page — the module's whole thesis is
+    that an undelivered page is a production failure, so a recoverable one deserves a retry.
+    A non-`NotifyError` exception is a bug in a custom notifier, not a transient outage, so it
+    is NOT retried — retrying a `ValueError` just repeats the same crash. The fallback stderr
+    page still fires once, after the last attempt, and the reason names the attempts made.
     """
-    try:
-        notifier(text)
-        return True, ""
-    except NotifyError as exc:
-        reason = str(exc)
-    except Exception as exc:  # a custom notifier misbehaving must not swallow the page
-        reason = f"notifier raised {type(exc).__name__}: {exc}"
+    attempts_made = 0
+    reason = ""
+    for attempt in range(retries + 1):
+        attempts_made = attempt + 1
+        try:
+            notifier(text)
+            return True, ""
+        except NotifyError as exc:
+            reason = str(exc)
+        except Exception as exc:  # a custom notifier misbehaving must not swallow the page
+            reason = f"notifier raised {type(exc).__name__}: {exc}"
+            break  # a programming error won't self-heal on retry — stop and fall back now
+        if attempt < retries:
+            sleeper(attempt + 1)  # linear backoff before the next delivery attempt
+    if attempts_made > 1:
+        reason = f"{reason} (after {attempts_made} attempts)"
     sys.stderr.write(f"PAGE DELIVERY FAILED ({reason}) — falling back to stderr:\n")
     _stderr_notifier(text)
     return False, reason
@@ -138,6 +164,8 @@ def run_tick(
     notifier: Optional[Notifier] = None,
     page_on_error: bool = False,
     dry_run: bool = False,
+    notify_retries: int = 0,
+    sleeper: Sleeper = time.sleep,
     run_check: Optional[CheckRunner] = None,
 ) -> TickOutcome:
     """Run one `ogle check` and dispatch on its exit-code contract.
@@ -150,6 +178,9 @@ def run_tick(
     `dry_run` decides-but-suppresses: the check still runs and the paging decision is still
     made (`would_page`), but the notifier is never invoked, so an operator can validate a new
     watch cron line — does it fire? what narrative would it carry? — without paging a human.
+
+    `notify_retries` re-attempts a failed delivery that many times before falling back to a
+    loud stderr page, so a transient pager outage doesn't become a permanently dropped alert.
     """
     notifier = notifier or _stderr_notifier
     run_check = run_check or _default_check_runner
@@ -165,7 +196,10 @@ def run_tick(
             # A page WOULD fire — but suppress delivery so validating the wiring is silent.
             return TickOutcome(code, "page", False, report_text, error_text, would_page=True)
         delivered, derr = _deliver(
-            notifier, report_text or "ogle: a new drift incident fired (no narrative captured)"
+            notifier,
+            report_text or "ogle: a new drift incident fired (no narrative captured)",
+            retries=notify_retries,
+            sleeper=sleeper,
         )
         return TickOutcome(
             code, "page", True, report_text, error_text, delivered, derr, would_page=True
@@ -175,7 +209,12 @@ def run_tick(
         if page_on_error:
             if dry_run:
                 return TickOutcome(code, "error", False, report_text, error_text, would_page=True)
-            delivered, derr = _deliver(notifier, error_text or "ogle check failed (exit 2)")
+            delivered, derr = _deliver(
+                notifier,
+                error_text or "ogle check failed (exit 2)",
+                retries=notify_retries,
+                sleeper=sleeper,
+            )
             return TickOutcome(
                 code, "error", True, report_text, error_text, delivered, derr, would_page=True
             )
@@ -217,6 +256,15 @@ def build_watch_args(parser_sub) -> None:
         "— validate a new watch cron line without paging a human. Exit code is preserved.",
     )
     watch.add_argument(
+        "--notify-retries",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Re-attempt a FAILED page delivery up to N times (linear backoff) before "
+        "falling back to a loud stderr page. Rides out a transient pager blip so a "
+        "recoverable failure isn't reported as a permanently dropped alert. Default: 0.",
+    )
+    watch.add_argument(
         "--json",
         action="store_true",
         help="Emit the tick outcome as JSON on stdout instead of the human status line "
@@ -237,11 +285,16 @@ def cmd_watch(args) -> int:
     """CLI handler: run one tick, print a one-line status, and PRESERVE the check's exit code."""
     notifier = make_command_notifier(args.notify_cmd) if args.notify_cmd else None
     dry_run = getattr(args, "dry_run", False)
+    notify_retries = getattr(args, "notify_retries", 0)
+    if notify_retries < 0:
+        sys.stderr.write("ogle watch: --notify-retries must be >= 0\n")
+        return EXIT_ERROR
     outcome = run_tick(
         args.check_args,
         notifier=notifier,
         page_on_error=args.page_on_error,
         dry_run=dry_run,
+        notify_retries=notify_retries,
     )
     # A dispatched-but-undelivered page is an operational failure the scheduler must see:
     # the exit code still honors the `ogle check` contract, but a broken pager must not hide

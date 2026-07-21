@@ -744,6 +744,20 @@ your scheduler swallows stderr. Example cron line (every 15 min):
   --store /var/lib/ogle/baselines.json --gms http://localhost:8080 --discover
 ```
 
+**Riding out a transient pager blip (`--notify-retries`).** A momentary pager outage — a
+5xx from the paging API, a DNS hiccup — shouldn't turn a *recoverable* failure into a
+permanently dropped alert. `--notify-retries N` re-attempts a failed delivery up to `N`
+times with a linear backoff (1s, 2s, …) before falling back to the loud stderr page. Only
+genuine delivery failures are retried: a bug in a custom notifier (a `ValueError`, not a
+`NotifyError`) is *not* re-run, because it won't self-heal. When every attempt fails, the
+`delivery_error` names how many were made (`… (after 3 attempts)`), so the exhausted-retry
+case is distinguishable from a single try.
+
+```bash
+ogle watch --notify-cmd /usr/local/bin/page-me --notify-retries 2 -- \
+  --store baselines.json --signatures my-signatures.json
+```
+
 **Structured output for a monitor (`--json`).** A scheduler that wants to gate on the
 tick without scraping the human line adds `--json`: the outcome goes to stdout as one
 object, the `PAGE:` fallback and delivery-failure notice still go to stderr, and the

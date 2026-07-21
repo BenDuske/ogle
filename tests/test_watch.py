@@ -464,6 +464,126 @@ def test_watch_dry_run_json_reports_would_page_without_delivery(tmp_path, capsys
     assert "PAGE" not in captured.err  # nothing delivered, nothing fell back to stderr
 
 
+# ---- `ogle watch --notify-retries`: ride out a transient pager outage ------------
+class _FlakyNotifier:
+    """A notifier that raises NotifyError for the first `fail_times` calls, then succeeds."""
+
+    def __init__(self, fail_times):
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def __call__(self, text):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise NotifyError(f"transient outage (attempt {self.calls})")
+        # succeeds on the next call
+
+
+def test_retry_recovers_from_transient_failure(capsys):
+    """A pager that fails twice then works: with 2 retries the page is delivered, not dropped."""
+    slept = []
+    note = _FlakyNotifier(fail_times=2)
+    out = run_tick(
+        [],
+        notifier=note,
+        notify_retries=2,
+        sleeper=slept.append,          # record backoff waits instead of really sleeping
+        run_check=_runner(EXIT_INCIDENT, stdout="HIGH drift on customers"),
+    )
+    assert out.paged is True
+    assert out.page_delivered is True      # recovered on the 3rd attempt
+    assert out.delivery_error == ""
+    assert note.calls == 3                 # 1 initial + 2 retries
+    assert slept == [1, 2]                 # linear backoff between the three attempts
+    assert "PAGE DELIVERY FAILED" not in capsys.readouterr().err
+
+
+def test_retry_exhausted_still_falls_back(capsys):
+    """When every retry also fails, delivery_failed stands and the reason names the attempts."""
+    slept = []
+    note = _FlakyNotifier(fail_times=99)   # never recovers
+    out = run_tick(
+        [],
+        notifier=note,
+        notify_retries=2,
+        sleeper=slept.append,
+        run_check=_runner(EXIT_INCIDENT, stdout="HIGH drift"),
+    )
+    assert out.page_delivered is False
+    assert note.calls == 3                 # exhausted 1 + 2 retries
+    assert "after 3 attempts" in out.delivery_error
+    assert "PAGE DELIVERY FAILED" in capsys.readouterr().err
+
+
+def test_no_retries_is_single_attempt_unchanged(capsys):
+    """Default (0 retries): one attempt, no backoff, reason NOT annotated with a count."""
+    slept = []
+    note = _FlakyNotifier(fail_times=99)
+    out = run_tick(
+        [],
+        notifier=note,
+        notify_retries=0,
+        sleeper=slept.append,
+        run_check=_runner(EXIT_INCIDENT, stdout="drift"),
+    )
+    assert out.page_delivered is False
+    assert note.calls == 1
+    assert slept == []                     # no backoff on a single attempt
+    assert "attempts" not in out.delivery_error  # single-try reason stays clean
+
+
+def test_retry_does_not_retry_a_programming_error(capsys):
+    """A non-NotifyError (a bug in a custom notifier) must NOT be retried — it won't self-heal."""
+    calls = {"n": 0}
+
+    def _buggy(_text):
+        calls["n"] += 1
+        raise ValueError("kaboom")
+
+    out = run_tick(
+        [],
+        notifier=_buggy,
+        notify_retries=5,
+        sleeper=lambda _s: None,
+        run_check=_runner(EXIT_INCIDENT, stdout="drift"),
+    )
+    assert out.page_delivered is False
+    assert calls["n"] == 1                  # stopped after the first crash, no retry storm
+    assert "ValueError" in out.delivery_error
+    assert "attempts" not in out.delivery_error  # only one attempt was made
+
+
+def test_watch_notify_retries_flag_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["watch", "--notify-retries", "3", "--", "--signatures", "s.json"]
+    )
+    assert ns.notify_retries == 3
+    ns2 = parser.parse_args(["watch", "--", "--signatures", "s.json"])
+    assert ns2.notify_retries == 0  # default off
+
+
+def test_watch_negative_retries_rejected(tmp_path, capsys):
+    """A negative --notify-retries is a usage error (exit 2), not a silent no-op."""
+    store = tmp_path / "store.json"
+    sig = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig])
+    code = main(
+        [
+            "watch",
+            "--notify-retries",
+            "-1",
+            "--",
+            "--store",
+            str(store),
+            "--signatures",
+            str(sigs),
+        ]
+    )
+    assert code == EXIT_ERROR
+    assert "--notify-retries must be >= 0" in capsys.readouterr().err
+
+
 def test_watch_dry_run_human_line_says_would_page(tmp_path, capsys):
     """Human status under --dry-run on a real incident reads WOULD PAGE, not PAGED."""
     store = tmp_path / "store.json"
