@@ -3199,6 +3199,48 @@ def test_status_json_stale_baselines_null_without_gate(tmp_path, capsys):
     assert payload["stale_baselines"] is None
 
 
+def test_status_json_exit_rc_matches_exit_on_trip(tmp_path, capsys):
+    # The folded verdict: exit_rc in the payload equals the process exit code when a gate trips —
+    # a HIGH incident at/above --fail-on returns 1 both ways, so a stdout-only consumer (exit code
+    # lost over a log/message bus) reads the same verdict the shell would.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["exit_rc"] == 1 == rc
+
+
+def test_status_json_exit_rc_zero_on_clean_pass(tmp_path, capsys):
+    # A healthy store with no gate tripped carries exit_rc 0 — the "all clear" the individual gate
+    # booleans give only when OR-ed together while handling their nulls.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["exit_rc"] == 0 == rc
+
+
+def test_status_json_exit_rc_folds_heartbeat_gate_without_fail_on(tmp_path, capsys):
+    # exit_rc tracks the folded verdict, not just the severity gate: a stale store with NO --fail-on
+    # trips only the heartbeat gate, yet exit_rc is 1 — proving it ORs all gates, so drift_gate_tripped
+    # stays null (never evaluated) while the verdict is still fail.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.save()
+    old = time.time() - 10 * 86400
+    os.utime(store, (old, old))
+    rc = main(["status", "--store", str(store), "--stale-after", "2d", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["exit_rc"] == 1
+    assert payload["heartbeat_stale"] is True
+    assert payload["drift_gate_tripped"] is None
+
+
 def test_status_registered_in_help():
     ns = build_parser().parse_args(["status"])
     assert ns.func.__name__ == "cmd_status"

@@ -2490,6 +2490,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                         # folds this together with the severity + heartbeat gates; this field
                         # says how many watched datasets tripped the orphan gate.
                         "stale_baselines": stale_baselines,
+                        # The folded verdict: the exact process exit code (0 pass / 1 any gate
+                        # tripped). The three gate booleans above each attribute WHICH gate fired,
+                        # but a consumer wanting the single "should I page" answer must OR them
+                        # together while handling three nullable fields; this surfaces that answer
+                        # directly. It also survives when the process exit code is lost — a JSON
+                        # payload captured from stdout and forwarded over a log/message bus keeps
+                        # its verdict, where the OS exit code does not. Always 0 or 1 (the exit-2
+                        # bad-duration path errors out before any JSON is emitted).
+                        "exit_rc": exit_rc,
                     }
                 },
                 indent=2,

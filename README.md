@@ -248,6 +248,11 @@ Same compact-duration grammar (`30m`, `12h`, `2d`, `1w`; a bad value is a hard e
 with the other gates — *any one* fails the run. `--json` carries the count as `stale_baselines` (an int,
 or `null` when `--orphan-after` isn't given, so a consumer can tell "not checked" from "checked, none stale").
 
+Each gate boolean above attributes *which* gate fired; when you just want the folded verdict, `--json`
+also carries `exit_rc` — the exact process exit code (`0` pass / `1` any gate tripped), so a consumer need
+not OR the three nullable gate fields together. It also survives a stdout capture forwarded over a
+log/message bus, where the OS exit code is lost.
+
 ### Prometheus metrics (`ogle metrics`)
 
 `ogle status --json` answers "what is Ogle holding right now?" for a script; `ogle metrics`
