@@ -3241,6 +3241,55 @@ def test_status_json_exit_rc_folds_heartbeat_gate_without_fail_on(tmp_path, caps
     assert payload["drift_gate_tripped"] is None
 
 
+def test_status_json_gates_tripped_empty_on_clean_pass(tmp_path, capsys):
+    # The folded attribution list is ALWAYS present and empty when nothing tripped — an empty list
+    # (not null) so a consumer reads "no gate fired" unambiguously, and the invariant holds:
+    # nonempty iff exit_rc == 1.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["gates_tripped"] == []
+    assert bool(payload["gates_tripped"]) == bool(payload["exit_rc"])
+
+
+def test_status_json_gates_tripped_names_the_drift_gate(tmp_path, capsys):
+    # A single fired gate is named directly — a drift trip routes to the model owner without the
+    # consumer OR-ing three nullable booleans to learn WHICH gate fired.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    rc = main(["status", "--store", str(store), "--fail-on", "high", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["gates_tripped"] == ["drift"]
+
+
+def test_status_json_gates_tripped_lists_all_fired_in_order(tmp_path, capsys):
+    # When several gates fire at once the list carries every one, in evaluation order
+    # (drift → heartbeat → orphan): a high incident (drift) on a store whose baseline is orphaned
+    # (10d capture > 3d) AND whose file is stale (mtime > 2d) trips all three. exit_rc still folds
+    # to the single 1, but the list attributes each so an alert router can page every owner.
+    store = tmp_path / "baselines.json"
+    s = _seed_timestamped_baselines(store, time.time())  # oldest capture ~10d
+    s.record_incident("hi", severity="high", title="H", datasets=1, serving=True)
+    s.save()
+    old = time.time() - 10 * 86400
+    os.utime(store, (old, old))
+    rc = main(
+        [
+            "status", "--store", str(store), "--json",
+            "--fail-on", "high", "--stale-after", "2d", "--orphan-after", "3d",
+        ]
+    )
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["gates_tripped"] == ["drift", "heartbeat", "orphan"]
+    assert payload["exit_rc"] == 1
+
+
 def test_status_registered_in_help():
     ns = build_parser().parse_args(["status"])
     assert ns.func.__name__ == "cmd_status"

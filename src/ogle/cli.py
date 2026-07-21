@@ -2416,6 +2416,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     # watched dataset orphaned). Kept distinct from the exit-2 bad-duration path above.
     exit_rc = 1 if (gate_rc or heartbeat_fail or orphan_fail) else 0
 
+    # The folded ATTRIBUTION companion to exit_rc's folded VERDICT: the names of the gates that
+    # actually fired, in evaluation order (drift → heartbeat → orphan). exit_rc answers "should I
+    # page"; this answers "why / whom to page" directly — a drift trip routes to the model owner,
+    # a heartbeat/orphan trip to the SRE who runs the monitor. Without it a JSON consumer must OR
+    # the three nullable booleans above AND know each field's null-vs-false semantics just to
+    # rebuild this list; here it's self-describing and future-proof (a new gate simply appends).
+    # Always a list — empty means "nothing tripped" (unambiguous, unlike the per-gate nulls which
+    # mean "not evaluated"), so the invariant bool(gates_tripped) == bool(exit_rc) always holds.
+    gates_tripped = [
+        name
+        for fired, name in (
+            (gate_rc, "drift"),
+            (heartbeat_fail, "heartbeat"),
+            (orphan_fail, "orphan"),
+        )
+        if fired
+    ]
+
     if args.json:
         _emit(
             json.dumps(
@@ -2499,6 +2517,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                         # its verdict, where the OS exit code does not. Always 0 or 1 (the exit-2
                         # bad-duration path errors out before any JSON is emitted).
                         "exit_rc": exit_rc,
+                        # The folded ATTRIBUTION twin of exit_rc: names of the gates that fired,
+                        # in evaluation order (drift → heartbeat → orphan). exit_rc says whether
+                        # to page; this says which gate(s) did it, so an alert router can dispatch
+                        # a drift trip to the model owner vs a heartbeat/orphan trip to the
+                        # monitor's SRE — without OR-ing the three nullable gate booleans and
+                        # re-deriving their null-vs-false semantics. Always a list (empty = nothing
+                        # tripped, distinct from a gate's null "not evaluated"); nonempty iff
+                        # exit_rc == 1.
+                        "gates_tripped": gates_tripped,
                     }
                 },
                 indent=2,

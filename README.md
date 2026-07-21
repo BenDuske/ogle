@@ -253,6 +253,12 @@ also carries `exit_rc` — the exact process exit code (`0` pass / `1` any gate 
 not OR the three nullable gate fields together. It also survives a stdout capture forwarded over a
 log/message bus, where the OS exit code is lost.
 
+Where `exit_rc` folds *whether* to page, `gates_tripped` folds *why*: a `--json`-only list of the gate
+names that fired, in evaluation order (`["drift", "heartbeat", "orphan"]`). It's always present — an empty
+list means nothing tripped (`nonempty` iff `exit_rc == 1`) — so an alert router can dispatch a `drift` trip
+to the model owner and a `heartbeat`/`orphan` trip to the monitor's SRE, without re-deriving each gate's
+`null`-vs-`false` semantics. A new gate simply appends its name.
+
 ### Prometheus metrics (`ogle metrics`)
 
 `ogle status --json` answers "what is Ogle holding right now?" for a script; `ogle metrics`
