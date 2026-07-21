@@ -7,6 +7,7 @@ use the Task #2 shape where `customers` feeds the deployed `churn_predictor` (se
 """
 
 import json
+import os
 import sys
 import time
 
@@ -2981,11 +2982,111 @@ def test_status_without_fail_on_stays_exit_0_with_high_drift(tmp_path, capsys):
     assert "exit 1" not in capsys.readouterr().out
 
 
+# ---- status --stale-after : heartbeat / dead-man's-switch gate -----------------------
+def _backdate_store(store_path, seconds):
+    """Rewind the store file's mtime by `seconds` so `_store_file_age` reads it as stale —
+    simulating a scheduled `ogle check` that stopped writing that long ago."""
+    past = time.time() - seconds
+    os.utime(store_path, (past, past))
+
+
+def test_status_stale_after_trips_when_store_is_old(tmp_path, capsys):
+    # The heartbeat gate: a store last written LONGER ago than --stale-after fails the run —
+    # this is the monitor-went-dark case a severity --fail-on structurally can't catch, since
+    # the frozen store keeps reporting its last (below-floor) incidents. 2h-old store, 1h gate.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("lo", severity="low", title="L", datasets=1)  # nothing a sev gate pages
+    s.save()
+    _backdate_store(store, 2 * 3600)
+    rc = main(["status", "--store", str(store), "--stale-after", "1h"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "watching:" in out  # snapshot still rendered
+    assert "--stale-after 1h" in out and "exit 1" in out
+
+
+def test_status_stale_after_passes_when_store_is_fresh(tmp_path, capsys):
+    # A store written WITHIN the window is healthy → exit 0, no heartbeat note. A just-saved
+    # store is seconds old, well inside a 1h threshold.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("lo", severity="low", title="L", datasets=1)
+    s.save()
+    rc = main(["status", "--store", str(store), "--stale-after", "1h"])
+    assert rc == 0
+    assert "exit 1" not in capsys.readouterr().out
+
+
+def test_status_stale_after_fails_on_missing_store(tmp_path, capsys):
+    # No store file at all = Ogle never ran (or the store was deleted) — the strongest dark
+    # signal, so the gate trips even though there is no age to report. The empty-store notice
+    # still prints, plus a distinct "has not run" reason.
+    store = tmp_path / "baselines.json"  # never created
+    rc = main(["status", "--store", str(store), "--stale-after", "6h"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "is empty" in out
+    assert "has not run" in out and "exit 1" in out
+
+
+def test_status_stale_after_composes_with_fail_on(tmp_path, capsys):
+    # Either gate fails the run. Here the severity gate is satisfied (only a low incident under
+    # a high floor) but the store is stale → still exit 1 on the heartbeat alone.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("lo", severity="low", title="L", datasets=1)
+    s.save()
+    _backdate_store(store, 3 * 3600)
+    rc = main(["status", "--store", str(store), "--fail-on", "high", "--stale-after", "1h"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "--fail-on high" not in out  # the severity gate did NOT trip
+    assert "--stale-after 1h" in out    # the heartbeat gate did
+
+
+def test_status_stale_after_bad_duration_exits_two(tmp_path, capsys):
+    # A malformed duration is a hard error (exit 2), never a silent no-op that would read as
+    # "the monitor is fine" — mirrors `incidents --stale`.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.save()
+    rc = main(["status", "--store", str(store), "--stale-after", "soon"])
+    assert rc == 2
+    assert "--stale-after wants a duration" in capsys.readouterr().out
+
+
+def test_status_json_exposes_heartbeat_stale(tmp_path, capsys):
+    # --json carries the heartbeat verdict as a bool (which gate fired) and returns the same
+    # combined exit — a scheduled JSON consumer sees the dead-man's-switch trip without prose.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.save()
+    _backdate_store(store, 2 * 3600)
+    rc = main(["status", "--store", str(store), "--stale-after", "1h", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["heartbeat_stale"] is True
+
+
+def test_status_json_heartbeat_stale_null_without_gate(tmp_path, capsys):
+    # Without --stale-after the field is null (gate not evaluated), distinct from false
+    # (evaluated, store fresh) — so a consumer can tell "not checked" from "checked, healthy".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["heartbeat_stale"] is None
+
+
 def test_status_registered_in_help():
     ns = build_parser().parse_args(["status"])
     assert ns.func.__name__ == "cmd_status"
     assert ns.json is False
     assert ns.fail_on is None
+    assert ns.stale_after is None
 
 
 # ---- ogle show: single-dataset drill-down ----------------------------------------

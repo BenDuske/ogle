@@ -2352,6 +2352,29 @@ def cmd_status(args: argparse.Namespace) -> int:
         1 if _incidents_gate_fail(incident_records, getattr(args, "fail_on", None)) else 0
     )
 
+    # Heartbeat gate: the dead-man's-switch the severity --fail-on structurally can't be. Every
+    # incident level `gate_rc` reads is a point-in-time STORE level — if the scheduled `ogle
+    # check` crash-loops or its cron is pulled, the store freezes and keeps reporting its last
+    # incidents forever, so a severity gate stays green while drift silently goes undetected.
+    # `--stale-after AGE` fails the run when the store's write-age (the same `store_age`
+    # heartbeat surfaced above, from the file mtime) exceeds AGE, catching the monitor itself
+    # going dark. A MISSING store (store_age is None → `ogle check` never persisted one, or the
+    # file was deleted) is the strongest dark signal, so it trips too. Uses the shared
+    # `_parse_age` grammar; a bad duration is a hard error (exit 2), mirroring `incidents
+    # --stale`. Off (None) by default, so the standard snapshot is unaffected.
+    stale_after_raw = getattr(args, "stale_after", None)
+    heartbeat_fail = False
+    if stale_after_raw is not None:
+        stale_after = _parse_age(stale_after_raw)
+        if stale_after is None:
+            _emit("_--stale-after wants a duration like 6h, 2d, 30m, or 1w._")
+            return 2
+        heartbeat_fail = store_age is None or store_age > stale_after
+
+    # Final exit: EITHER gate trips the run (drift at/above the floor OR the monitor gone dark).
+    # Kept distinct from the exit-2 bad-duration path above.
+    exit_rc = 1 if (gate_rc or heartbeat_fail) else 0
+
     if args.json:
         _emit(
             json.dumps(
@@ -2389,6 +2412,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                         # first check). Parity with the ogle_store_age_seconds gauge —
                         # the monitor's own heartbeat, not a drift level.
                         "store_age_seconds": store_age,
+                        # Whether the --stale-after heartbeat gate tripped (store older than
+                        # the threshold, or missing entirely). null when --stale-after is not
+                        # set, so a consumer can tell "gate not evaluated" from "evaluated,
+                        # passed" (false). The exit code folds this together with the severity
+                        # gate; this field says which gate fired.
+                        "heartbeat_stale": (
+                            heartbeat_fail if stale_after_raw is not None else None
+                        ),
                         # Stalest/freshest baseline CAPTURE age in seconds + the untimed
                         # coverage gap. Parity with the ogle_baseline_*_capture_age_seconds
                         # gauges — the orphan signal (old capture = a URN Ogle stopped
@@ -2407,14 +2438,21 @@ def cmd_status(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
-        return gate_rc
+        return exit_rc
 
     # Nothing captured, nothing remembered, nothing muted → first-run / empty store. Say so
     # plainly rather than printing a wall of zeros that reads like a populated-but-quiet store.
-    # (gate_rc is necessarily 0 here — an empty store holds no incident to trip the floor.)
+    # (gate_rc is necessarily 0 here — an empty store holds no incident to trip the floor — but
+    # the heartbeat gate CAN fire: an empty/missing store is exactly Ogle-never-ran, so surface
+    # it and return the combined exit rather than a bare 0.)
     if totals["watching"] == 0 and inc["total"] == 0 and not muted:
         _emit(f"_store `{args.store}` is empty — run `ogle check` to start watching._")
-        return gate_rc
+        if heartbeat_fail:
+            _emit(
+                f"_🫀 no fresh store within --stale-after {stale_after_raw} — "
+                f"Ogle has not run — exit 1._"
+            )
+        return exit_rc
 
     sev = inc["by_severity"]
     _emit(f"**Ogle store status — `{args.store}`**")
@@ -2513,7 +2551,20 @@ def cmd_status(args: argparse.Namespace) -> int:
         _emit(f"- 🫀 last check: {_fmt_age(store_age)} ago")
     if gate_rc:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
-    return gate_rc
+    # Heartbeat gate verdict, distinct from the drift gate above so an operator sees WHICH
+    # tripped: either the store is stale (age shown for context) or missing entirely.
+    if heartbeat_fail:
+        if store_age is None:
+            _emit(
+                f"_🫀 no store file within --stale-after {stale_after_raw} — "
+                f"Ogle has not run — exit 1._"
+            )
+        else:
+            _emit(
+                f"_🫀 last check {_fmt_age(store_age)} ago exceeds --stale-after "
+                f"{stale_after_raw} — Ogle may have stopped running — exit 1._"
+            )
+    return exit_rc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2769,6 +2820,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exit 1 if any remembered incident is at/above this severity (CI/scheduled "
         "whole-store health gate). Gates on every remembered incident; independent of --json.",
+    )
+    status.add_argument(
+        "--stale-after",
+        metavar="AGE",
+        default=None,
+        help="Exit 1 if the store file hasn't been written within AGE (e.g. 6h, 2d, 30m) — a "
+        "dead-man's-switch that pages when Ogle ITSELF goes dark (scheduled `ogle check` "
+        "crash-looped / cron removed), the one failure the severity --fail-on can't see "
+        "because a frozen store keeps showing its last incidents. A missing store (Ogle "
+        "never ran) also trips it. Composes with --fail-on (either gate fails the run).",
     )
     status.set_defaults(func=cmd_status)
 

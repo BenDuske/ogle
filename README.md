@@ -191,6 +191,7 @@ read, without re-walking DataHub:
 ogle status                    # watch-list size + field/row totals, incident memory by severity, active mutes
 ogle status --json             # same snapshot, machine-readable (baselines/incidents/muted rollup)
 ogle status --fail-on high     # exit 1 if any remembered incident is high+ (CI/cron health gate)
+ogle status --stale-after 6h   # exit 1 if the store hasn't been written in 6h (monitor-went-dark gate)
 ```
 
 The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
@@ -219,6 +220,19 @@ job that already runs `status` for the snapshot can page off the same call — n
 Unlike `incidents --fail-on`, it gates on the *whole* store (`status` has no filters), and it stays
 `0` by default so the plain snapshot never pages unless a floor is asked for. Mirrors the exit-code
 contract of `check --fail-on` / `incidents --fail-on`.
+
+`--stale-after <age>` is the **dead-man's-switch** the severity gate structurally can't be. Every
+count `--fail-on` reads is a point-in-time store *level*, so if the scheduled `ogle check` crash-loops
+or its cron is pulled, the store freezes and keeps reporting its last (below-floor) incidents forever
+— the severity gate stays green while drift silently goes undetected. `--stale-after 6h` exits `1`
+when the store file hasn't been written within the window (its mtime is a true heartbeat — it only
+advances when a check actually persists an update), catching Ogle *itself* going dark; a **missing**
+store (Ogle never ran, or the file was deleted) trips it too. It uses the same compact-duration
+grammar as `incidents --stale` (`30m`, `6h`, `2d`, `1w`; a bad value is a hard exit `2`), the CLI gate
+on top of the `ogle_store_age_seconds` gauge. It **composes with `--fail-on`** — either gate fails the
+run — so one scheduled `ogle status --fail-on high --stale-after 6h` pages on *both* a high incident
+and the monitor going quiet. `--json` carries the verdict as `heartbeat_stale` (`true`/`false`, or
+`null` when `--stale-after` isn't given, so a consumer can tell "not checked" from "checked, healthy").
 
 ### Prometheus metrics (`ogle metrics`)
 
