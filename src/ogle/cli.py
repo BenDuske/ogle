@@ -1507,6 +1507,12 @@ def _incident_summary(records: List[dict]) -> dict:
     # it, since one low-severity serving incident + one high non-serving incident reads as
     # serving=1, high=1 with ZERO high-serving incidents. sum(serving_by_severity) == serving.
     serving_by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    # Recurring ∩ severity split — the chronic axis's twin of serving_by_severity. A flat
+    # `recurring` total says "N incidents keep coming back" but can't tell an operator whether
+    # that flapping is a 🔴 high-severity model-breaking pattern or benign low-severity churn.
+    # `recurring="high"` is the festering-AND-hot page ("high-severity drift that has recurred
+    # and was never resolved"), the single most alert-worthy class. sum() == recurring.
+    recurring_by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
     serving = 0
     recurring = 0
     total_sightings = 0
@@ -1521,12 +1527,14 @@ def _incident_summary(records: List[dict]) -> dict:
         total_sightings += count
         if count >= 2:
             recurring += 1
+            recurring_by_severity[key] += 1
     return {
         "total": len(records),
         "by_severity": by_severity,
         "serving": serving,
         "serving_by_severity": serving_by_severity,
         "recurring": recurring,
+        "recurring_by_severity": recurring_by_severity,
         "total_sightings": total_sightings,
     }
 
@@ -1884,7 +1892,17 @@ def cmd_incidents(args: argparse.Namespace) -> int:
                 f"- 📈 longest-standing: {_fmt_age(longest_standing)} ago · "
                 f"newest: {_fmt_age(new_standing)} ago"
             )
-        _emit(f"- 🔁 recurring (seen ≥2×): {summary['recurring']}")
+        # Recurring ∩ severity split — chronic twin of the serving line above. Shown only when
+        # something is recurring (mirrors the serving conditional); the four buckets sum back
+        # to `recurring`. Lead with 🔴 high: chronic high-severity drift is the festering page.
+        recurring_line = f"- 🔁 recurring (seen ≥2×): {summary['recurring']}"
+        if summary["recurring"]:
+            rbs = summary["recurring_by_severity"]
+            recurring_line += (
+                f" (🔴 {rbs['high']} · 🟠 {rbs['medium']} · "
+                f"🟡 {rbs['low']} · • {rbs['unknown']})"
+            )
+        _emit(recurring_line)
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:
             _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -2207,6 +2225,17 @@ def _render_prometheus(
         "ogle_incidents_recurring",
         "Remembered incidents seen at least twice (flapping/chronic).",
         [(None, inc["recurring"])],
+    )
+    # Recurring split by severity — the chronic ∩ severity cross-tab the flat `recurring` total
+    # can't express, mirroring ogle_incidents_serving_by_severity. `{severity="high"}` is
+    # high-severity drift that keeps coming back and was never resolved — the festering page:
+    # alert `ogle_incidents_recurring_by_severity{severity="high"} > 0`. Emitted for all four
+    # buckets (honest 0s) so the alert series always exists; sum over the label == recurring.
+    rbs = inc.get("recurring_by_severity") or {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    family(
+        "ogle_incidents_recurring_by_severity",
+        "Remembered recurring incidents, by severity (seen ≥2× AND severity).",
+        [({"severity": s}, rbs[s]) for s in ("high", "medium", "low", "unknown")],
     )
     family(
         "ogle_incidents_sightings",
@@ -2659,10 +2688,17 @@ def cmd_status(args: argparse.Namespace) -> int:
             f" (🔴 {sbs['high']} · 🟠 {sbs['medium']} · "
             f"🟡 {sbs['low']} · • {sbs['unknown']})"
         )
-    serving_line += (
-        f" · 🔁 recurring: {inc['recurring']} · "
-        f"total sightings: {inc['total_sightings']}"
-    )
+    # Chronic ∩ severity split (ogle_incidents_recurring_by_severity), same treatment as the
+    # serving split: a flat "recurring: N" hides whether that flapping is high-severity drift
+    # that was never resolved. Shown only when something is recurring; buckets sum to recurring.
+    recurring_part = f" · 🔁 recurring: {inc['recurring']}"
+    if inc["recurring"]:
+        rbs = inc["recurring_by_severity"]
+        recurring_part += (
+            f" (🔴 {rbs['high']} · 🟠 {rbs['medium']} · "
+            f"🟡 {rbs['low']} · • {rbs['unknown']})"
+        )
+    serving_line += recurring_part + f" · total sightings: {inc['total_sightings']}"
     _emit(serving_line)
     # How long the remembered drift has been sitting: the stalest (longest-quiet) incident
     # leads because that's the resolve/forget candidate an operator most needs nudged about —

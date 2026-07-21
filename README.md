@@ -292,7 +292,9 @@ Every series is a **gauge** (point-in-time store levels, so none carry the `_tot
 Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_fields` / `_rows` /
 `_rows_unknown`, `ogle_incidents_remembered{severity="high|medium|low|unknown"}`,
 `ogle_incidents_serving` (split by severity in
-`ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` / `_sightings`,
+`ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` (split by severity in
+`ogle_incidents_recurring_by_severity{severity="…"}` — chronic ∩ severity; alert
+`{severity="high"} > 0` for high-severity drift that keeps coming back) / `_sightings`,
 `ogle_muted_active` (split into
 `ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
 incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the incident
@@ -351,6 +353,13 @@ low-severity serving incident next to one high-severity *non*-serving incident r
 all four severity buckets (honest `0`s, so the alert series always exists) and sums exactly to
 `ogle_incidents_serving`, mirroring the `muted_active` + `muted_permanent` "keep the total, add
 the risk-highlighting split" shape.
+
+The same treatment applies to the **chronic** axis: `ogle_incidents_recurring_by_severity{severity="…"}`
+splits the flat `ogle_incidents_recurring` count the same way. A flat "N incidents keep coming
+back" can't tell a benign low-severity flap from high-severity drift that recurred and was never
+resolved — the festering-hot class. Alert `ogle_incidents_recurring_by_severity{severity="high"} > 0`;
+the four buckets carry honest `0`s and sum to `ogle_incidents_recurring`. Both cross-tabs also
+appear in the human `status` / `incidents --summary` lines (`🔁 recurring: N (🔴 … · 🟠 … · 🟡 … · • …)`).
 
 ### Corruption-resilient store (unattended-safe)
 

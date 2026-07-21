@@ -92,6 +92,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_serving",
         "ogle_incidents_serving_by_severity",
         "ogle_incidents_recurring",
+        "ogle_incidents_recurring_by_severity",
         "ogle_incidents_sightings",
         "ogle_muted_active",
         "ogle_muted_permanent",
@@ -152,6 +153,12 @@ def test_metrics_values_match_store(tmp_path, capsys):
     assert samples['ogle_incidents_serving_by_severity{severity="medium"}'] == "0"
     assert samples['ogle_incidents_serving_by_severity{severity="low"}'] == "0"
     assert samples['ogle_incidents_serving_by_severity{severity="unknown"}'] == "0"
+    # recurring ∩ severity: the one recurring incident ("hi", seen 2×) is high-severity; the
+    # medium/low incidents were each seen once. So the festering cell reads high=1, rest 0s.
+    assert samples['ogle_incidents_recurring_by_severity{severity="high"}'] == "1"
+    assert samples['ogle_incidents_recurring_by_severity{severity="medium"}'] == "0"
+    assert samples['ogle_incidents_recurring_by_severity{severity="low"}'] == "0"
+    assert samples['ogle_incidents_recurring_by_severity{severity="unknown"}'] == "0"
 
 
 def test_serving_by_severity_disambiguates_flat_totals(tmp_path, capsys):
@@ -189,6 +196,44 @@ def test_serving_by_severity_sums_to_flat_serving(tmp_path, capsys):
         for s in ("high", "medium", "low", "unknown")
     )
     assert split == int(samples["ogle_incidents_serving"])
+
+
+def test_recurring_by_severity_disambiguates_flat_totals(tmp_path, capsys):
+    """Flat recurring + flat severity can't locate a HIGH-severity chronic incident.
+
+    A low-severity RECURRING incident next to a high-severity one-shot gives recurring=1
+    and remembered{high}=1 — yet there is ZERO high-severity chronic drift. Only the
+    cross-tab tells the operator whether the flapping is the festering-hot class or benign.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("lo", severity="low", title="LOW", datasets=1)
+    s.record_incident("lo", severity="low", title="LOW", datasets=1)  # low recurs
+    s.record_incident("hi", severity="high", title="HIGH", datasets=1)  # high seen once
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # The misleading flat view: both look "present".
+    assert samples["ogle_incidents_recurring"] == "1"
+    assert samples['ogle_incidents_remembered{severity="high"}'] == "1"
+    # The truth the cross-tab surfaces: no high-severity drift is chronic.
+    assert samples['ogle_incidents_recurring_by_severity{severity="high"}'] == "0"
+    assert samples['ogle_incidents_recurring_by_severity{severity="low"}'] == "1"
+
+
+def test_recurring_by_severity_sums_to_flat_recurring(tmp_path, capsys):
+    """Invariant: the labeled split is a partition of the flat recurring total."""
+    store_path = tmp_path / "baselines.json"
+    _seed_store(store_path)
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    split = sum(
+        int(samples[f'ogle_incidents_recurring_by_severity{{severity="{s}"}}'])
+        for s in ("high", "medium", "low", "unknown")
+    )
+    assert split == int(samples["ogle_incidents_recurring"])
 
 
 def test_incident_summary_serving_by_severity_counts_only_serving():
