@@ -869,6 +869,27 @@ def _baseline_age_seconds(
     return max(0.0, now - epoch)
 
 
+def _stale_baseline_count(store: "BaselineStore", now: float, threshold: float) -> int:
+    """How many watched datasets have a baseline older than `threshold` seconds.
+
+    The orphan count behind `status --orphan-after`: a baseline aging past the walk cadence
+    means Ogle has stopped refreshing that URN's signature (dropped from the walk / renamed /
+    de-provisioned) while its baseline lingers — a per-dataset blind spot the store-wide
+    `--stale-after` heartbeat can't see, because Ogle itself is still running and writing the
+    store on every tick. Reuses `_baseline_age_seconds`, so this count and the `baselines
+    --stale`/`--sort age` view and the ogle_baseline_oldest_capture_age_seconds gauge all read
+    the same ages. Untimed baselines (no/unparseable `computed_at`) are excluded — staleness
+    can't be asserted, the same "never guess an age" rule the age bounds and `--stale` filter
+    follow; that coverage gap is surfaced separately as the untimed count.
+    """
+    n = 0
+    for urn in store.urns():
+        age = _baseline_age_seconds(store, urn, now)
+        if age is not None and age >= threshold:
+            n += 1
+    return n
+
+
 def cmd_baselines(args: argparse.Namespace) -> int:
     """List the datasets Ogle has a baseline signature for — the *other* half of the store.
 
@@ -2371,9 +2392,29 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 2
         heartbeat_fail = store_age is None or store_age > stale_after
 
-    # Final exit: EITHER gate trips the run (drift at/above the floor OR the monitor gone dark).
-    # Kept distinct from the exit-2 bad-duration path above.
-    exit_rc = 1 if (gate_rc or heartbeat_fail) else 0
+    # Orphan gate: the per-dataset twin of the store-wide `--stale-after` heartbeat. `--stale-after`
+    # catches Ogle going dark WHOLESALE (no store write at all); this catches Ogle going dark for a
+    # SINGLE dataset — the walk still runs and rewrites the store every tick, so the heartbeat stays
+    # green, but one URN silently stopped being refreshed (dropped from the walk / renamed / de-
+    # provisioned upstream) and its baseline just ages. `--orphan-after AGE` fails the run when any
+    # baseline's capture age exceeds AGE, turning the orphan signal `status` already SHOWS (oldest-
+    # capture line) into something a cron/CI wrapper can PAGE on. Uses the shared `_parse_age`
+    # grammar; a bad duration is a hard error (exit 2), mirroring `--stale-after`. Off (None) by
+    # default. Untimed baselines can't be proven stale, so they never trip it (see the count helper).
+    orphan_after_raw = getattr(args, "orphan_after", None)
+    orphan_fail = False
+    stale_baselines: Optional[int] = None
+    if orphan_after_raw is not None:
+        orphan_after = _parse_age(orphan_after_raw)
+        if orphan_after is None:
+            _emit("_--orphan-after wants a duration like 6h, 2d, 30m, or 1w._")
+            return 2
+        stale_baselines = _stale_baseline_count(store, now, orphan_after)
+        orphan_fail = stale_baselines > 0
+
+    # Final exit: ANY gate trips the run (drift at/above the floor OR the monitor gone dark OR a
+    # watched dataset orphaned). Kept distinct from the exit-2 bad-duration path above.
+    exit_rc = 1 if (gate_rc or heartbeat_fail or orphan_fail) else 0
 
     if args.json:
         _emit(
@@ -2432,6 +2473,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                             baseline_age["bounds"][0] if baseline_age["bounds"] else None
                         ),
                         "baseline_capture_age_unknown": baseline_age["unknown"],
+                        # How many baselines are older than --orphan-after (the orphan gate's
+                        # count). null when --orphan-after is not set, so a consumer can tell
+                        # "gate not evaluated" from "evaluated, zero stale" (0). The exit code
+                        # folds this together with the severity + heartbeat gates; this field
+                        # says how many watched datasets tripped the orphan gate.
+                        "stale_baselines": stale_baselines,
                     }
                 },
                 indent=2,
@@ -2564,6 +2611,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"_🫀 last check {_fmt_age(store_age)} ago exceeds --stale-after "
                 f"{stale_after_raw} — Ogle may have stopped running — exit 1._"
             )
+    # Orphan gate verdict, distinct from the heartbeat gate above (that's Ogle wholly dark; this
+    # is one watched dataset silently dropping out of the walk while the check keeps running). The
+    # oldest-capture line above already shows the age; this says how many crossed the threshold and
+    # that it failed the run.
+    if orphan_fail:
+        _emit(
+            f"_🕰️ {stale_baselines} baseline(s) not refreshed within --orphan-after "
+            f"{orphan_after_raw} — Ogle may have stopped seeing them — exit 1._"
+        )
     return exit_rc
 
 
@@ -2830,6 +2886,17 @@ def build_parser() -> argparse.ArgumentParser:
         "crash-looped / cron removed), the one failure the severity --fail-on can't see "
         "because a frozen store keeps showing its last incidents. A missing store (Ogle "
         "never ran) also trips it. Composes with --fail-on (either gate fails the run).",
+    )
+    status.add_argument(
+        "--orphan-after",
+        metavar="AGE",
+        default=None,
+        help="Exit 1 if any watched dataset's baseline hasn't been refreshed within AGE (e.g. "
+        "2d, 12h, 1w) — the per-dataset twin of --stale-after. Where --stale-after catches Ogle "
+        "going dark wholesale, this catches ONE dataset silently dropping out of the walk "
+        "(renamed / de-provisioned / filtered out) while the check keeps running, so the "
+        "heartbeat stays green but its baseline just ages. Untimed baselines never trip it. "
+        "Composes with the other gates (any one fails the run).",
     )
     status.set_defaults(func=cmd_status)
 

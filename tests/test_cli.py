@@ -3081,12 +3081,90 @@ def test_status_json_heartbeat_stale_null_without_gate(tmp_path, capsys):
     assert payload["heartbeat_stale"] is None
 
 
+def test_status_orphan_after_trips_when_a_baseline_is_stale(tmp_path, capsys):
+    # The orphan gate: a baseline last refreshed LONGER ago than --orphan-after fails the run —
+    # the per-dataset twin of --stale-after. The fixture's oldest capture is 10d; a 3d threshold
+    # trips on exactly that one URN (ORDERS is 1h fresh, the untimed one can't be proven stale).
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--orphan-after", "3d"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "watching:" in out  # snapshot still rendered
+    assert "1 baseline(s) not refreshed within --orphan-after 3d" in out and "exit 1" in out
+
+
+def test_status_orphan_after_passes_when_all_fresh(tmp_path, capsys):
+    # A threshold wider than the stalest capture (10d < 30d) leaves nothing orphaned → exit 0,
+    # no orphan note.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--orphan-after", "30d"])
+    assert rc == 0
+    assert "orphan-after" not in capsys.readouterr().out
+
+
+def test_status_orphan_after_excludes_untimed_baselines(tmp_path, capsys):
+    # A baseline with no computed_at can't be proven stale — it never trips the gate, the same
+    # "never guess an age" rule the capture-age bounds and `baselines --stale` follow. A store of
+    # only untimed baselines passes even at a tiny threshold.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # neither baseline has computed_at
+    rc = main(["status", "--store", str(store), "--orphan-after", "1s"])
+    assert rc == 0
+    assert "orphan-after" not in capsys.readouterr().out
+
+
+def test_status_orphan_after_composes_with_stale_after(tmp_path, capsys):
+    # Any gate fails the run. Here the store is fresh (heartbeat green) but a baseline is orphaned
+    # → still exit 1 on the orphan gate alone, and only the orphan reason prints.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())  # just saved → seconds old
+    rc = main(["status", "--store", str(store), "--stale-after", "1h", "--orphan-after", "3d"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "--stale-after 1h" not in out  # the heartbeat gate did NOT trip
+    assert "--orphan-after 3d" in out      # the orphan gate did
+
+
+def test_status_orphan_after_bad_duration_exits_two(tmp_path, capsys):
+    # A malformed duration is a hard error (exit 2), never a silent no-op — mirrors --stale-after.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--orphan-after", "soon"])
+    assert rc == 2
+    assert "--orphan-after wants a duration" in capsys.readouterr().out
+
+
+def test_status_json_exposes_stale_baselines(tmp_path, capsys):
+    # --json carries the orphan count as an int and returns the same combined exit — a scheduled
+    # JSON consumer sees how many watched datasets orphaned without parsing prose.
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--orphan-after", "3d", "--json"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["stale_baselines"] == 1
+
+
+def test_status_json_stale_baselines_null_without_gate(tmp_path, capsys):
+    # Without --orphan-after the field is null (gate not evaluated), distinct from 0 (evaluated,
+    # none stale) — so a consumer can tell "not checked" from "checked, all fresh".
+    store = tmp_path / "baselines.json"
+    _seed_timestamped_baselines(store, time.time())
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["stale_baselines"] is None
+
+
 def test_status_registered_in_help():
     ns = build_parser().parse_args(["status"])
     assert ns.func.__name__ == "cmd_status"
     assert ns.json is False
     assert ns.fail_on is None
     assert ns.stale_after is None
+    assert ns.orphan_after is None
 
 
 # ---- ogle show: single-dataset drill-down ----------------------------------------

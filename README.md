@@ -192,6 +192,7 @@ ogle status                    # watch-list size + field/row totals, incident me
 ogle status --json             # same snapshot, machine-readable (baselines/incidents/muted rollup)
 ogle status --fail-on high     # exit 1 if any remembered incident is high+ (CI/cron health gate)
 ogle status --stale-after 6h   # exit 1 if the store hasn't been written in 6h (monitor-went-dark gate)
+ogle status --orphan-after 2d  # exit 1 if any watched dataset's baseline hasn't refreshed in 2d (orphan gate)
 ```
 
 The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
@@ -233,6 +234,19 @@ on top of the `ogle_store_age_seconds` gauge. It **composes with `--fail-on`** �
 run — so one scheduled `ogle status --fail-on high --stale-after 6h` pages on *both* a high incident
 and the monitor going quiet. `--json` carries the verdict as `heartbeat_stale` (`true`/`false`, or
 `null` when `--stale-after` isn't given, so a consumer can tell "not checked" from "checked, healthy").
+
+`--orphan-after <age>` is the **per-dataset twin** of `--stale-after`. The heartbeat gate catches Ogle
+going dark *wholesale* — no store write at all — but it stays green when the walk still runs and rewrites
+the store every tick yet *one* dataset silently drops out of it (renamed, de-provisioned upstream, or
+filtered away): that URN's baseline just ages while everything else looks healthy. `--orphan-after 2d`
+exits `1` when any baseline's capture age exceeds the window (Ogle refreshes a signature on every clean
+walk that still sees the dataset, so an aging capture stamp *is* the "stopped seeing it" signal), turning
+the orphan hint `status` already shows (the *oldest baseline capture* line) into something a cron/CI
+wrapper can page on. **Untimed** baselines (no parseable `computed_at`) can't be proven stale, so they
+never trip it — the same "never guess an age" rule the capture-age bounds and `baselines --stale` follow.
+Same compact-duration grammar (`30m`, `12h`, `2d`, `1w`; a bad value is a hard exit `2`), and it composes
+with the other gates — *any one* fails the run. `--json` carries the count as `stale_baselines` (an int,
+or `null` when `--orphan-after` isn't given, so a consumer can tell "not checked" from "checked, none stale").
 
 ### Prometheus metrics (`ogle metrics`)
 
