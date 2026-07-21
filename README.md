@@ -776,6 +776,23 @@ payload so the verdict survives a stdout capture forwarded over a log/message bu
 `report_text` carries the same narrative the notifier would have — a JSON consumer can
 forward the drift story itself.
 
+**Validating the wiring without paging anyone (`--dry-run`).** Before you trust a new
+watch line, you want to know it *would* fire — without actually paging a human while you
+test. `--dry-run` runs the check and makes the full paging decision, but never invokes the
+notifier: no `--notify-cmd`, no stderr `PAGE:` block. The `ogle check` exit code is still
+preserved, so a `1` still tells you an incident is standing.
+
+```bash
+ogle watch --dry-run --json -- --store baselines.json --signatures my-signatures.json
+# -> "would_page": true, "paged": false, "dry_run": true, "exit_rc": 1  (nothing delivered)
+```
+
+The human line reads `WOULD PAGE (dry-run, no page sent)` instead of `PAGED`. In `--json`,
+`would_page` is the paging *decision* decoupled from dispatch: outside `--dry-run` it always
+equals `paged`; under it, `would_page` can be `true` while `paged` is `false`. (Note the
+check itself still updates its incident memory — `--dry-run` suppresses the *page*, not the
+store bookkeeping, so a debounced standing incident won't re-fire on the next real tick.)
+
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md).

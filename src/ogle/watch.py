@@ -64,6 +64,10 @@ class TickOutcome:
     error_text: str    # anything the check wrote to stderr (input/live-walk failures)
     page_delivered: bool = True  # did the notifier actually succeed? (False on delivery failure)
     delivery_error: str = ""     # why delivery failed, when it did
+    would_page: bool = False     # would this tick page a human? (the paging DECISION, decoupled
+    #                              from dispatch — in a normal run would_page == paged; under
+    #                              --dry-run a page is decided (would_page True) but suppressed
+    #                              (paged False) so the wiring can be validated silently)
 
 
 def _default_check_runner(argv: Sequence[str]) -> int:
@@ -133,6 +137,7 @@ def run_tick(
     *,
     notifier: Optional[Notifier] = None,
     page_on_error: bool = False,
+    dry_run: bool = False,
     run_check: Optional[CheckRunner] = None,
 ) -> TickOutcome:
     """Run one `ogle check` and dispatch on its exit-code contract.
@@ -141,6 +146,10 @@ def run_tick(
     `["--signatures", "sigs.json"]` or `["--gms", url, "--discover", "--write-back"]`).
     stdout (the narrative) and stderr (errors) are captured so the notifier can carry the
     story, and so the check's own console noise doesn't leak through the scheduler.
+
+    `dry_run` decides-but-suppresses: the check still runs and the paging decision is still
+    made (`would_page`), but the notifier is never invoked, so an operator can validate a new
+    watch cron line — does it fire? what narrative would it carry? — without paging a human.
     """
     notifier = notifier or _stderr_notifier
     run_check = run_check or _default_check_runner
@@ -152,15 +161,24 @@ def run_tick(
     error_text = err.getvalue().rstrip()
 
     if code == EXIT_INCIDENT:
+        if dry_run:
+            # A page WOULD fire — but suppress delivery so validating the wiring is silent.
+            return TickOutcome(code, "page", False, report_text, error_text, would_page=True)
         delivered, derr = _deliver(
             notifier, report_text or "ogle: a new drift incident fired (no narrative captured)"
         )
-        return TickOutcome(code, "page", True, report_text, error_text, delivered, derr)
+        return TickOutcome(
+            code, "page", True, report_text, error_text, delivered, derr, would_page=True
+        )
 
     if code == EXIT_ERROR:
         if page_on_error:
+            if dry_run:
+                return TickOutcome(code, "error", False, report_text, error_text, would_page=True)
             delivered, derr = _deliver(notifier, error_text or "ogle check failed (exit 2)")
-            return TickOutcome(code, "error", True, report_text, error_text, delivered, derr)
+            return TickOutcome(
+                code, "error", True, report_text, error_text, delivered, derr, would_page=True
+            )
         return TickOutcome(code, "error", False, report_text, error_text)
 
     # Healthy (0) or any unexpected non-contract code: treat as quiet, don't page.
@@ -193,6 +211,12 @@ def build_watch_args(parser_sub) -> None:
         "Default: log the error but do not page.",
     )
     watch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the check and decide whether it WOULD page, but never invoke the notifier "
+        "— validate a new watch cron line without paging a human. Exit code is preserved.",
+    )
+    watch.add_argument(
         "--json",
         action="store_true",
         help="Emit the tick outcome as JSON on stdout instead of the human status line "
@@ -212,10 +236,12 @@ def build_watch_args(parser_sub) -> None:
 def cmd_watch(args) -> int:
     """CLI handler: run one tick, print a one-line status, and PRESERVE the check's exit code."""
     notifier = make_command_notifier(args.notify_cmd) if args.notify_cmd else None
+    dry_run = getattr(args, "dry_run", False)
     outcome = run_tick(
         args.check_args,
         notifier=notifier,
         page_on_error=args.page_on_error,
+        dry_run=dry_run,
     )
     # A dispatched-but-undelivered page is an operational failure the scheduler must see:
     # the exit code still honors the `ogle check` contract, but a broken pager must not hide
@@ -244,6 +270,12 @@ def cmd_watch(args) -> int:
                         # nonempty delivery_error iff this is true; distinct from a healthy
                         # tick that never paged (paged False → delivery_failed False).
                         "delivery_failed": delivery_failed,
+                        # The paging DECISION, decoupled from dispatch: True whenever the tick
+                        # warranted a page, even under --dry-run where paged stays False. In a
+                        # normal run would_page == paged; a wrapper validating a cron line gates
+                        # on would_page, an alert router on paged/delivery_failed.
+                        "would_page": outcome.would_page,
+                        "dry_run": dry_run,
                         "report_text": outcome.report_text,
                         "error_text": outcome.error_text,
                     }
@@ -259,6 +291,10 @@ def cmd_watch(args) -> int:
     status = {"ok": "healthy", "page": "PAGED (new incident)", "error": "check error"}[
         outcome.action
     ]
+    # Under --dry-run a page was decided but suppressed — say so plainly rather than claim
+    # a page went out (which never happened) or "healthy" (which hides the pending drift).
+    if dry_run and outcome.would_page:
+        status = "WOULD PAGE (dry-run, no page sent)"
     sys.stdout.write(f"ogle watch: {status} (exit {outcome.code})\n")
     if delivery_failed:
         sys.stderr.write(

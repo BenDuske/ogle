@@ -374,3 +374,107 @@ def test_watch_json_carries_delivery_failed_on_broken_pager(tmp_path, capsys, mo
     assert payload["delivery_error"]  # non-empty reason
     # the page still fell back to a loud stderr block (never silently lost)
     assert "PAGE" in captured.err
+
+
+# ---- `ogle watch --dry-run`: decide-but-suppress, validate wiring without paging ---
+def test_dry_run_incident_decides_but_never_delivers():
+    """A real incident under --dry-run: the paging DECISION stands (would_page True) but no
+    page is dispatched (paged False) and the notifier is never touched."""
+    note = _Recorder()
+    out = run_tick(
+        ["--signatures", "s.json"],
+        notifier=note,
+        dry_run=True,
+        run_check=_runner(EXIT_INCIDENT, stdout="HIGH drift on customers [serving]"),
+    )
+    assert out.action == "page"
+    assert out.would_page is True     # a page WAS warranted
+    assert out.paged is False         # ...but suppressed
+    assert note.pages == []           # notifier never invoked
+    assert out.code == 1              # exit contract preserved
+    assert out.report_text == "HIGH drift on customers [serving]"
+
+
+def test_dry_run_healthy_would_not_page():
+    """A clean tick: nothing to page whether or not --dry-run is set."""
+    note = _Recorder()
+    out = run_tick([], notifier=note, dry_run=True, run_check=_runner(EXIT_HEALTHY))
+    assert out.action == "ok"
+    assert out.would_page is False
+    assert out.paged is False
+    assert note.pages == []
+
+
+def test_dry_run_error_with_page_on_error_would_page_but_suppresses():
+    """--dry-run also suppresses the opt-in error page while still recording it would fire."""
+    note = _Recorder()
+    out = run_tick(
+        [],
+        notifier=note,
+        page_on_error=True,
+        dry_run=True,
+        run_check=_runner(EXIT_ERROR, stderr="live walk failed"),
+    )
+    assert out.action == "error"
+    assert out.would_page is True
+    assert out.paged is False
+    assert note.pages == []
+    assert out.code == 2
+
+
+def test_normal_run_would_page_mirrors_paged():
+    """Invariant: outside --dry-run, would_page tracks paged exactly (decision == dispatch)."""
+    note = _Recorder()
+    out = run_tick([], notifier=note, run_check=_runner(EXIT_INCIDENT, stdout="drift"))
+    assert out.would_page is True and out.paged is True
+    clean = run_tick([], notifier=_Recorder(), run_check=_runner(EXIT_HEALTHY))
+    assert clean.would_page is False and clean.paged is False
+
+
+def test_watch_dry_run_flag_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(["watch", "--dry-run", "--", "--signatures", "s.json"])
+    assert ns.dry_run is True
+    ns2 = parser.parse_args(["watch", "--", "--signatures", "s.json"])
+    assert ns2.dry_run is False
+
+
+def test_watch_dry_run_json_reports_would_page_without_delivery(tmp_path, capsys):
+    """End-to-end: real drift under `--dry-run --json` -> exit_rc 1, would_page True, paged
+    False, dry_run True, and NO page block on stderr (nothing was delivered)."""
+    store = tmp_path / "store.json"
+    sig1 = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig1])
+    main(["watch", "--", "--store", str(store), "--signatures", str(sigs)])  # seed
+    sig2 = build_signature(CUSTOMERS_URN, schema_fields=[], row_count=10)     # drop a column
+    _write_sigs(tmp_path / "s.json", [sig2])
+    capsys.readouterr()  # clear
+    code = main(
+        ["watch", "--dry-run", "--json", "--", "--store", str(store), "--signatures", str(sigs)]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    payload = json.loads(captured.out)["watch"]
+    assert payload["action"] == "page"
+    assert payload["exit_rc"] == 1
+    assert payload["would_page"] is True
+    assert payload["paged"] is False
+    assert payload["dry_run"] is True
+    assert payload["delivery_failed"] is False
+    assert "PAGE" not in captured.err  # nothing delivered, nothing fell back to stderr
+
+
+def test_watch_dry_run_human_line_says_would_page(tmp_path, capsys):
+    """Human status under --dry-run on a real incident reads WOULD PAGE, not PAGED."""
+    store = tmp_path / "store.json"
+    sig1 = build_signature(CUSTOMERS_URN, schema_fields=[("id", "int")], row_count=10)
+    sigs = _write_sigs(tmp_path / "s.json", [sig1])
+    main(["watch", "--", "--store", str(store), "--signatures", str(sigs)])  # seed
+    sig2 = build_signature(CUSTOMERS_URN, schema_fields=[], row_count=10)
+    _write_sigs(tmp_path / "s.json", [sig2])
+    capsys.readouterr()
+    code = main(["watch", "--dry-run", "--", "--store", str(store), "--signatures", str(sigs)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "WOULD PAGE (dry-run" in out
+    assert "PAGED (new incident)" not in out
