@@ -503,7 +503,12 @@ def test_muted_json_shape(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     # A permanent mute carries a null expiry; snoozes carry an epoch `until`. A mute set
-    # without --reason carries a null `reason`.
+    # without --reason carries a null `reason`. `since` is the epoch the silence began —
+    # a real timestamp here (mute stamps it), so pop it off before the shape compare.
+    assert len(payload["muted"]) == 1
+    entry = payload["muted"][0]
+    since = entry.pop("since")
+    assert isinstance(since, (int, float)) and since > 0
     assert payload == {"muted": [{"urn": CUSTOMERS_URN, "until": None, "reason": None}]}
 
 
@@ -764,6 +769,47 @@ def test_muted_human_and_json_surface_reason(tmp_path, capsys):
     main(["muted", "--store", str(store), "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["muted"][0]["reason"] == "noisy dashboard"
+
+
+def test_muted_human_and_json_surface_age(tmp_path, capsys):
+    """`ogle muted` dates each standing silence — 'muted <age> ago' in the human view and an
+    epoch `since` in --json — so a long-standing blind spot is visible as such."""
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    main(["muted", "--store", str(store)])
+    out = capsys.readouterr().out
+    # A just-set mute reads "muted just now" (no "ago" on the sub-minute case, per the
+    # incidents idiom); an older mute would read "muted 3d ago".
+    assert "muted just now" in out
+    assert "just now ago" not in out
+    main(["muted", "--store", str(store), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    since = payload["muted"][0]["since"]
+    assert isinstance(since, (int, float)) and since > 0
+
+    # An older stamp takes the "… ago" suffix — back-date the mute 3 days and re-render.
+    s = BaselineStore.load(store)
+    s.muted_at[CUSTOMERS_URN] = time.time() - 3 * 86400
+    s.save()
+    capsys.readouterr()
+    main(["muted", "--store", str(store)])
+    assert "muted 3d ago" in capsys.readouterr().out
+
+
+def test_muted_json_since_null_for_undated_mute(tmp_path, capsys):
+    """A legacy/undated mute (no age stamp) surfaces `since: null`, not a fabricated age."""
+    store = tmp_path / "baselines.json"
+    s = BaselineStore(path=store)
+    s.mute(CUSTOMERS_URN)  # no `now` -> undated
+    s.save()
+    main(["muted", "--store", str(store), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["muted"][0]["since"] is None
+    # Human view simply omits the age clause for an undated mute (no "muted ... ago").
+    capsys.readouterr()
+    main(["muted", "--store", str(store)])
+    assert "ago" not in capsys.readouterr().out
 
 
 def test_unmute_then_remute_starts_reasonless(tmp_path, capsys):

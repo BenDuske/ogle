@@ -677,7 +677,7 @@ def cmd_mute(args: argparse.Namespace) -> int:
 
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
-    newly = store.mute(args.urn, until=until, reason=reason)
+    newly = store.mute(args.urn, until=until, reason=reason, now=time.time())
     try:
         store.save(store_path)
     except Exception as exc:
@@ -759,8 +759,16 @@ def cmd_muted(args: argparse.Namespace) -> int:
         entries = []
         for urn in urns:
             exp = store.mute_expiry(urn)
-            # until=None -> permanent; reason=None -> no note recorded.
-            entries.append({"urn": urn, "until": exp, "reason": store.mute_reason(urn)})
+            # until=None -> permanent; reason=None -> no note recorded; since=None -> undated
+            # (legacy/hand-edited mute with no age stamp).
+            entries.append(
+                {
+                    "urn": urn,
+                    "until": exp,
+                    "reason": store.mute_reason(urn),
+                    "since": store.mute_since(urn),
+                }
+            )
         _emit(json.dumps({"muted": entries}, indent=2, sort_keys=True))
         return 0
     if not urns:
@@ -787,9 +795,20 @@ def cmd_muted(args: argparse.Namespace) -> int:
     for urn in urns:
         exp = store.mute_expiry(urn)
         suffix = f" — snoozed until {_fmt_expiry(exp)}" if exp is not None else ""
+        # How long this silence has been standing — the accountability signal that a
+        # permanent mute set weeks ago is a bigger blind spot than a fresh one. Undated
+        # (legacy) mutes omit it rather than fake an age.
+        since = store.mute_since(urn)
+        if since is not None:
+            age = _fmt_age(now - since)
+            # "just now" already reads as a time — don't tack "ago" onto it (mirrors the
+            # incidents "last seen just now" idiom); older ages take the "… ago" suffix.
+            apart = f" · muted {age}" if age == "just now" else f" · muted {age} ago"
+        else:
+            apart = ""
         reason = store.mute_reason(urn)
         rpart = f" — _{reason}_" if reason else ""
-        _emit(f"- `{urn}`{suffix}{rpart}")
+        _emit(f"- `{urn}`{suffix}{apart}{rpart}")
     return 0
 
 

@@ -142,7 +142,7 @@ ogle mute '<urn>' --for-hours 4    # snooze 4 hours
 # ...and record WHY, so the silence isn't a mystery weeks later:
 ogle mute '<urn>' --reason 'dashboard bounces every Monday — upstream ETL retry'
 
-ogle muted            # list what's currently silenced (snoozes show their expiry + reason)
+ogle muted            # list what's currently silenced (each shows its age, expiry + reason)
 ogle muted --permanent  # only the standing blind spots (no expiry) — the audit view
 ogle muted --snoozed    # only the timed mutes that lapse on their own
 ogle muted --unexplained  # only mutes with no --reason — the undocumented silences
@@ -171,7 +171,11 @@ fact, and is cleared automatically when the mute is lifted (unmute / forget / sn
 mutes with *no* note recorded, so `ogle muted --permanent --unexplained` surfaces the
 standing blind spots nobody justified — the ones to document or lift (a blank/whitespace
 `--reason` never counts as explained, since `mute` stores it as no note)
-so a reason never outlives the mute it explains. `ogle check` reports how many muted datasets
+so a reason never outlives the mute it explains. Each mute also carries **how long it's been
+standing** — `ogle muted` reads `muted 3d ago` per line and `--json` a `since` epoch — because
+a permanent mute set weeks ago is a bigger blind spot than a fresh one; the stamp is set when
+the silence begins, preserved across re-annotation, and cleared with the mute (a legacy/undated
+mute reads its age as unknown rather than faking one). `ogle check` reports how many muted datasets
 it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urns` in `--json`,
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
 false positives) as a first-class operator control.

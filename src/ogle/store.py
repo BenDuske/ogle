@@ -108,6 +108,13 @@ class BaselineStore:
     # URN, cleared alongside the mute by unmute/forget/expiry, so a reason never outlives
     # the mute it annotates.
     mute_reasons: Dict[str, str] = field(default_factory=dict)
+    # When each URN's *current* silence began (epoch seconds). A permanent mute that has been
+    # standing for weeks is a bigger blind spot than one set an hour ago, so this is the age
+    # axis behind `ogle muted`'s "muted 3d ago" — the accountability twin of mute_reasons'
+    # "why". Stamped once when a URN becomes muted and preserved for the life of that
+    # continuous silence (a re-annotate/no-op keeps the original start), then cleared alongside
+    # the mute by unmute/forget/expiry so a stamp never outlives the mute it dates.
+    muted_at: Dict[str, float] = field(default_factory=dict)
 
     # Runtime-only recovery status (NOT persisted — excluded from to_dict, and from
     # dataclass eq/repr so two stores with identical data still compare equal). Set by
@@ -149,6 +156,7 @@ class BaselineStore:
         self.muted_urns.discard(urn)
         self.muted_until.pop(urn, None)
         self.mute_reasons.pop(urn, None)
+        self.muted_at.pop(urn, None)
         return existed
 
     def __len__(self) -> int:
@@ -222,7 +230,13 @@ class BaselineStore:
         return out
 
     # ---- muting (known false positives) --------------------------------------------
-    def mute(self, urn: str, until: Optional[float] = None, reason: Optional[str] = None) -> bool:
+    def mute(
+        self,
+        urn: str,
+        until: Optional[float] = None,
+        reason: Optional[str] = None,
+        now: Optional[float] = None,
+    ) -> bool:
         """Mark a dataset as a known false positive so its drift never pages.
 
         `until` is an epoch-seconds expiry for a *snooze* (temporary mute); omit it for a
@@ -235,15 +249,27 @@ class BaselineStore:
         earlier mute set (mirrors the provenance-refresh rule on `record_incident`). A
         re-snooze/no-op that leaves the mute state unchanged can still update the note.
 
+        `now` (epoch seconds) dates the silence: it stamps `muted_at[urn]` the first time a
+        URN becomes muted and is *preserved* while that silence stays continuous — a
+        re-annotate, a re-snooze no-op, or a snooze→permanent escalation all keep the original
+        start, so `ogle muted`'s "muted 3d ago" measures the whole standing blind spot, not
+        the last touch. A `now=None` call never stamps or clears (keeps the method usable from
+        tests/legacy callers without a clock); the stamp is cleared only when the mute ends.
+
         Returns True if this changed the mute *state*, False if it was already covered by an
         equal-or-stronger mute (so a CLI can say "already muted" rather than claim an action).
-        Setting a reason is a side effect and never affects this return value.
+        Setting a reason / stamping the age are side effects and never affect this return value.
         """
         if reason is not None:
             # Only annotate a URN that is (or is becoming) muted, so no orphan note lingers
             # for an unmuted dataset. The stronger-state guards below can still return False,
             # but the URL ends this call muted either way, so recording the note is correct.
             self.mute_reasons[urn] = reason
+        if now is not None and urn not in self.muted_at:
+            # Set-if-absent: the stamp marks when this continuous silence began, so it survives
+            # re-annotation and snooze→permanent escalation. It's absent again only after the
+            # mute is fully cleared (unmute/forget/expiry), so the next mute re-dates from now.
+            self.muted_at[urn] = now
         if until is None:
             # Permanent mute wins over any snooze.
             self.muted_until.pop(urn, None)
@@ -266,6 +292,7 @@ class BaselineStore:
         self.muted_urns.discard(urn)
         self.muted_until.pop(urn, None)
         self.mute_reasons.pop(urn, None)
+        self.muted_at.pop(urn, None)
         return had
 
     def is_muted(self, urn: str, now: Optional[float] = None) -> bool:
@@ -291,6 +318,15 @@ class BaselineStore:
         """The human rationale recorded for `urn`'s mute, or None if none was given."""
         return self.mute_reasons.get(urn)
 
+    def mute_since(self, urn: str) -> Optional[float]:
+        """When `urn`'s current silence began (epoch seconds), or None if not dated.
+
+        Only mutes created with a `now` clock carry a stamp — a legacy/hand-edited file or a
+        mute set without one reads as None (age *unknown*, not zero), so a caller shows "muted
+        <unknown> ago" honestly rather than inventing an age.
+        """
+        return self.muted_at.get(urn)
+
     def purge_expired_mutes(self, now: float) -> List[str]:
         """Drop snoozes that have expired as of `now`; return the URNs freed (sorted).
 
@@ -300,6 +336,7 @@ class BaselineStore:
         for urn in expired:
             self.muted_until.pop(urn, None)
             self.mute_reasons.pop(urn, None)  # drop the note with the snooze it annotated
+            self.muted_at.pop(urn, None)      # and its age stamp — the silence has ended
         return expired
 
     def muted(self, now: Optional[float] = None) -> List[str]:
@@ -323,6 +360,13 @@ class BaselineStore:
             "mute_reasons": {
                 urn: self.mute_reasons[urn]
                 for urn in sorted(self.mute_reasons)
+                if urn in self.muted_urns or urn in self.muted_until
+            },
+            # Age stamps, persisted only for a URN still muted in either form — same guard as
+            # mute_reasons so a stamp can't linger past its mute or bloat the file.
+            "muted_at": {
+                urn: self.muted_at[urn]
+                for urn in sorted(self.muted_at)
                 if urn in self.muted_urns or urn in self.muted_until
             },
         }
@@ -361,6 +405,14 @@ class BaselineStore:
             for urn, reason in dict(data.get("mute_reasons", {})).items()
             if urn in muted or urn in muted_until
         }
+        # muted_at (age stamps, introduced after mute_reasons) is likewise additive; older
+        # files lack it and their mutes simply read as undated. Keep only stamps whose URN is
+        # still muted, so a legacy/hand-edited file can't resurrect an orphan stamp.
+        muted_at = {
+            urn: float(ts)
+            for urn, ts in dict(data.get("muted_at", {})).items()
+            if urn in muted or urn in muted_until
+        }
         return cls(
             path=path,
             baselines=baselines,
@@ -368,6 +420,7 @@ class BaselineStore:
             muted_urns=muted,
             muted_until=muted_until,
             mute_reasons=mute_reasons,
+            muted_at=muted_at,
         )
 
     def save(self, path: Optional[Union[str, Path]] = None) -> Path:

@@ -393,6 +393,106 @@ def test_load_drops_orphan_mute_reason_for_unmuted_urn(tmp_path):
     assert store.mute_reason(ORDERS_URN) is None
 
 
+def test_mute_since_stamped_once_and_preserved():
+    store = BaselineStore()
+    # First mute with a clock dates the silence.
+    store.mute(CUSTOMERS_URN, now=1000.0)
+    assert store.mute_since(CUSTOMERS_URN) == 1000.0
+    # A re-annotate keeps the ORIGINAL start — the silence has been continuous.
+    store.mute(CUSTOMERS_URN, reason="root-caused", now=5000.0)
+    assert store.mute_since(CUSTOMERS_URN) == 1000.0
+    # Escalating a snooze to permanent likewise keeps the original stamp.
+    s2 = BaselineStore()
+    s2.mute(ORDERS_URN, until=9e9, now=2000.0)
+    assert s2.mute_since(ORDERS_URN) == 2000.0
+    s2.mute(ORDERS_URN, now=6000.0)  # now permanent
+    assert s2.mute_since(ORDERS_URN) == 2000.0
+    # Unmuting clears the stamp; a fresh mute re-dates from the new `now`.
+    s2.unmute(ORDERS_URN)
+    assert s2.mute_since(ORDERS_URN) is None
+    s2.mute(ORDERS_URN, now=8000.0)
+    assert s2.mute_since(ORDERS_URN) == 8000.0
+
+
+def test_mute_without_now_is_undated():
+    # A mute set without a clock reads as age-unknown (None), not zero — the accessor never
+    # invents an age. A later `now` on the same continuous mute back-fills the stamp.
+    store = BaselineStore()
+    store.mute(CUSTOMERS_URN)
+    assert store.mute_since(CUSTOMERS_URN) is None
+    store.mute(CUSTOMERS_URN, reason="dated late", now=4200.0)
+    assert store.mute_since(CUSTOMERS_URN) == 4200.0
+
+
+def test_mute_since_dropped_on_forget_and_expiry():
+    store = BaselineStore()
+    store.put_baseline(_sig(ORDERS_URN))
+    store.mute(ORDERS_URN, now=100.0)
+    assert store.forget_baseline(ORDERS_URN) is True
+    assert store.mute_since(ORDERS_URN) is None
+    # An expired snooze drops its stamp along with the snooze.
+    store.mute(CUSTOMERS_URN, until=100.0, now=50.0)
+    assert store.mute_since(CUSTOMERS_URN) == 50.0
+    assert store.purge_expired_mutes(now=150.0) == [CUSTOMERS_URN]
+    assert store.mute_since(CUSTOMERS_URN) is None
+
+
+def test_mute_since_survives_save_load_only_while_muted(tmp_path):
+    p = tmp_path / "store.json"
+    s = BaselineStore(path=p)
+    s.mute(ORDERS_URN, now=7777.0)
+    s.save()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["muted_at"] == {ORDERS_URN: 7777.0}
+    reloaded = BaselineStore.load(p)
+    assert reloaded.mute_since(ORDERS_URN) == 7777.0
+    # A stamp left behind for an unmuted URN is never persisted (orphan guard in to_dict).
+    reloaded.unmute(ORDERS_URN)
+    reloaded.muted_at[CUSTOMERS_URN] = 999.0  # simulate a stray
+    reloaded.save()
+    data2 = json.loads(p.read_text(encoding="utf-8"))
+    assert data2["muted_at"] == {}
+
+
+def test_load_old_store_without_muted_at_key_is_undated(tmp_path):
+    # A pre-muted_at file loads its mutes as undated rather than failing — additive key.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {},
+                "muted_urns": [CUSTOMERS_URN],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.muted() == [CUSTOMERS_URN]
+    assert store.mute_since(CUSTOMERS_URN) is None
+
+
+def test_load_drops_orphan_muted_at_for_unmuted_urn(tmp_path):
+    # A hand-edited/legacy file with a stamp for a URN that isn't muted must not resurrect it.
+    p = tmp_path / "store.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {},
+                "seen_incidents": {},
+                "muted_urns": [CUSTOMERS_URN],
+                "muted_at": {CUSTOMERS_URN: 111.0, ORDERS_URN: 222.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.mute_since(CUSTOMERS_URN) == 111.0
+    assert store.mute_since(ORDERS_URN) is None
+
+
 def test_snooze_survives_save_load_and_on_disk_shape(tmp_path):
     p = tmp_path / "store.json"
     s = BaselineStore(path=p)
