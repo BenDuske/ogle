@@ -1619,7 +1619,16 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
     dry_run = getattr(args, "dry_run", False)
+    # `--json`: the machine-readable receipt for the one mutating command an automation loop
+    # actually drives (`ogle incidents --fingerprints | ogle resolve -`). The human view is a
+    # stream of per-token `✅`/`_not remembered_` lines a consumer would have to scrape; --json
+    # folds the same batch outcome into one object — which fingerprints were dropped, which
+    # tokens missed, the count — so a "drift is fixed" wrapper can confirm exactly what it
+    # cleared without parsing prose. In --json mode the per-token human lines are suppressed
+    # (they'd corrupt the payload); the single object prints at the end. Mirrors `watch --json`.
+    as_json = getattr(args, "json", False)
     resolved: List[str] = []
+    missed: List[str] = []
     for raw in _expand_stdin_fingerprints(args.fingerprint):
         # Strip surrounding whitespace so the documented pipe works cross-platform:
         # `ogle incidents --fingerprints | xargs ogle resolve` — on Windows the emitted lines
@@ -1629,27 +1638,67 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         token = raw.strip()
         fp, candidates = _resolve_fingerprint(store, token)
         if candidates:
+            # Ambiguity is a hard usage error (exit 2): we refuse to guess. The human diagnostic
+            # always goes to stderr (leaving stdout clean); in --json mode we ALSO emit a JSON
+            # error object to stdout carrying the partial batch so far, so a consumer parsing
+            # stdout gets a structured verdict instead of an empty stream before the exit 2.
             print(
                 f"ogle resolve: '{token}' is ambiguous — matches "
                 f"{len(candidates)} incidents: {', '.join(candidates)}",
                 file=sys.stderr,
             )
+            if as_json:
+                _emit(
+                    json.dumps(
+                        {
+                            "resolve": {
+                                "dry_run": dry_run,
+                                "resolved": resolved,
+                                "missed": missed,
+                                "count": len(resolved),
+                                "error": "ambiguous",
+                                "ambiguous_token": token,
+                                "candidates": candidates,
+                            }
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
             return 2
         if fp is None:
-            _emit(f"_not remembered: {token}_")
+            missed.append(token)
+            if not as_json:
+                _emit(f"_not remembered: {token}_")
             continue
         # --dry-run resolves the token to a fingerprint (so the preview is exact) but never
         # forgets it — the store is left untouched and the save below is skipped.
         if not dry_run:
             store.forget_incident(fp)
         resolved.append(fp)
-        _emit(f"👀 would resolve `{fp}`" if dry_run else f"✅ resolved `{fp}`")
+        if not as_json:
+            _emit(f"👀 would resolve `{fp}`" if dry_run else f"✅ resolved `{fp}`")
     if resolved and not dry_run:
         try:
             store.save(store_path)
         except Exception as exc:
             print(f"ogle resolve: could not save store: {exc}", file=sys.stderr)
             return 2
+    if as_json:
+        _emit(
+            json.dumps(
+                {
+                    "resolve": {
+                        "dry_run": dry_run,
+                        "resolved": resolved,
+                        "missed": missed,
+                        "count": len(resolved),
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     return 0
 
 
@@ -1677,26 +1726,51 @@ def cmd_forget(args: argparse.Namespace) -> int:
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
     dry_run = getattr(args, "dry_run", False)
+    # `--json`: the machine receipt for the watch-list write-side pipe
+    # (`ogle baselines --grep old --urns | ogle forget -`), symmetric with `resolve --json`.
+    # Folds the per-token `✅`/`_not watched_` stream into one object — which URNs were dropped,
+    # which missed, the count — so an automated decommission wrapper confirms exactly what it
+    # pruned. Per-token human lines are suppressed in --json mode; the object prints at the end.
+    as_json = getattr(args, "json", False)
     forgotten: List[str] = []
+    missed: List[str] = []
     for raw in _expand_stdin_fingerprints(args.urn):
         # Trim surrounding whitespace so the cross-platform pipe works (Windows lines carry a
         # trailing CR); a URN never has surrounding whitespace. An all-whitespace token
         # collapses to "" → a reportable miss below, never a mass wipe.
         urn = raw.strip()
         if not urn or urn not in store:
-            _emit(f"_not watched: {urn}_")
+            missed.append(urn)
+            if not as_json:
+                _emit(f"_not watched: {urn}_")
             continue
         # --dry-run reports the exact outcome but leaves the store untouched (save skipped).
         if not dry_run:
             store.forget_baseline(urn)
         forgotten.append(urn)
-        _emit(f"👀 would forget `{urn}`" if dry_run else f"✅ forgot `{urn}`")
+        if not as_json:
+            _emit(f"👀 would forget `{urn}`" if dry_run else f"✅ forgot `{urn}`")
     if forgotten and not dry_run:
         try:
             store.save(store_path)
         except Exception as exc:
             print(f"ogle forget: could not save store: {exc}", file=sys.stderr)
             return 2
+    if as_json:
+        _emit(
+            json.dumps(
+                {
+                    "forget": {
+                        "dry_run": dry_run,
+                        "forgotten": forgotten,
+                        "missed": missed,
+                        "count": len(forgotten),
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     return 0
 
 
@@ -3301,6 +3375,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview which incidents would be resolved without dropping anything from "
         "memory (store is never modified). Pipe-safe: dry-run a batch before committing it.",
     )
+    resolve.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the batch outcome as one JSON object (resolved[], missed[], count, "
+        "dry_run) instead of per-token lines — a machine receipt for an automation loop.",
+    )
     resolve.set_defaults(func=cmd_resolve)
 
     # `ogle forget` — the write-side counterpart to `ogle baselines`: prune a decommissioned
@@ -3325,6 +3405,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Preview which datasets would be forgotten without dropping anything from the "
         "store (never modified). Pipe-safe: dry-run a batch before committing it.",
+    )
+    forget.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the batch outcome as one JSON object (forgotten[], missed[], count, "
+        "dry_run) instead of per-token lines — a machine receipt for an automation loop.",
     )
     forget.set_defaults(func=cmd_forget)
 

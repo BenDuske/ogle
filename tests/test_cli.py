@@ -2465,11 +2465,75 @@ def test_incidents_fingerprints_pipe_into_resolve_stdin_end_to_end(tmp_path, cap
     assert BaselineStore.load(store_path).incidents() == []
 
 
+def test_resolve_json_folds_batch_into_one_receipt(tmp_path, capsys):
+    # --json is the machine receipt for an automation loop: one object with the hits it
+    # dropped, the misses, and the count — no per-token prose to scrape.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcdef1234567890", "deadbeef", "--json", "--store", str(store_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # per-token human lines are suppressed in --json mode (they'd corrupt the payload)
+    assert "✅ resolved" not in out and "not remembered" not in out
+    payload = json.loads(out)["resolve"]
+    assert payload == {
+        "dry_run": False,
+        "resolved": ["abcdef1234567890"],
+        "missed": ["deadbeef"],
+        "count": 1,
+    }
+    assert not BaselineStore.load(store_path).has_seen("abcdef1234567890")  # really dropped
+
+
+def test_resolve_json_dry_run_reports_would_drop_without_mutating(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH", datasets=1)
+    s.save()
+    mtime_before = store_path.stat().st_mtime_ns
+
+    rc = main(["resolve", "abcd", "--dry-run", "--json", "--store", str(store_path)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["resolve"]
+    assert payload["dry_run"] is True
+    assert payload["resolved"] == ["abcdef1234567890"]  # prefix resolved to the full fp
+    assert payload["count"] == 1
+    # nothing mutated or saved
+    assert BaselineStore.load(store_path).has_seen("abcdef1234567890")
+    assert store_path.stat().st_mtime_ns == mtime_before
+
+
+def test_resolve_json_ambiguity_emits_structured_error_and_exits_2(tmp_path, capsys):
+    # Ambiguity is still a hard exit-2 usage error, but --json also surfaces it as a JSON
+    # object on stdout (with the partial batch) so a consumer isn't left with an empty stream.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("abcdef1234567890", severity="high", title="HIGH", datasets=1)
+    s.record_incident("abcdef9999999999", severity="low", title="LOW", datasets=1)
+    s.save()
+
+    rc = main(["resolve", "abcd", "--json", "--store", str(store_path)])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "ambiguous" in captured.err  # human diagnostic still on stderr
+    payload = json.loads(captured.out)["resolve"]
+    assert payload["error"] == "ambiguous"
+    assert payload["ambiguous_token"] == "abcd"
+    assert set(payload["candidates"]) == {"abcdef1234567890", "abcdef9999999999"}
+    # refused → nothing dropped
+    reloaded = BaselineStore.load(store_path)
+    assert reloaded.has_seen("abcdef1234567890") and reloaded.has_seen("abcdef9999999999")
+
+
 def test_resolve_registered_in_help():
     ns = build_parser().parse_args(["resolve", "abcd"])
     assert ns.func.__name__ == "cmd_resolve"
     assert ns.fingerprint == ["abcd"]
     assert ns.dry_run is False  # defaults off — resolve mutates unless asked to preview
+    assert ns.json is False     # human by default; --json is the machine receipt
 
 
 # ---- `ogle forget` -------------------------------------------------------------------
@@ -2573,11 +2637,44 @@ def test_baselines_urns_pipe_into_forget_stdin_end_to_end(tmp_path, capsys, monk
     assert ORDERS_URN not in reloaded and CUSTOMERS_URN in reloaded
 
 
+def test_forget_json_folds_batch_into_one_receipt(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)  # customers + orders
+    rc = main(["forget", ORDERS_URN, "urn:li:dataset:(gone)", "--json", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "✅ forgot" not in out and "not watched" not in out  # human lines suppressed
+    payload = json.loads(out)["forget"]
+    assert payload == {
+        "dry_run": False,
+        "forgotten": [ORDERS_URN],
+        "missed": ["urn:li:dataset:(gone)"],
+        "count": 1,
+    }
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded and CUSTOMERS_URN in reloaded  # only the hit dropped
+
+
+def test_forget_json_dry_run_reports_would_forget_without_mutating(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    mtime_before = store.stat().st_mtime_ns
+    rc = main(["forget", ORDERS_URN, "--dry-run", "--json", "--store", str(store)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["forget"]
+    assert payload["dry_run"] is True
+    assert payload["forgotten"] == [ORDERS_URN]
+    assert payload["count"] == 1
+    assert ORDERS_URN in BaselineStore.load(store)          # still watched
+    assert store.stat().st_mtime_ns == mtime_before          # never written
+
+
 def test_forget_registered_in_help():
     ns = build_parser().parse_args(["forget", ORDERS_URN])
     assert ns.func.__name__ == "cmd_forget"
     assert ns.urn == [ORDERS_URN]
     assert ns.dry_run is False  # defaults off — forget mutates unless asked to preview
+    assert ns.json is False     # human by default; --json is the machine receipt
 
 
 # ---- status: whole-store rollup ---------------------------------------------------

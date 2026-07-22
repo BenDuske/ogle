@@ -480,6 +480,7 @@ ogle forget "urn:li:dataset:(dbt,old.orders,PROD)"          # prune one decommis
 ogle forget URN_A URN_B                                       # batch — hits and misses report per token
 ogle baselines --grep staging --urns | ogle forget -         # prune a whole class, no xargs (native on Windows)
 ogle baselines --grep old --urns | ogle forget --dry-run -   # preview what WOULD be pruned, change nothing
+ogle baselines --grep old --urns | ogle forget --json -      # machine receipt: {forgotten[], missed[], count, dry_run}
 ```
 
 Where `ogle resolve` drops a drift *event* by fingerprint, `forget` drops the *dataset* by
@@ -488,6 +489,8 @@ disambiguate). A lone `-` reads URNs from stdin so the `baselines --urns` pipe r
 `xargs`; an unknown or empty token is a reportable miss (`not watched`), never a mass wipe.
 Incidents are left untouched — a remembered drift outlives the dataset row and is cleared via
 `ogle resolve`, not here. `--dry-run` previews the exact per-token outcome without writing.
+`--json` folds the whole batch into one object (`forgotten[]`, `missed[]`, `count`, `dry_run`)
+in place of the per-token lines — a machine receipt an automated decommission wrapper can check.
 
 ### Inspecting what Ogle remembers (`ogle incidents`)
 
@@ -681,6 +684,14 @@ check before committing a batch pulled from `ogle incidents --fingerprints`:
 ogle incidents --serving-only --min-severity high --fingerprints \
   | xargs ogle resolve --dry-run     # see what WOULD be dropped, change nothing
 ```
+
+`--json` is the machine receipt for that automation loop: instead of the per-token lines it
+emits one object — `resolved[]` (the fingerprints dropped, or *would* drop under `--dry-run`),
+`missed[]` (tokens not remembered), `count`, and `dry_run` — so a "drift is fixed" wrapper can
+confirm exactly what it cleared without scraping prose. An ambiguous prefix still exits 2, but
+in `--json` mode it also emits a structured error object (`error: "ambiguous"`, the token, and
+the candidate fingerprints) on stdout alongside the partial batch, so the consumer isn't left
+with an empty stream. `ogle forget --json` mirrors the same shape for the watch-list side.
 
 ### Writing findings back into DataHub (`--write-back`)
 
