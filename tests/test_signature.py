@@ -157,3 +157,55 @@ def test_from_dict_without_means_is_backward_compatible():
     }
     restored = DatasetSignature.from_dict(legacy)
     assert restored.field_means == {}
+
+
+# ---- field_stdevs (numeric standard deviation, for spread/scale drift) -------------
+
+def test_stdevs_round_trip():
+    sig = build_signature(
+        "urn:li:dataset:x",
+        [("id", "int"), ("amount", "double")],
+        row_count=1000,
+        field_stdevs={"amount": 12.5, "id": 0.0},
+        computed_at="2026-07-22T00:00:00Z",
+    )
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+    assert restored.field_stdevs == {"amount": 12.5, "id": 0.0}
+
+
+def test_stdevs_default_empty():
+    sig = build_signature("urn:x", [("id", "int")])
+    assert sig.field_stdevs == {}
+
+
+def test_stdevs_allow_zero_and_large():
+    """A stdev is non-negative and unbounded above — 0 (a constant column) and big are valid."""
+    sig = build_signature("urn:x", field_stdevs={"const": 0.0, "spread": 987654.3})
+    assert sig.field_stdevs == {"const": 0.0, "spread": 987654.3}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_stdev_rejected(bad):
+    with pytest.raises(ValueError, match="stdev.*finite"):
+        build_signature("urn:x", field_stdevs={"f": bad})
+
+
+def test_negative_stdev_rejected():
+    """Unlike a mean, a standard deviation below zero is nonsense and is rejected."""
+    with pytest.raises(ValueError, match="stdev.*>= 0"):
+        build_signature("urn:x", field_stdevs={"f": -1.0})
+
+
+def test_from_dict_without_stdevs_is_backward_compatible():
+    """A baseline persisted before spread drift existed must still load (empty map)."""
+    legacy = {
+        "urn": "urn:x",
+        "schema_fields": [["id", "int"]],
+        "row_count": 5,
+        "field_null_fractions": {"id": 0.0},
+        "field_unique_fractions": {"id": 1.0},
+        "field_means": {"id": 3.0},
+    }
+    restored = DatasetSignature.from_dict(legacy)
+    assert restored.field_stdevs == {}

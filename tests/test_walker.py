@@ -62,6 +62,7 @@ class FakeFieldProfile:
     nullProportion: Optional[float]
     uniqueProportion: Optional[float] = None
     mean: Optional[str] = None  # DataHub reports mean as a numeric string
+    stdev: Optional[str] = None  # DataHub reports stdev as a numeric string too
 
 
 @dataclass
@@ -306,6 +307,41 @@ def test_build_signature_skips_non_finite_and_junk_means():
     )
     sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
     assert set(sig.field_means) == {"ok"}
+
+
+def test_build_signature_folds_stdevs():
+    """`stdev` on a field profile (a numeric string) lands in field_stdevs as a float."""
+    profile = FakeProfile(
+        rowCount=1000,
+        fieldProfiles=[
+            FakeFieldProfile("amount", 0.0, mean="42.5", stdev="12.5"),
+            FakeFieldProfile("const", 0.0, mean="7.0", stdev="0.0"),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_stdevs == {"amount": pytest.approx(12.5), "const": pytest.approx(0.0)}
+
+
+def test_build_signature_stdev_absent_yields_empty():
+    """Text/categorical columns (no stdev) and older profiles degrade to an empty map."""
+    profile = FakeProfile(rowCount=10, fieldProfiles=[FakeFieldProfile("region", 0.0)])
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_stdevs == {}
+
+
+def test_build_signature_skips_non_finite_junk_and_negative_stdevs():
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("ok", 0.0, stdev="1.5"),
+            FakeFieldProfile("nan", 0.0, stdev="nan"),
+            FakeFieldProfile("inf", 0.0, stdev="inf"),
+            FakeFieldProfile("junk", 0.0, stdev="not-a-number"),
+            FakeFieldProfile("neg", 0.0, stdev="-2.0"),  # a stdev < 0 is nonsense, skipped
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_stdevs) == {"ok"}
 
 
 def test_build_signature_skips_partial_schema_fields():

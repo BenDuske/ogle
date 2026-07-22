@@ -20,14 +20,15 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
 
 1. **Drift-walk.** Given a deployed model in DataHub, Ogle walks upstream through the
    lineage graph (model → features → source tables). For each hop it computes a
-   lightweight signature (row-count delta, schema hash, null-fraction, distinct-value and
-   numeric-mean stats) and compares against the last known state. Anomalies get scored across
-   six dimensions — schema, volume, quality, distribution (cardinality collapse), mean
-   (numeric covariate shift — a feature's values moved while schema/volume/nulls stay green),
-   and freshness (a source whose profile timestamp has gone stale past its SLA — the silent
-   stall the others miss because rows/schema look unchanged). Freshness is opt-in via
-   `--freshness-max-age` (e.g. `24h`), since a nightly table and a streaming source have
-   very different staleness SLAs.
+   lightweight signature (row-count delta, schema hash, null-fraction, distinct-value,
+   numeric-mean and numeric-stdev stats) and compares against the last known state. Anomalies
+   get scored across seven dimensions — schema, volume, quality, distribution (cardinality
+   collapse), mean (numeric covariate shift — a feature's values moved while schema/volume/nulls
+   stay green), stdev (numeric spread/scale shift — a feature's variance collapsed or exploded
+   while its *mean* held steady, e.g. a sensor stuck on one reading or gone noisy), and freshness
+   (a source whose profile timestamp has gone stale past its SLA — the silent stall the others
+   miss because rows/schema look unchanged). Freshness is opt-in via `--freshness-max-age`
+   (e.g. `24h`), since a nightly table and a streaming source have very different staleness SLAs.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.
@@ -309,7 +310,7 @@ Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_field
 `ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` (split by severity in
 `ogle_incidents_recurring_by_severity{severity="…"}` — chronic ∩ severity; alert
 `{severity="high"} > 0` for high-severity drift that keeps coming back) / `_sightings`,
-the drift-dimension breakdown `ogle_incidents_by_kind{kind="schema|volume|quality|distribution|mean|freshness|unknown"}`
+the drift-dimension breakdown `ogle_incidents_by_kind{kind="schema|volume|quality|distribution|mean|stdev|freshness|unknown"}`
 (which failure mode the incidents carry — the gauge twin of `incidents --kind`; **non-exclusive**,
 so an incident spanning two dimensions counts in both and the label sum can exceed
 `ogle_incidents_remembered` — graph it to see whether e.g. a freshness-drift spike is driving the

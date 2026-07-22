@@ -13,6 +13,10 @@ to catch the three drifts that actually break production ML:
   * MEAN drift     — a numeric feature's mean shifted (covariate shift): schema, volume,
                      nulls and cardinality all look fine, but the values moved under the
                      model — the classic silent feature-drift that quietly rots accuracy.
+  * STDEV drift    — a numeric feature's spread (standard deviation) collapsed or exploded
+                     while its mean held steady: a sensor stuck on one reading (variance
+                     ->0) or gone noisy (variance blows up) — a scale shift the mean rule,
+                     which only sees location, is blind to.
 
 Everything here is pure and deterministic (no DataHub client, no clock): the walker hands
 us the aspects it pulled, we fold them into a `DatasetSignature`. That keeps the scoring
@@ -25,6 +29,7 @@ Source aspects (when wired to live DataHub in W2):
   * `field_null_fractions`   <- DatasetProfile.fieldProfiles[].{fieldPath,nullProportion}
   * `field_unique_fractions` <- DatasetProfile.fieldProfiles[].{fieldPath,uniqueProportion}
   * `field_means`            <- DatasetProfile.fieldProfiles[].{fieldPath,mean}
+  * `field_stdevs`           <- DatasetProfile.fieldProfiles[].{fieldPath,stdev}
 """
 
 from __future__ import annotations
@@ -97,6 +102,12 @@ class DatasetSignature:
     # no entry. Scoring degrades gracefully: a field with no mean on either side is not scored
     # for mean drift, never guessed.
     field_means: Dict[str, float] = field(default_factory=dict)
+    # Per-field standard deviation, from DataHub's profile (`fieldProfiles[].stdev`). Optional
+    # exactly like the mean above; only numeric columns carry one. A stdev is non-negative (a
+    # dispersion, not a signed location), so unlike `field_means` it is floored at 0 — but it is
+    # otherwise unbounded. Scoring degrades gracefully: a field with no stdev on either side is
+    # not scored for spread drift, never guessed.
+    field_stdevs: Dict[str, float] = field(default_factory=dict)
     # Free-form provenance (e.g. the profile timestamp). Never part of the schema hash.
     computed_at: Optional[str] = None
 
@@ -125,6 +136,7 @@ class DatasetSignature:
             "field_null_fractions": dict(self.field_null_fractions),
             "field_unique_fractions": dict(self.field_unique_fractions),
             "field_means": dict(self.field_means),
+            "field_stdevs": dict(self.field_stdevs),
             "computed_at": self.computed_at,
             "schema_hash": self.schema_hash,  # denormalized for quick baseline diffing
         }
@@ -141,6 +153,7 @@ class DatasetSignature:
             field_null_fractions=dict(data.get("field_null_fractions", {})),
             field_unique_fractions=dict(data.get("field_unique_fractions", {})),
             field_means=dict(data.get("field_means", {})),
+            field_stdevs=dict(data.get("field_stdevs", {})),
             computed_at=data.get("computed_at"),
         )
 
@@ -152,6 +165,7 @@ def build_signature(
     field_null_fractions: Optional[Dict[str, float]] = None,
     field_unique_fractions: Optional[Dict[str, float]] = None,
     field_means: Optional[Dict[str, float]] = None,
+    field_stdevs: Optional[Dict[str, float]] = None,
     computed_at: Optional[str] = None,
 ) -> DatasetSignature:
     """Convenience builder from plain tuples (what a DataHub aspect walk yields).
@@ -185,6 +199,19 @@ def build_signature(
             raise ValueError(
                 f"mean for {path!r} must be a finite number, got {mval!r}"
             )
+    # A stdev is a non-negative, finite real (a dispersion): reject NaN/inf like the mean, and
+    # additionally reject a negative value — a standard deviation below zero is nonsense that
+    # would poison the relative-shift math in the scorer.
+    stdevs = dict(field_stdevs or {})
+    for path, sval in stdevs.items():
+        if sval != sval or sval in (float("inf"), float("-inf")):
+            raise ValueError(
+                f"stdev for {path!r} must be a finite number, got {sval!r}"
+            )
+        if sval < 0.0:
+            raise ValueError(
+                f"stdev for {path!r} must be >= 0 (a dispersion), got {sval!r}"
+            )
     if row_count is not None and row_count < 0:
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
@@ -195,5 +222,6 @@ def build_signature(
         field_null_fractions=nulls,
         field_unique_fractions=uniques,
         field_means=means,
+        field_stdevs=stdevs,
         computed_at=computed_at,
     )

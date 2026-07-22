@@ -402,6 +402,94 @@ def test_build_config_mean_tuning_suppresses():
             if f.kind is DriftKind.MEAN] == []  # now quiet
 
 
+# ---- stdev drift (numeric spread / scale shift) ------------------------------------
+
+def test_stdev_shift_flagged():
+    """A numeric feature whose spread moved past the band is scale drift."""
+    base = _sig(field_stdevs={"amount": 10.0})
+    cur = _sig(field_stdevs={"amount": 14.0})  # +40% > 25% default
+    stds = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV]
+    assert len(stds) == 1
+    assert "amount" in stds[0].message
+    assert stds[0].details["fields"]["amount"]["rel_shift"] == pytest.approx(0.40)
+
+
+def test_stdev_collapse_flagged():
+    """A spread collapsing toward 0 (sensor stuck) is scale drift, both directions page."""
+    base = _sig(field_stdevs={"reading": 8.0})
+    cur = _sig(field_stdevs={"reading": 1.0})  # -87.5%
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV]
+
+
+def test_small_stdev_shift_below_threshold_quiet():
+    base = _sig(field_stdevs={"amount": 10.0})
+    cur = _sig(field_stdevs={"amount": 11.0})  # +10% < 25% default
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV] == []
+
+
+def test_stdev_near_zero_baseline_skipped():
+    """A relative shift against a ~0 baseline stdev is undefined — skipped, never guessed."""
+    base = _sig(field_stdevs={"const": 0.0})
+    cur = _sig(field_stdevs={"const": 5.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV] == []
+
+
+def test_new_stdev_without_baseline_skipped():
+    base = _sig(field_stdevs={})
+    cur = _sig(field_stdevs={"amount": 4.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV] == []
+
+
+def test_stdev_severity_scales_with_shift():
+    base = _sig(field_stdevs={"amount": 10.0})
+    mild = _sig(field_stdevs={"amount": 14.0})    # +40% -> ~1.6x band
+    severe = _sig(field_stdevs={"amount": 50.0})  # +400% -> >3x band -> HIGH
+    low = [f for f in score_dataset(base, mild) if f.kind is DriftKind.STDEV][0]
+    high = [f for f in score_dataset(base, severe) if f.kind is DriftKind.STDEV][0]
+    assert high.severity.rank > low.severity.rank
+
+
+def test_stdev_escalates_on_serving_path():
+    base = _sig(field_stdevs={"amount": 10.0})
+    cur = _sig(field_stdevs={"amount": 16.0})  # +60%
+    off = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    on = [f for f in score_dataset(base, cur, serving=True) if f.kind is DriftKind.STDEV][0]
+    assert on.severity.rank > off.severity.rank
+    assert on.details.get("serving") is True
+
+
+def test_stdev_reports_worst_field_first():
+    base = _sig(field_stdevs={"amount": 10.0, "score": 10.0})
+    cur = _sig(field_stdevs={"amount": 13.0, "score": 40.0})  # score moved more
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    assert s.message.index("score") < s.message.index("amount")
+
+
+def test_stdev_is_independent_of_mean():
+    """A spread change with the mean held constant is caught by stdev alone, not mean."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 20.0})  # mean same, spread 2x
+    kinds = {f.kind for f in score_dataset(base, cur)}
+    assert DriftKind.STDEV in kinds
+    assert DriftKind.MEAN not in kinds
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, -1])
+def test_build_config_rejects_nonpositive_stdev_threshold(bad):
+    with pytest.raises(ValueError, match=r"stdev threshold must be > 0"):
+        build_score_config(stdev_threshold=bad)
+
+
+def test_build_config_stdev_tuning_suppresses():
+    base = _sig(field_stdevs={"amount": 10.0})
+    cur = _sig(field_stdevs={"amount": 14.0})  # +40%
+    assert [f for f in score_dataset(base, cur, cfg=build_score_config())
+            if f.kind is DriftKind.STDEV]  # default (0.25) flags it
+    loose = build_score_config(stdev_threshold=0.5)
+    assert [f for f in score_dataset(base, cur, cfg=loose)
+            if f.kind is DriftKind.STDEV] == []  # now quiet
+
+
 # ---- freshness drift (data-staleness SLA) ------------------------------------------
 
 DAY = 86_400.0

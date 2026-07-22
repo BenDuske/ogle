@@ -57,6 +57,11 @@ _ACTIONS: Dict[DriftKind, str] = {
         "population shift — a moved mean with intact schema and row count is covariate "
         "drift that quietly degrades the model until it's retrained on the new values"
     ),
+    DriftKind.STDEV: (
+        "check the source for a stuck sensor, a clipped/saturated range, or a noisier feed — "
+        "a collapsed or exploded spread with an intact mean and schema is scale drift that "
+        "moves feature variance under the model without touching its average"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {

@@ -28,6 +28,7 @@ class DriftKind(str, Enum):
     DISTRIBUTION = "distribution"
     FRESHNESS = "freshness"
     MEAN = "mean"
+    STDEV = "stdev"
 
 
 class Severity(str, Enum):
@@ -82,6 +83,19 @@ class ScoreConfig:
     # against it explodes (÷~0) and would page on trivial absolute wiggle, so the field is not
     # scored for mean drift rather than flagged on noise.
     mean_zero_floor: float = 1e-9
+    # Relative shift in a numeric field's standard deviation that counts as spread/scale drift
+    # (0.25 = ±25% move vs the baseline stdev). Both directions matter — a feature whose spread
+    # collapsed (sensor stuck on one reading) or exploded (gone noisy) has moved its scale under
+    # the model either way, a covariate shift the mean rule (location only) cannot see. A field
+    # whose baseline stdev is ~0 is skipped (relative shift is undefined there; see
+    # `stdev_zero_floor`), never guessed.
+    stdev_rel_threshold: float = 0.25
+    # Baseline-stdev magnitude below this is treated as "effectively zero": a relative shift
+    # against it explodes (÷~0) and would page on trivial absolute wiggle, so the field is not
+    # scored for spread drift rather than flagged on noise. (A field that was genuinely constant
+    # — stdev 0 — going noisy is real, but scoring it relatively is undefined; it surfaces via
+    # mean/distribution drift instead, and this stays quiet rather than dividing by zero.)
+    stdev_zero_floor: float = 1e-9
     # Data-freshness SLA in seconds. When set, a dataset whose profile timestamp
     # (`computed_at`) is older than this relative to the walk's `now` flags freshness drift —
     # the classic silent-stall failure (ETL stopped, rows unchanged so volume looks fine, but
@@ -97,6 +111,7 @@ def build_score_config(
     null_threshold: Optional[float] = None,
     unique_drop_threshold: Optional[float] = None,
     mean_threshold: Optional[float] = None,
+    stdev_threshold: Optional[float] = None,
     freshness_max_age_seconds: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
@@ -122,6 +137,9 @@ def build_score_config(
     )
     mean = (
         ScoreConfig.mean_rel_threshold if mean_threshold is None else mean_threshold
+    )
+    stdev = (
+        ScoreConfig.stdev_rel_threshold if stdev_threshold is None else stdev_threshold
     )
     esc = (
         ScoreConfig.escalate_when_serving
@@ -150,6 +168,12 @@ def build_score_config(
         raise ValueError(
             f"mean threshold must be > 0 (got {mean}); it is a relative mean-shift band."
         )
+    # Same shape as the mean band: a relative spread band, strictly positive, no upper cap.
+    # Zero/negative would flag every field and divide by ~0 in `_severity_from_ratio`.
+    if not (stdev > 0):
+        raise ValueError(
+            f"stdev threshold must be > 0 (got {stdev}); it is a relative spread-shift band."
+        )
     # None keeps the freshness dimension OFF (the default). A supplied SLA must be a positive
     # duration — a zero/negative age would flag every timestamped dataset as stale, and
     # `_severity_from_ratio` divides by it. Reject up front, same as the other bands.
@@ -167,6 +191,7 @@ def build_score_config(
         null_fraction_abs_threshold=float(nul),
         unique_fraction_drop_threshold=float(uniq),
         mean_rel_threshold=float(mean),
+        stdev_rel_threshold=float(stdev),
         freshness_max_age_seconds=None if fresh is None else float(fresh),
         escalate_when_serving=esc,
     )
@@ -387,6 +412,60 @@ def score_mean(
     )
 
 
+def score_stdev(
+    baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
+) -> Optional[DriftFinding]:
+    """Numeric-spread shift — the scale half of covariate drift the mean rule can't see.
+
+    A feature can hold its schema, row count, null rate, cardinality *and its mean* while its
+    *spread* moves out from under a deployed model: a sensor stuck on one reading (variance
+    collapses toward 0), a source gone noisy (variance explodes), or a genuine change in
+    population dispersion. Mean drift sees a shift in location; this sees a shift in scale — a
+    symmetric spread change leaves the mean untouched, so only the standard deviation moves.
+    This scores the relative shift of each numeric field's stdev against its baseline.
+
+    Both directions are flagged (a spread that collapsed *or* blew up has moved), like the mean
+    rule. A field with no stdev on either side is skipped (never guessed), and a baseline stdev
+    whose magnitude is below `cfg.stdev_zero_floor` is skipped too — a relative shift against ~0
+    explodes and would page on trivial wiggle.
+    """
+    worsened: Dict[str, Dict[str, float]] = {}
+    for path, cur_stdev in current.field_stdevs.items():
+        base_stdev = baseline.field_stdevs.get(path)
+        if base_stdev is None:
+            continue
+        if abs(base_stdev) < cfg.stdev_zero_floor:
+            continue
+        rel_shift = abs(cur_stdev - base_stdev) / abs(base_stdev)
+        if rel_shift >= cfg.stdev_rel_threshold:
+            worsened[path] = {
+                "baseline": base_stdev,
+                "current": cur_stdev,
+                "rel_shift": rel_shift,
+            }
+
+    if not worsened:
+        return None
+
+    max_shift = max(v["rel_shift"] for v in worsened.values())
+    severity = _severity_from_ratio(max_shift, cfg.stdev_rel_threshold)
+    fields = sorted(worsened, key=lambda p: worsened[p]["rel_shift"], reverse=True)
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.STDEV,
+        severity=severity,
+        message=(
+            "numeric spread shifted on "
+            + ", ".join(
+                f"{p} (stdev {worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
+                f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%})"
+                for p in fields
+            )
+        ),
+        details={"fields": worsened},
+    )
+
+
 def score_freshness(
     current: DatasetSignature, cfg: ScoreConfig, now: Optional[float]
 ) -> Optional[DriftFinding]:
@@ -461,6 +540,7 @@ def score_dataset(
         score_quality(baseline, current, cfg),
         score_distribution(baseline, current, cfg),
         score_mean(baseline, current, cfg),
+        score_stdev(baseline, current, cfg),
         score_freshness(current, cfg, now),
     ):
         if finding is None:

@@ -107,7 +107,7 @@ def build_signature_from_aspects(
       * `schema_metadata.fields[]` -> each has `.fieldPath` and `.nativeDataType`
       * `dataset_profile.rowCount` (Optional[int])
       * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`,
-        `.uniqueProportion`, and (numeric columns only) `.mean`
+        `.uniqueProportion`, and (numeric columns only) `.mean` and `.stdev`
 
     Missing sub-fields inside the aspect are treated as missing data (skipped), not zero.
     """
@@ -127,6 +127,7 @@ def build_signature_from_aspects(
     null_fractions: Dict[str, float] = {}
     unique_fractions: Dict[str, float] = {}
     means: Dict[str, float] = {}
+    stdevs: Dict[str, float] = {}
     if dataset_profile is not None:
         rc = getattr(dataset_profile, "rowCount", None)
         if isinstance(rc, int) and rc >= 0:
@@ -144,6 +145,9 @@ def build_signature_from_aspects(
             mean_val = _coerce_mean(getattr(fp, "mean", None))
             if mean_val is not None:
                 means[str(path)] = mean_val
+            stdev_val = _coerce_stdev(getattr(fp, "stdev", None))
+            if stdev_val is not None:
+                stdevs[str(path)] = stdev_val
 
     return build_signature(
         urn=urn,
@@ -152,6 +156,7 @@ def build_signature_from_aspects(
         field_null_fractions=null_fractions,
         field_unique_fractions=unique_fractions,
         field_means=means,
+        field_stdevs=stdevs,
         computed_at=computed_at,
     )
 
@@ -186,6 +191,25 @@ def _coerce_mean(raw: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     if val != val or val in (float("inf"), float("-inf")):
+        return None
+    return val
+
+
+def _coerce_stdev(raw: Any) -> Optional[float]:
+    """A DataHub profile `stdev` (usually a numeric string) as a clean non-negative float.
+
+    Like `_coerce_mean` but with a non-negativity gate: a standard deviation is a dispersion,
+    so a missing value, an unparseable one, NaN/inf, or a (nonsensical) negative is skipped —
+    never guessed. DataHub reports `stdev` only for numeric columns, so text/categorical
+    fields simply yield None here.
+    """
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val or val in (float("inf"), float("-inf")) or val < 0.0:
         return None
     return val
 
