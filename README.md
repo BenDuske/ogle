@@ -214,14 +214,18 @@ ogle status --stale-after 6h   # exit 1 if the store hasn't been written in 6h (
 ogle status --orphan-after 2d  # exit 1 if any watched dataset's baseline hasn't refreshed in 2d (orphan gate)
 ```
 
-The human view is four lines: **watching** (tracked datasets · total schema fields · total rows,
+The human view is a handful of lines: **watching** (tracked datasets · total schema fields · total rows,
 with an `(N unknown)` note when some baselines have no captured row count), **incidents
 remembered** (broken out 🔴 high / 🟠 medium / 🟡 low / • unknown), **serving-path / recurring /
 total sightings** — where the serving-path count, when anything is serving, appends its own
 severity split `(🔴 high · 🟠 medium · 🟡 low · • unknown)` so the load-bearing 🔴 *high-serving*
 page (a deployed model being fed drifted data right now) can't hide inside a flat total, the same
 cross-tab the `ogle_incidents_serving_by_severity` gauge exposes (the four buckets sum back to
-`serving-path`) — and **muted** — which, when anything is silenced, splits into `⛔ N permanent`
+`serving-path`) — a **by-dimension** line (`🏷️ by dimension: schema 2 · freshness 1`) naming which
+failure modes the incidents carry, the human twin of `ogle_incidents_by_kind` (**non-exclusive** — a
+two-dimension incident shows in both — so it needn't sum to the total; the `unknown` bucket for
+legacy incidents is omitted here and the line is skipped entirely when nothing is attributed) — and
+**muted** — which, when anything is silenced, splits into `⛔ N permanent`
 (a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
 same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't
 hide inside a bland "N active". When a snooze is pending, the line appends `⏰ next lifts in <age>`
@@ -304,6 +308,12 @@ Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_field
 `ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` (split by severity in
 `ogle_incidents_recurring_by_severity{severity="…"}` — chronic ∩ severity; alert
 `{severity="high"} > 0` for high-severity drift that keeps coming back) / `_sightings`,
+the drift-dimension breakdown `ogle_incidents_by_kind{kind="schema|volume|quality|distribution|freshness|unknown"}`
+(which failure mode the incidents carry — the gauge twin of `incidents --kind`; **non-exclusive**,
+so an incident spanning two dimensions counts in both and the label sum can exceed
+`ogle_incidents_remembered` — graph it to see whether e.g. a freshness-drift spike is driving the
+total, or alert `{kind="freshness"} > 0` on any stalled feed; `{kind="unknown"}` holds legacy
+incidents with no recorded dimension),
 `ogle_muted_active` (split into
 `ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
 incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the incident

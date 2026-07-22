@@ -1800,6 +1800,41 @@ def test_incidents_summary_serving_split_suppressed_when_nothing_serves(tmp_path
     assert "serving-path: 0 (" not in out
 
 
+def test_incidents_summary_by_dimension_line(tmp_path, capsys):
+    # The rollup surfaces which drift dimensions the incidents carry (schema/volume/…), the
+    # human twin of ogle_incidents_by_kind. A multi-dimension incident shows in both kinds.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"])
+    s.record_incident("b", severity="low", title="B", kinds=["schema"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 2 · volume 1" in out
+
+
+def test_incidents_summary_by_dimension_suppressed_without_kinds(tmp_path, capsys):
+    # Legacy incidents (no recorded kind) fold to `unknown`, which is omitted from the human
+    # line — so a store with no dimensional attribution shows no "by dimension" line at all.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)  # none carry `kinds`
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "by dimension:" not in capsys.readouterr().out
+
+
+def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["freshness"])
+    s.record_incident("b", severity="low", title="B")  # legacy → unknown
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_kind"]["freshness"] == 1
+    assert summary["by_kind"]["unknown"] == 1
+    assert summary["by_kind"]["schema"] == 0
+
+
 def test_incidents_summary_surfaces_open_drift_age(tmp_path, capsys):
     # Parity with `status`: the --summary rollup must surface how long the (filtered) drift has
     # sat — stalest first (resolve/forget candidate), freshest trailing (live-incident signal),
@@ -2927,6 +2962,44 @@ def test_status_serving_split_suppressed_when_nothing_serves(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "serving-path: 0 ·" in out  # bare count, immediately followed by the recurring sep
     assert "serving-path: 0 (" not in out
+
+
+def test_status_by_dimension_line(tmp_path, capsys):
+    # The snapshot surfaces which drift dimensions the remembered incidents carry — the human
+    # twin of ogle_incidents_by_kind. A multi-dimension incident shows under each kind.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "freshness"])
+    s.record_incident("b", severity="low", title="B", kinds=["schema"])
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 2 · freshness 1" in out
+
+
+def test_status_by_dimension_suppressed_without_kinds(tmp_path, capsys):
+    # Legacy incidents (no recorded kind) fold to `unknown`, omitted from the human line — so a
+    # store with no dimensional attribution shows no "by dimension" line rather than "unknown N".
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("low_only", severity="low", title="L", datasets=1)  # no kinds
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "by dimension:" not in capsys.readouterr().out
+
+
+def test_status_json_exposes_by_kind(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("a", severity="high", title="A", kinds=["distribution"])
+    s.save()
+    rc = main(["status", "--store", str(store), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["status"]
+    assert payload["incidents"]["by_kind"]["distribution"] == 1
+    assert payload["incidents"]["by_kind"]["schema"] == 0
 
 
 def test_status_empty_store_reports_empty(tmp_path, capsys):

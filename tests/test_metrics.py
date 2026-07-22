@@ -93,6 +93,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_serving_by_severity",
         "ogle_incidents_recurring",
         "ogle_incidents_recurring_by_severity",
+        "ogle_incidents_by_kind",
         "ogle_incidents_sightings",
         "ogle_muted_active",
         "ogle_muted_permanent",
@@ -822,3 +823,93 @@ def test_metrics_cli_reports_permanent_mute_as_blind_spot(tmp_path, capsys):
     assert samples["ogle_muted_active"] == "2"  # permanent + active snooze
     # The countdown is present and positive (snooze lapses in the far future).
     assert float(samples["ogle_muted_snooze_next_expiry_seconds"]) > 0
+
+
+# ---- incidents by drift dimension (by_kind) ----------------------------------------
+def test_incident_summary_by_kind_counts_each_dimension():
+    """Pure helper: each incident is tallied under every drift kind it recorded."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "count": 1, "kinds": ["schema"]},
+            {"severity": "medium", "count": 1, "kinds": ["volume", "quality"]},
+            {"severity": "low", "count": 1, "kinds": ["freshness"]},
+        ]
+    )
+    bk = inc["by_kind"]
+    assert bk["schema"] == 1
+    assert bk["volume"] == 1
+    assert bk["quality"] == 1
+    assert bk["freshness"] == 1
+    assert bk["distribution"] == 0
+    assert bk["unknown"] == 0
+
+
+def test_incident_summary_by_kind_non_exclusive_sum_can_exceed_total():
+    """A multi-dimension incident counts in EVERY kind, so sum(by_kind) > total (not a partition)."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [{"severity": "high", "count": 1, "kinds": ["schema", "volume", "quality"]}]
+    )
+    assert inc["total"] == 1
+    assert sum(inc["by_kind"].values()) == 3  # one incident, three dimensions
+
+
+def test_incident_summary_by_kind_dedupes_within_one_incident():
+    """A malformed repeated kind on one record can't double-count that record."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary([{"severity": "low", "count": 1, "kinds": ["volume", "volume"]}])
+    assert inc["by_kind"]["volume"] == 1
+
+
+def test_incident_summary_by_kind_legacy_and_unrecognized_fold_to_unknown():
+    """No `kinds` (legacy) counts once as unknown; an unrecognized kind string folds there too."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "count": 1},  # legacy: no kinds at all
+            {"severity": "low", "count": 1, "kinds": []},  # empty list = untracked
+            {"severity": "low", "count": 1, "kinds": ["gremlin"]},  # unknown dimension
+        ]
+    )
+    assert inc["by_kind"]["unknown"] == 3
+    assert inc["by_kind"]["schema"] == 0
+
+
+def test_metrics_by_kind_family_emits_every_bucket_and_matches(tmp_path, capsys):
+    """The gauge is emitted for every kind (honest 0s) and its values match the store."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"])
+    s.record_incident("b", severity="low", title="B", kinds=["schema"])
+    s.record_incident("c", severity="low", title="C")  # legacy → unknown
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, types, _ = _parse_prom(capsys.readouterr().out)
+    assert types["ogle_incidents_by_kind"] == "gauge"
+    assert samples['ogle_incidents_by_kind{kind="schema"}'] == "2"
+    assert samples['ogle_incidents_by_kind{kind="volume"}'] == "1"
+    assert samples['ogle_incidents_by_kind{kind="quality"}'] == "0"  # honest zero
+    assert samples['ogle_incidents_by_kind{kind="distribution"}'] == "0"
+    assert samples['ogle_incidents_by_kind{kind="freshness"}'] == "0"
+    assert samples['ogle_incidents_by_kind{kind="unknown"}'] == "1"
+
+
+def test_metrics_by_kind_matches_status_json(tmp_path, capsys):
+    """metrics is a re-shape of status — the by_kind numbers must be identical."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["freshness"])
+    s.save()
+    assert main(["status", "--store", str(store_path), "--json"]) == 0
+    st = json.loads(capsys.readouterr().out)["status"]
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert (
+        samples['ogle_incidents_by_kind{kind="freshness"}']
+        == str(st["incidents"]["by_kind"]["freshness"])
+    )

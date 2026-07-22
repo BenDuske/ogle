@@ -1570,6 +1570,14 @@ def _incident_summary(records: List[dict]) -> dict:
     # `recurring="high"` is the festering-AND-hot page ("high-severity drift that has recurred
     # and was never resolved"), the single most alert-worthy class. sum() == recurring.
     recurring_by_severity = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    # Drift-DIMENSION breakdown — how many incidents carry each kind (schema/volume/quality/
+    # distribution/freshness). Unlike every _by_severity split above this is NOT a partition: an
+    # incident can span more than one dimension (a schema change that also collapsed cardinality
+    # records both), so it counts toward EVERY kind it holds and sum(by_kind) can EXCEED total.
+    # Legacy incidents predating kind tracking (no `kinds` list) land in `unknown` so the shape
+    # is stable and no dimension is fabricated; an unrecognized kind string folds there too.
+    by_kind = {k.value: 0 for k in DriftKind}
+    by_kind["unknown"] = 0
     serving = 0
     recurring = 0
     total_sightings = 0
@@ -1585,6 +1593,16 @@ def _incident_summary(records: List[dict]) -> dict:
         if count >= 2:
             recurring += 1
             recurring_by_severity[key] += 1
+        # Attribute the incident to each dimension it recorded (deduped so a malformed repeat
+        # can't double-count within one incident). No / empty / non-list `kinds` = a legacy
+        # record with no tracked dimension → `unknown`, counted once.
+        rk = r.get("kinds")
+        if isinstance(rk, list) and rk:
+            buckets = {k if (k in by_kind and k != "unknown") else "unknown" for k in rk}
+            for b in buckets:
+                by_kind[b] += 1
+        else:
+            by_kind["unknown"] += 1
     return {
         "total": len(records),
         "by_severity": by_severity,
@@ -1592,6 +1610,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_by_severity": serving_by_severity,
         "recurring": recurring,
         "recurring_by_severity": recurring_by_severity,
+        "by_kind": by_kind,
         "total_sightings": total_sightings,
     }
 
@@ -2037,6 +2056,15 @@ def cmd_incidents(args: argparse.Namespace) -> int:
                 f"🟡 {rbs['low']} · • {rbs['unknown']})"
             )
         _emit(recurring_line)
+        # Drift-DIMENSION texture — parity with `status`'s "by dimension" line and the
+        # ogle_incidents_by_kind gauge. NON-exclusive (an incident spanning two dimensions shows
+        # in both), so it need not sum to `total`; only nonzero REAL dimensions are listed and the
+        # `unknown` bucket is omitted (it's absence-of-a-dimension, kept only in the gauge). The
+        # line is skipped when no real dimension is attributed (e.g. a legacy-only store).
+        bks = summary["by_kind"]
+        kind_parts = [f"{d.value} {bks[d.value]}" for d in DriftKind if bks[d.value]]
+        if kind_parts:
+            _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:
             _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -2375,6 +2403,21 @@ def _render_prometheus(
         "ogle_incidents_recurring_by_severity",
         "Remembered recurring incidents, by severity (seen ≥2× AND severity).",
         [({"severity": s}, rbs[s]) for s in ("high", "medium", "low", "unknown")],
+    )
+    # Drift-DIMENSION breakdown — incidents carrying each kind (schema/volume/quality/
+    # distribution/freshness). Unlike the severity splits this is NOT exclusive: an incident
+    # spanning schema+volume counts in both, so summing over the label EXCEEDS
+    # ogle_incidents_remembered (it's a per-dimension tally, not a partition). Lets a dashboard
+    # graph WHICH failure mode is growing — e.g. alert on a freshness-drift spike alone rather
+    # than one flat incident count. `{kind="unknown"}` holds legacy incidents with no recorded
+    # dimension. Mirrors `ogle incidents --kind`, which filters the same recorded dimensions.
+    # Emitted for every kind (honest 0s) so an alert series never vanishes when a kind is quiet.
+    bk = inc.get("by_kind") or {}
+    kind_order = [k.value for k in DriftKind] + ["unknown"]
+    family(
+        "ogle_incidents_by_kind",
+        "Remembered incidents carrying each drift dimension (non-exclusive; sum ≥ remembered).",
+        [({"kind": k}, bk.get(k, 0)) for k in kind_order],
     )
     family(
         "ogle_incidents_sightings",
@@ -2839,6 +2882,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
     serving_line += recurring_part + f" · total sightings: {inc['total_sightings']}"
     _emit(serving_line)
+    # Drift-DIMENSION texture: which failure modes the remembered incidents carry (schema/
+    # volume/…). Human twin of the ogle_incidents_by_kind gauge. NON-exclusive — an incident
+    # spanning two dimensions shows in both — so this reads as texture, not a partition (it need
+    # not sum to `total`). Only nonzero REAL dimensions are listed; the `unknown` bucket (legacy
+    # incidents with no recorded kind) is omitted here — it's absence-of-a-dimension, noise on a
+    # human line — but stays in the gauge for series completeness. The whole line is skipped when
+    # no real dimension is attributed (e.g. a legacy-only store), rather than printing zeros.
+    bk = inc["by_kind"]
+    kind_parts = [f"{d.value} {bk[d.value]}" for d in DriftKind if bk[d.value]]
+    if kind_parts:
+        _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
     # How long the remembered drift has been sitting: the stalest (longest-quiet) incident
     # leads because that's the resolve/forget candidate an operator most needs nudged about —
     # drift that stopped recurring weeks ago but was never cleared. Freshest trails as the
