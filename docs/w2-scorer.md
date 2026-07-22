@@ -41,26 +41,38 @@ DataHub walk ──▶ build_signature() ──▶ baseline store (Aegis memory)
 
 ## W2b — Narrative writer (`ogle.narrative`)
 
-`narrate(findings, llm=None)` turns a scoring run into one human-facing incident. Two
-layers, so the useful part never depends on a model being reachable:
+`narrate(findings, llm=None, owners=None)` turns a scoring run into one human-facing
+incident. Two layers, so the useful part never depends on a model being reachable:
 
-- **Deterministic core** — `build_incident` folds findings into an `Incident` (overall
-  severity = worst finding, serving flag, deduped datasets, ranked "what to check" actions,
-  and a stable `fingerprint`). `render_markdown` prints it. Pure → unit-testable with no
-  DataHub and no LLM.
+- **Deterministic core** — `build_incident(findings, owners=None)` folds findings into an
+  `Incident` (overall severity = worst finding, serving flag, deduped datasets, ranked
+  "what to check" actions, and a stable `fingerprint`). `render_markdown` prints it. Pure →
+  unit-testable with no DataHub and no LLM.
 - **LLM polish (optional)** — pass an `llm` callable and `narrate` hands it a *grounded*
   prompt (`build_llm_prompt`) built from the already-computed facts, with an explicit
   "use only these facts, don't invent severity/datasets" instruction. If the model is
   absent, raises, or returns empty, it falls back to the deterministic markdown — an alert
   always goes out. Model-agnostic (Aegis-local Qwen or Anthropic fallback).
 
+**Owner attribution (who to page)** — `build_incident`/`narrate` take an optional
+`owners` map (`urn -> owner names`, from DataHub's **Ownership** aspect). Each affected
+dataset renders a `👤 owner(s): …` line, and the grounded LLM prompt is told to name who
+to page (but forbidden to invent an owner). Ownership is **presentation only**: it is
+deliberately *not* part of the `fingerprint`, so re-assigning an owner never re-pages a
+still-open incident. Owners are normalized (restricted to the incident's own URNs, stripped,
+deduped, empties dropped) so a stray or blank owner can't leak into an alert. `run_drift_check`
+threads the same `owners` map through to both the incident object and the narrative; the
+live DataHub walk populates it (follow-up wiring in the walker).
+
 **`fingerprint`** = order-independent SHA over the set of `(urn, kind, severity)` triples.
 It lets Aegis's salience memory dedup a recurring incident across scheduled runs (same
 datasets + same drift = one open issue, not a new alert every tick) and changes exactly
 when Ben would call it a different situation (drift resolves, worsens, or a new dataset
-joins). `tests/test_narrative.py` (20): short-name parsing, severity rollup, serving flag,
+joins). `tests/test_narrative.py` (34): short-name parsing, severity rollup, serving flag,
 fingerprint order-independence + change-on-worsen, deterministic markdown, action dedup,
-grounded prompt, and the LLM seam (used / fallback-on-raise / fallback-on-empty).
+grounded prompt, the LLM seam (used / fallback-on-raise / fallback-on-empty), and owner
+attribution (rendering, plural grammar, normalization, URN-restriction, fingerprint
+invariance, `to_dict`, and prompt grounding).
 
 ## W2b — Baseline store (`ogle.store`) + pipeline (`ogle.pipeline`)
 

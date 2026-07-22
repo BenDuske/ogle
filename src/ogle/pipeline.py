@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from .narrative import Incident, build_incident, narrate
 from .scorer import DriftFinding, ScoreConfig, score_dataset
@@ -75,6 +75,7 @@ def run_drift_check(
     llm: Optional[Callable[[str], str]] = None,
     update_baselines: bool = True,
     now: Optional[float] = None,
+    owners: Optional[Dict[str, List[str]]] = None,
 ) -> DriftReport:
     """Score a batch of fresh signatures against stored baselines and narrate the result.
 
@@ -88,6 +89,8 @@ def run_drift_check(
             so the next run diffs against the latest state. Pass False for a read-only probe.
         now: epoch seconds used to expire snoozed mutes (defaults to the wall clock). Inject a
             fixed value in tests for deterministic snooze-expiry behaviour.
+        owners: optional urn -> owner-names map (DataHub Ownership aspect) surfaced in the
+            narrative as a "who to page" line; never affects severity or the dedup fingerprint.
 
     Returns:
         A `DriftReport`. `should_alert` is the single field a scheduled loop needs.
@@ -120,7 +123,7 @@ def run_drift_check(
     # Rank the merged findings so the narrative leads with the worst across all datasets.
     all_findings.sort(key=lambda f: f.severity.rank, reverse=True)
 
-    incident = build_incident(all_findings)
+    incident = build_incident(all_findings, owners=owners)
     is_new = False
     count = 0
     if incident is not None:
@@ -136,7 +139,7 @@ def run_drift_check(
             now=now,
         )
 
-    text = narrate(all_findings, llm=llm)
+    text = narrate(all_findings, llm=llm, owners=owners)
 
     # Advance baselines only after scoring, so a mid-batch failure can't half-update state.
     if update_baselines:

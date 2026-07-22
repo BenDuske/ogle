@@ -52,6 +52,35 @@ _SEV_MARK: Dict[Severity, str] = {
 }
 
 
+def _normalize_owners(
+    owners: Optional[Dict[str, List[str]]], keep_urns: List[str]
+) -> Dict[str, List[str]]:
+    """Clean an owner map down to what a report can trust.
+
+    DataHub ownership arrives as free-form strings (a corpuser urn, a group name, an
+    email). We keep them as given but: restrict to URNs actually in this incident (a
+    stray owner for an unrelated dataset never leaks into the alert), strip whitespace,
+    drop empties, and dedup while preserving order (an asset owned by the same person via
+    two ownership types shows once). A URN with no usable owner is omitted entirely so
+    `render_markdown` can cleanly skip the line rather than print an empty "owner:".
+    """
+    if not owners:
+        return {}
+    keep = set(keep_urns)
+    cleaned: Dict[str, List[str]] = {}
+    for urn, names in owners.items():
+        if urn not in keep or not names:
+            continue
+        seen: List[str] = []
+        for name in names:
+            n = (name or "").strip()
+            if n and n not in seen:
+                seen.append(n)
+        if seen:
+            cleaned[urn] = seen
+    return cleaned
+
+
 def short_name(urn: str) -> str:
     """Pull a readable dataset name out of a DataHub dataset URN.
 
@@ -78,6 +107,10 @@ class Incident:
     serving_impacted: bool
     urns: List[str] = field(default_factory=list)
     fingerprint: str = ""
+    # urn -> owner display strings (from DataHub's Ownership aspect). Presentation only:
+    # deliberately NOT part of `fingerprint`, because re-assigning an owner is not drift
+    # and must never re-page a still-open incident.
+    owners: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def title(self) -> str:
@@ -118,6 +151,7 @@ class Incident:
             "serving_impacted": self.serving_impacted,
             "urns": list(self.urns),
             "fingerprint": self.fingerprint,
+            "owners": {u: list(v) for u, v in self.owners.items()},
             "findings": [f.to_dict() for f in self.findings],
         }
 
@@ -136,8 +170,16 @@ def incident_fingerprint(findings: List[DriftFinding]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def build_incident(findings: List[DriftFinding]) -> Optional[Incident]:
-    """Fold findings into a ranked `Incident`. Returns None when there is nothing to say."""
+def build_incident(
+    findings: List[DriftFinding],
+    owners: Optional[Dict[str, List[str]]] = None,
+) -> Optional[Incident]:
+    """Fold findings into a ranked `Incident`. Returns None when there is nothing to say.
+
+    `owners` is an optional urn -> owner-names map (from DataHub's Ownership aspect). It is
+    attached for the narrative's "who to page" line and does not affect severity or the
+    dedup fingerprint.
+    """
     if not findings:
         return None
 
@@ -156,6 +198,7 @@ def build_incident(findings: List[DriftFinding]) -> Optional[Incident]:
         serving_impacted=serving,
         urns=urns,
         fingerprint=incident_fingerprint(findings),
+        owners=_normalize_owners(owners, urns),
     )
 
 
@@ -181,6 +224,10 @@ def render_markdown(incident: Incident) -> str:
 
     for urn in incident.urns:
         lines.append(f"### {short_name(urn)}")
+        owners = incident.owners.get(urn)
+        if owners:
+            label = "owner" if len(owners) == 1 else "owners"
+            lines.append(f"- \U0001f464 {label}: {', '.join(owners)}")
         for f in by_urn[urn]:
             lines.append(f"- {_SEV_MARK[f.severity]} **{f.kind.value}** — {f.message}")
         lines.append("")
@@ -209,8 +256,9 @@ def build_llm_prompt(incident: Incident) -> str:
         "You are Ogle, an ML-lineage monitoring agent. Below are drift findings Ogle "
         "already computed for datasets feeding production ML models. Write a short "
         "incident summary (3-5 sentences) an on-call engineer can act on.\n"
-        "Rules: use ONLY the facts given; do not invent datasets, numbers, or severity; "
-        "lead with the most severe, serving-path impact first; end with the single most "
+        "Rules: use ONLY the facts given; do not invent datasets, numbers, severity, or "
+        "owners; lead with the most severe, serving-path impact first; if an owner is "
+        "listed for an affected dataset, name who to page; end with the single most "
         "important next check. Do not restate the markdown verbatim.\n\n"
         "FACTS:\n"
         f"{facts}"
@@ -220,6 +268,7 @@ def build_llm_prompt(incident: Incident) -> str:
 def narrate(
     findings: List[DriftFinding],
     llm: Optional[Callable[[str], str]] = None,
+    owners: Optional[Dict[str, List[str]]] = None,
 ) -> str:
     """Produce the human-facing narrative for a scoring run.
 
@@ -227,8 +276,9 @@ def narrate(
     grounded prompt and returns its text — but any exception (model down, timeout) falls
     back to the deterministic report, because an alert must always go out. Empty findings
     yield a clean "no drift" line so callers can send a heartbeat without special-casing.
+    `owners` (urn -> owner names) is surfaced as a "who to page" line when provided.
     """
-    incident = build_incident(findings)
+    incident = build_incident(findings, owners=owners)
     if incident is None:
         return "✅ No drift detected across monitored datasets.\n"
 

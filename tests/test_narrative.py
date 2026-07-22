@@ -218,3 +218,77 @@ def test_end_to_end_from_score_dataset():
     assert "HIGH" in out
     assert "serving path" in out
     assert "b2fd91.customers" in out
+
+
+# ---- owner attribution (who to page) ----
+
+def test_owner_line_rendered_under_its_dataset():
+    inc = build_incident(
+        [_finding(msg="schema changed: removed ['region']")],
+        owners={CUSTOMERS_URN: ["data-platform-team"]},
+    )
+    md = render_markdown(inc)
+    assert "\U0001f464 owner: data-platform-team" in md
+
+
+def test_owner_line_plural_for_multiple_owners():
+    inc = build_incident(
+        [_finding(msg="x")],
+        owners={CUSTOMERS_URN: ["alice", "bob"]},
+    )
+    md = render_markdown(inc)
+    assert "\U0001f464 owners: alice, bob" in md
+
+
+def test_no_owner_line_when_owners_absent():
+    md = render_markdown(build_incident([_finding(msg="x")]))
+    assert "\U0001f464" not in md
+
+
+def test_owners_normalized_strip_dedup_and_drop_empties():
+    inc = build_incident(
+        [_finding(msg="x")],
+        owners={CUSTOMERS_URN: ["  alice  ", "alice", "", "  ", "bob"]},
+    )
+    assert inc.owners[CUSTOMERS_URN] == ["alice", "bob"]
+
+
+def test_owners_restricted_to_incident_urns():
+    # An owner for a dataset that isn't in this incident must never leak into the alert.
+    inc = build_incident(
+        [_finding(urn=CUSTOMERS_URN, msg="x")],
+        owners={ORDERS_URN: ["someone-else"]},
+    )
+    assert inc.owners == {}
+    assert "someone-else" not in render_markdown(inc)
+
+
+def test_urn_with_only_blank_owners_is_omitted():
+    inc = build_incident([_finding(msg="x")], owners={CUSTOMERS_URN: ["", "   "]})
+    assert CUSTOMERS_URN not in inc.owners
+
+
+def test_ownership_does_not_change_fingerprint():
+    # Re-assigning an owner is not drift; a still-open incident must not re-page.
+    findings = [_finding(msg="x")]
+    a = build_incident(findings, owners={CUSTOMERS_URN: ["alice"]})
+    b = build_incident(findings, owners={CUSTOMERS_URN: ["bob"]})
+    c = build_incident(findings)  # no owners at all
+    assert a.fingerprint == b.fingerprint == c.fingerprint
+
+
+def test_to_dict_carries_owners():
+    inc = build_incident([_finding(msg="x")], owners={CUSTOMERS_URN: ["alice"]})
+    assert inc.to_dict()["owners"] == {CUSTOMERS_URN: ["alice"]}
+
+
+def test_narrate_surfaces_owner_without_llm():
+    out = narrate([_finding(msg="x")], owners={CUSTOMERS_URN: ["on-call-ml"]})
+    assert "on-call-ml" in out
+
+
+def test_llm_prompt_grounds_on_owner_facts():
+    inc = build_incident([_finding(msg="x")], owners={CUSTOMERS_URN: ["on-call-ml"]})
+    prompt = build_llm_prompt(inc)
+    assert "on-call-ml" in prompt      # the fact is handed to the model
+    assert "do not invent" in prompt and "owners" in prompt  # and it's forbidden to fabricate
