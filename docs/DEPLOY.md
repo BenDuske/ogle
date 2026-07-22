@@ -18,7 +18,7 @@ and `writeback`, so the offline path installs nothing beyond Ogle itself.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                                   # 642 tests, no Docker, no keys
+pytest -q                                   # 660+ tests, no Docker, no keys
 
 # reproduce the sample drift alert end-to-end
 ogle check --store demo.json --signatures examples/demo/healthy-signatures.json   # seeds, exit 0
