@@ -513,6 +513,7 @@ ogle incidents                          # what drift Ogle currently remembers, w
 ogle incidents --json                   # same, machine-readable
 ogle incidents --min-severity high      # triage: only high-severity incidents (drops unknown/legacy)
 ogle incidents --serving-only           # only incidents that touch a serving path
+ogle incidents --kind freshness         # only incidents including one drift dimension (schema/volume/quality/distribution/freshness)
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
 ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
@@ -530,7 +531,19 @@ ogle incidents --summary                # aggregate rollup instead of the per-in
 ogle incidents --fail-on high           # exit 1 if any remembered incident is HIGH+ (health gate)
 ogle incidents --serving-only --fingerprints | xargs ogle resolve   # batch-resolve a filtered set
 ogle incidents --stale 30d --fingerprints | ogle resolve -          # prune drift that stopped recurring
+ogle incidents --kind schema --fingerprints | ogle resolve -        # resolve one failure mode across the store
 ```
+
+Each incident line also names the **drift dimensions** it carries (`schema, volume`, `freshness`, …)
+when Ogle recorded them, so the failure mode reads off the line itself. `--kind <dimension>` filters
+to just the incidents that include that dimension — isolate one failure class (`--kind freshness` for
+every stalled feed, `--kind schema` for every reshaped table) without grepping titles. It's a
+*membership* test, not an exact-set match, so a schema-**and**-volume incident surfaces under both
+`--kind schema` and `--kind volume`; it composes with every other filter and `--fingerprints`, so
+`ogle incidents --kind freshness --serving-only --fingerprints | ogle resolve -` clears one dimension
+on the serving path in a line. Incidents remembered by an older Ogle (before kind-tracking) have an
+unknown dimension set, so any `--kind` drops them rather than guessing — the same "never guess" rule
+the timed filters follow.
 
 Each incident line carries the **age of its most recent sighting** (`last seen 3h ago`, or
 `just now` for a fresh one) when Ogle has a timestamp for it — the temporal signal that tells a

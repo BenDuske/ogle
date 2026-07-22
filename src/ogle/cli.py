@@ -38,7 +38,7 @@ from . import __version__
 from .llm import build_narrator
 from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
-from .scorer import Severity, build_score_config
+from .scorer import DriftKind, Severity, build_score_config
 from .signature import DatasetSignature, parse_iso_epoch
 from .store import BaselineStore
 
@@ -1459,6 +1459,7 @@ def _incident_passes(
     stale_before: Optional[float] = None,
     fresh_after: Optional[float] = None,
     standing_before: Optional[float] = None,
+    kind: Optional[str] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -1482,10 +1483,18 @@ def _incident_passes(
     regardless of how recently it recurred. Composes with `fresh_after` into the chronic-
     active query (first seen long ago AND still recurring lately). A record with no
     first_seen (legacy/untimed) can't be proven long-standing, so it's dropped, not guessed.
+    `kind` (None = no dimension filter) keeps only incidents whose recorded drift dimensions
+    include it — isolate one failure mode (e.g. only `freshness` incidents). A record with no
+    recorded kinds (legacy, predating kind tracking) has an unknown dimension set, so it's
+    dropped rather than guessed — same rule as the timed filters above.
     All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
         return False
+    if kind is not None:
+        rec_kinds = rec.get("kinds")
+        if not isinstance(rec_kinds, list) or kind not in rec_kinds:
+            return False
     if min_count is not None and int(rec.get("count", 0)) < min_count:
         return False
     if needle is not None and not _incident_matches_needle(rec, needle):
@@ -1843,6 +1852,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     serving_only = getattr(args, "serving_only", False)
     min_count = getattr(args, "min_count", None)
     needle = getattr(args, "grep", None)
+    kind = getattr(args, "kind", None)
 
     # `--stale AGE`: keep only drift last seen longer ago than AGE (e.g. `--stale 7d`) — the
     # resolve/forget candidates that stopped recurring. Parsed against a single `now` so the
@@ -1894,6 +1904,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         or stale_before is not None
         or fresh_after is not None
         or standing_before is not None
+        or kind is not None
     )
     records = [
         r
@@ -1907,6 +1918,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             stale_before,
             fresh_after,
             standing_before,
+            kind,
         )
     ]
 
@@ -2083,8 +2095,13 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         else:
             fpart = ""
         title = r.get("title") or "(drift)"
+        # Drift dimensions in the incident (schema/volume/…), when recorded. Lets an operator
+        # read the failure mode off the line itself; omitted on legacy records that predate
+        # kind tracking rather than faking a dimension.
+        rk = r.get("kinds")
+        kpart = f" · {', '.join(rk)}" if isinstance(rk, list) and rk else ""
         _emit(
-            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{fpart}{apart}  `{r['fingerprint']}`"
+            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{kpart}{fpart}{apart}  `{r['fingerprint']}`"
         )
     if gate_rc and not args.json:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -3362,6 +3379,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--serving-only",
         action="store_true",
         help="Only show incidents that touch a serving path.",
+    )
+    incidents.add_argument(
+        "--kind",
+        choices=[k.value for k in DriftKind],
+        default=None,
+        help="Only show incidents that include this drift dimension (schema, volume, "
+        "quality, distribution, freshness) — isolate one failure mode, e.g. `--kind "
+        "freshness --fingerprints | ogle resolve -`. Drops legacy records that predate "
+        "kind tracking (dimension unknown, never guessed).",
     )
     incidents.add_argument(
         "--min-count",

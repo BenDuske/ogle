@@ -1469,6 +1469,88 @@ def test_incidents_filters_compose_and(tmp_path, capsys):
     assert fps == ["high_serv"]
 
 
+# ---- `ogle incidents --kind` (drift-dimension filter) -------------------------------
+def _seed_kinded_incidents(store_path):
+    """A store with incidents carrying different recorded drift-dimension sets."""
+    s = BaselineStore(path=store_path)
+    s.record_incident("fresh_only", severity="high", title="STALE", datasets=1,
+                      kinds=["freshness"])
+    s.record_incident("schema_vol", severity="high", title="SCHEMA+VOL", datasets=2,
+                      kinds=["schema", "volume"])
+    s.record_incident("qual_only", severity="medium", title="NULLS", datasets=1,
+                      kinds=["quality"])
+    s.save()
+    return s
+
+
+def test_incidents_kind_filters_to_one_dimension(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--kind", "freshness", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fresh_only"]  # only the incident carrying `freshness`
+
+
+def test_incidents_kind_matches_membership_not_exact_set(tmp_path, capsys):
+    # `--kind volume` matches an incident whose kinds are {schema, volume} — membership,
+    # not an exact-set match, so a multi-dimension incident surfaces under each of its kinds.
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--kind", "volume", "--json"]) == 0
+    fps = {e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]}
+    assert fps == {"schema_vol"}
+
+
+def test_incidents_kind_composes_with_min_severity(tmp_path, capsys):
+    # --kind AND --min-severity together: the quality incident is medium, so a high floor
+    # drops it even though its kind matches.
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    rc = main(["incidents", "--store", str(store_path),
+               "--kind", "quality", "--min-severity", "high", "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+
+
+def test_incidents_kind_drops_legacy_untracked(tmp_path, capsys):
+    # A record predating kind tracking (no `kinds`) has an unknown dimension set, so ANY
+    # --kind filter drops it rather than guessing — same rule as the timed filters.
+    store_path = tmp_path / "baselines.json"
+    store_path.write_text(
+        json.dumps({"version": 1, "seen_incidents": {"old": {"count": 4, "severity": "high"}}}),
+        encoding="utf-8",
+    )
+    assert main(["incidents", "--store", str(store_path), "--kind", "schema", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+
+
+def test_incidents_kind_bad_value_is_hard_error(tmp_path, capsys):
+    # An unknown dimension is a parse error (exit 2), same as any bad choice.
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    with pytest.raises(SystemExit) as ei:
+        main(["incidents", "--store", str(store_path), "--kind", "bogus"])
+    assert ei.value.code == 2
+
+
+def test_incidents_kind_surfaced_in_human_line(tmp_path, capsys):
+    # The recorded dimensions render on the human per-incident line.
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--kind", "schema"]) == 0
+    out = capsys.readouterr().out
+    assert "schema, volume" in out  # sorted, comma-joined dimension list
+
+
+def test_incidents_kind_fingerprints_feed_resolve(tmp_path, capsys):
+    # The scriptable path: --kind + --fingerprints emits only the matching fingerprint.
+    store_path = tmp_path / "baselines.json"
+    _seed_kinded_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path),
+                 "--kind", "freshness", "--fingerprints"]) == 0
+    assert capsys.readouterr().out.strip() == "fresh_only"
+
+
 def test_incidents_min_severity_drops_unknown_legacy(tmp_path, capsys):
     # A legacy bare-count record (no severity) must NOT survive a severity floor —
     # asking for a floor is asking to hide the un-triageable.

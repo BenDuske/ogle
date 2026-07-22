@@ -137,6 +137,7 @@ def run_drift_check(
             title=incident.title,
             datasets=len(incident.urns),
             serving=incident.serving_impacted,
+            kinds={f.kind.value for f in incident.findings},
             now=now,
         )
 

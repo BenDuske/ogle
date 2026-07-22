@@ -87,6 +87,18 @@ def test_volume_collapse_flags_incident():
     assert report.incident_count == 1
 
 
+def test_recorded_incident_carries_drift_kinds():
+    """The pipeline persists the incident's drift dimensions into memory so `ogle incidents
+    --kind` can isolate a failure mode. A schema-change-plus-volume-collapse records both."""
+    store = BaselineStore()
+    store.put_baseline(_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1000))
+    # Drop a column (schema) AND collapse the row count (volume) in one sighting.
+    report = run_drift_check(store, [_sig(schema_fields=[("id", "int")], row_count=0)])
+    assert report.incident is not None
+    (rec,) = store.incidents()
+    assert rec["kinds"] == ["schema", "volume"]  # sorted, both dimensions present
+
+
 def test_serving_path_escalates_severity():
     store = BaselineStore()
     store.put_baseline(_sig(row_count=1000))

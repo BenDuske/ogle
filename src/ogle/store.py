@@ -56,6 +56,7 @@ class _IncidentRecord:
     serving: bool = False            # whether a serving path was impacted at last sighting
     last_seen: Optional[float] = None  # epoch-seconds of the most recent sighting (None = legacy/untimed)
     first_seen: Optional[float] = None  # epoch-seconds of the FIRST sighting — the incident's longevity/standing (None = legacy/untimed)
+    kinds: List[str] = field(default_factory=list)  # drift dimensions in the incident at last sighting (schema/volume/quality/distribution/freshness); [] = legacy/unknown
 
     def to_dict(self) -> dict:
         # Serialize provenance only when set so an old bare-count record round-trips
@@ -73,12 +74,15 @@ class _IncidentRecord:
             d["last_seen"] = self.last_seen
         if self.first_seen is not None:
             d["first_seen"] = self.first_seen
+        if self.kinds:
+            d["kinds"] = list(self.kinds)
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "_IncidentRecord":
         ls = data.get("last_seen")
         fs = data.get("first_seen")
+        raw_kinds = data.get("kinds")
         return cls(
             count=int(data.get("count", 0)),
             severity=data.get("severity"),
@@ -87,6 +91,7 @@ class _IncidentRecord:
             serving=bool(data.get("serving", False)),
             last_seen=float(ls) if ls is not None else None,
             first_seen=float(fs) if fs is not None else None,
+            kinds=[str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else [],
         )
 
 
@@ -183,6 +188,7 @@ class BaselineStore:
         title: Optional[str] = None,
         datasets: int = 0,
         serving: bool = False,
+        kinds: Optional[Iterable[str]] = None,
         now: Optional[float] = None,
     ) -> int:
         """Record one observation of an incident; return its running observation count.
@@ -190,11 +196,12 @@ class BaselineStore:
         First sighting returns 1. Callers should check `has_seen()` *before* recording to
         decide whether an alert is new vs a repeat.
 
-        The optional provenance (severity/title/datasets/serving) is stored for later
-        display by `ogle incidents`. It's refreshed to the current sighting only when the
-        caller supplies it — a bare `record_incident(fp)` never blanks provenance an
+        The optional provenance (severity/title/datasets/serving/kinds) is stored for later
+        display + filtering by `ogle incidents`. It's refreshed to the current sighting only
+        when the caller supplies it — a bare `record_incident(fp)` never blanks provenance an
         earlier rich call captured, so a metadata-less dedup ping can't erase the record's
-        human context.
+        human context. `kinds` (the drift dimensions present this sighting) refreshes with the
+        rest of the provenance block, since a recurring incident's dimension set can shift.
 
         `now` (epoch seconds) stamps `last_seen` for this sighting, giving the incident a
         temporal axis (`ogle incidents` age display + `--stale` staleness hunt). It's
@@ -219,6 +226,11 @@ class BaselineStore:
             rec.title = title
             rec.datasets = datasets
             rec.serving = serving
+            # Refresh the drift-dimension set with the rest of the provenance (same
+            # latest-sighting semantics). Deduped + sorted for a stable, diffable record;
+            # None leaves an earlier set intact, [] here means "supplied, but empty".
+            if kinds is not None:
+                rec.kinds = sorted({str(k) for k in kinds})
         if now is not None:
             rec.last_seen = now
             if rec.first_seen is None:
