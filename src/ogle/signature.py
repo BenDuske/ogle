@@ -10,6 +10,9 @@ to catch the three drifts that actually break production ML:
   * QUALITY drift  — a column that used to be populated is now mostly null.
   * DISTRIBUTION   — a column's distinct-value fraction collapsed (a categorical feature
                      stuck on one value, or an id/key that lost uniqueness in a bad join).
+  * MEAN drift     — a numeric feature's mean shifted (covariate shift): schema, volume,
+                     nulls and cardinality all look fine, but the values moved under the
+                     model — the classic silent feature-drift that quietly rots accuracy.
 
 Everything here is pure and deterministic (no DataHub client, no clock): the walker hands
 us the aspects it pulled, we fold them into a `DatasetSignature`. That keeps the scoring
@@ -21,6 +24,7 @@ Source aspects (when wired to live DataHub in W2):
   * `row_count`              <- DatasetProfile.rowCount
   * `field_null_fractions`   <- DatasetProfile.fieldProfiles[].{fieldPath,nullProportion}
   * `field_unique_fractions` <- DatasetProfile.fieldProfiles[].{fieldPath,uniqueProportion}
+  * `field_means`            <- DatasetProfile.fieldProfiles[].{fieldPath,mean}
 """
 
 from __future__ import annotations
@@ -87,6 +91,12 @@ class DatasetSignature:
     # it. Scoring degrades gracefully: a field with no unique fraction on either side is not
     # scored for distribution drift, never guessed.
     field_unique_fractions: Dict[str, float] = field(default_factory=dict)
+    # Per-field numeric mean, from DataHub's profile (`fieldProfiles[].mean`). Optional and
+    # unbounded (a mean is a real number — can be negative, has no [0,1] cap unlike the
+    # fractions above). Only numeric columns carry one; text/categorical fields simply have
+    # no entry. Scoring degrades gracefully: a field with no mean on either side is not scored
+    # for mean drift, never guessed.
+    field_means: Dict[str, float] = field(default_factory=dict)
     # Free-form provenance (e.g. the profile timestamp). Never part of the schema hash.
     computed_at: Optional[str] = None
 
@@ -114,6 +124,7 @@ class DatasetSignature:
             "row_count": self.row_count,
             "field_null_fractions": dict(self.field_null_fractions),
             "field_unique_fractions": dict(self.field_unique_fractions),
+            "field_means": dict(self.field_means),
             "computed_at": self.computed_at,
             "schema_hash": self.schema_hash,  # denormalized for quick baseline diffing
         }
@@ -129,6 +140,7 @@ class DatasetSignature:
             row_count=data.get("row_count"),
             field_null_fractions=dict(data.get("field_null_fractions", {})),
             field_unique_fractions=dict(data.get("field_unique_fractions", {})),
+            field_means=dict(data.get("field_means", {})),
             computed_at=data.get("computed_at"),
         )
 
@@ -139,6 +151,7 @@ def build_signature(
     row_count: Optional[int] = None,
     field_null_fractions: Optional[Dict[str, float]] = None,
     field_unique_fractions: Optional[Dict[str, float]] = None,
+    field_means: Optional[Dict[str, float]] = None,
     computed_at: Optional[str] = None,
 ) -> DatasetSignature:
     """Convenience builder from plain tuples (what a DataHub aspect walk yields).
@@ -164,6 +177,14 @@ def build_signature(
             raise ValueError(
                 f"unique fraction for {path!r} must be in [0,1], got {frac!r}"
             )
+    # A mean is an unbounded real (unlike the fractions above): only reject non-finite
+    # values (NaN/inf would poison the relative-shift math in the scorer), never a range.
+    means = dict(field_means or {})
+    for path, mval in means.items():
+        if mval != mval or mval in (float("inf"), float("-inf")):
+            raise ValueError(
+                f"mean for {path!r} must be a finite number, got {mval!r}"
+            )
     if row_count is not None and row_count < 0:
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
@@ -173,5 +194,6 @@ def build_signature(
         row_count=row_count,
         field_null_fractions=nulls,
         field_unique_fractions=uniques,
+        field_means=means,
         computed_at=computed_at,
     )

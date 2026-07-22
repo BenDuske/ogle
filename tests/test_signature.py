@@ -112,3 +112,48 @@ def test_from_dict_without_unique_fractions_is_backward_compatible():
     }
     restored = DatasetSignature.from_dict(legacy)
     assert restored.field_unique_fractions == {}
+
+
+# ---- field_means (numeric mean, for covariate/mean drift) --------------------------
+
+def test_means_round_trip():
+    sig = build_signature(
+        "urn:li:dataset:x",
+        [("id", "int"), ("amount", "double")],
+        row_count=1000,
+        field_means={"amount": 42.5, "id": -3.0},
+        computed_at="2026-07-22T00:00:00Z",
+    )
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+    assert restored.field_means == {"amount": 42.5, "id": -3.0}
+
+
+def test_means_default_empty():
+    sig = build_signature("urn:x", [("id", "int")])
+    assert sig.field_means == {}
+
+
+def test_means_allow_negative_and_large():
+    """A mean is unbounded — negatives and big magnitudes are valid, unlike fractions."""
+    sig = build_signature("urn:x", field_means={"pnl": -1_000_000.0, "rate": 12345.6})
+    assert sig.field_means == {"pnl": -1_000_000.0, "rate": 12345.6}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_mean_rejected(bad):
+    with pytest.raises(ValueError, match="mean.*finite"):
+        build_signature("urn:x", field_means={"f": bad})
+
+
+def test_from_dict_without_means_is_backward_compatible():
+    """A baseline persisted before mean drift existed must still load (empty map)."""
+    legacy = {
+        "urn": "urn:x",
+        "schema_fields": [["id", "int"]],
+        "row_count": 5,
+        "field_null_fractions": {"id": 0.0},
+        "field_unique_fractions": {"id": 1.0},
+    }
+    restored = DatasetSignature.from_dict(legacy)
+    assert restored.field_means == {}

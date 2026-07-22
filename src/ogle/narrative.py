@@ -52,6 +52,11 @@ _ACTIONS: Dict[DriftKind, str] = {
         "with unchanged rows usually means the feed silently stopped, so every retrain is "
         "learning yesterday's data"
     ),
+    DriftKind.MEAN: (
+        "check the source for a unit/scale change, sensor recalibration, or a genuine "
+        "population shift — a moved mean with intact schema and row count is covariate "
+        "drift that quietly degrades the model until it's retrained on the new values"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {

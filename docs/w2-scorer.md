@@ -9,7 +9,7 @@ production ML models. Two pure modules, no live DataHub required to develop or t
   compare equal. Round-trips through `to_dict` / `from_dict` for the baseline store (Aegis
   memory in W2b); `field_unique_fractions` is optional, so pre-existing baselines load clean.
 - `ogle.scorer` — `score_dataset(baseline, current, cfg, serving, now)` returns `DriftFinding`s
-  across five dimensions, sorted most-severe first.
+  across six dimensions, sorted most-severe first.
 
 ## Drift dimensions
 
@@ -19,7 +19,17 @@ production ML models. Two pure modules, no live DataHub required to develop or t
 | VOLUME       | row count changes past `volume_rel_threshold` (default ±30%)      | banded by how far past threshold; collapse-to-empty = HIGH |
 | QUALITY      | a field's null fraction rises ≥ `null_fraction_abs_threshold` (0.20) | banded by max delta |
 | DISTRIBUTION | a field's distinct-value fraction *drops* ≥ `unique_fraction_drop_threshold` (0.30) | banded by max drop |
+| MEAN         | a numeric field's mean shifts (either way) ≥ `mean_rel_threshold` (0.25) vs baseline | banded by max relative shift |
 | FRESHNESS    | a dataset's profile timestamp (`computed_at`) ages past `freshness_max_age_seconds` relative to `now` | banded by how far past the SLA |
+
+**MEAN** is the numeric-covariate-shift dimension: a feature's values move (sensor
+recalibration, a unit/currency change, or a genuine population shift) while its schema, row
+count, null rate and cardinality all stay green — so every other score is quiet, yet each
+retrain learns a distribution the deployed model never saw. It scores the *relative* shift of
+each numeric field's mean and flags **both directions** (a feature that doubled or halved has
+moved either way), unlike DISTRIBUTION's drop-only rule. A field with no mean on either side is
+skipped, and a baseline mean whose magnitude is below `mean_zero_floor` (~0) is skipped too —
+a relative shift against zero is undefined and would page on trivial wiggle. Never guessed.
 
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model
@@ -27,7 +37,7 @@ keeps training on a feature that now carries no signal) and an id/join key losin
 (a fan-out join duplicating rows). Only a *drop* pages — cardinality rising is usually benign
 variety, and flagging it would be noise on the serving path we work to keep quiet.
 
-**FRESHNESS** is the silent-stall dimension the other four structurally cannot see: when an
+**FRESHNESS** is the silent-stall dimension the others structurally cannot see: when an
 ETL quietly stops, the rows, schema, null and unique fractions all stay put, so every other
 score is green — yet the data is stale and each retrain learns yesterday's world. The one
 signal that moves is the profile timestamp. It is **opt-in** (`freshness_max_age_seconds` /

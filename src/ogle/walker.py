@@ -106,8 +106,8 @@ def build_signature_from_aspects(
     The aspects are duck-typed:
       * `schema_metadata.fields[]` -> each has `.fieldPath` and `.nativeDataType`
       * `dataset_profile.rowCount` (Optional[int])
-      * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`, and
-        `.uniqueProportion`
+      * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`,
+        `.uniqueProportion`, and (numeric columns only) `.mean`
 
     Missing sub-fields inside the aspect are treated as missing data (skipped), not zero.
     """
@@ -126,6 +126,7 @@ def build_signature_from_aspects(
     row_count: Optional[int] = None
     null_fractions: Dict[str, float] = {}
     unique_fractions: Dict[str, float] = {}
+    means: Dict[str, float] = {}
     if dataset_profile is not None:
         rc = getattr(dataset_profile, "rowCount", None)
         if isinstance(rc, int) and rc >= 0:
@@ -140,6 +141,9 @@ def build_signature_from_aspects(
             unique_frac = _coerce_fraction(getattr(fp, "uniqueProportion", None))
             if unique_frac is not None:
                 unique_fractions[str(path)] = unique_frac
+            mean_val = _coerce_mean(getattr(fp, "mean", None))
+            if mean_val is not None:
+                means[str(path)] = mean_val
 
     return build_signature(
         urn=urn,
@@ -147,6 +151,7 @@ def build_signature_from_aspects(
         row_count=row_count,
         field_null_fractions=null_fractions,
         field_unique_fractions=unique_fractions,
+        field_means=means,
         computed_at=computed_at,
     )
 
@@ -164,6 +169,25 @@ def _coerce_fraction(raw: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return val if 0.0 <= val <= 1.0 else None
+
+
+def _coerce_mean(raw: Any) -> Optional[float]:
+    """A DataHub profile `mean` (usually a numeric string) as a clean finite float.
+
+    Unlike `_coerce_fraction` a mean is unbounded (any real), so there is no range gate —
+    only a non-finite guard: a missing value, an unparseable one, or NaN/inf is skipped
+    (never guessed), keeping a junk profile entry out of the signature. DataHub reports
+    `mean` only for numeric columns, so text/categorical fields simply yield None here.
+    """
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val or val in (float("inf"), float("-inf")):
+        return None
+    return val
 
 
 def owner_display_name(owner_urn: str) -> str:

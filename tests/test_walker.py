@@ -61,6 +61,7 @@ class FakeFieldProfile:
     fieldPath: str
     nullProportion: Optional[float]
     uniqueProportion: Optional[float] = None
+    mean: Optional[str] = None  # DataHub reports mean as a numeric string
 
 
 @dataclass
@@ -271,6 +272,40 @@ def test_build_signature_skips_unique_fractions_out_of_range():
     )
     sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
     assert set(sig.field_unique_fractions) == {"ok"}
+
+
+def test_build_signature_folds_means():
+    """`mean` on a field profile (a numeric string) lands in field_means as a float."""
+    profile = FakeProfile(
+        rowCount=1000,
+        fieldProfiles=[
+            FakeFieldProfile("amount", 0.0, mean="42.5"),
+            FakeFieldProfile("pnl", 0.0, mean="-3.0"),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_means == {"amount": pytest.approx(42.5), "pnl": pytest.approx(-3.0)}
+
+
+def test_build_signature_mean_absent_yields_empty():
+    """Text/categorical columns (no mean) and older profiles degrade to an empty map."""
+    profile = FakeProfile(rowCount=10, fieldProfiles=[FakeFieldProfile("region", 0.0)])
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_means == {}
+
+
+def test_build_signature_skips_non_finite_and_junk_means():
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("ok", 0.0, mean="1.5"),
+            FakeFieldProfile("nan", 0.0, mean="nan"),
+            FakeFieldProfile("inf", 0.0, mean="inf"),
+            FakeFieldProfile("junk", 0.0, mean="not-a-number"),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_means) == {"ok"}
 
 
 def test_build_signature_skips_partial_schema_fields():

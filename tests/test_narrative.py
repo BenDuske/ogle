@@ -319,3 +319,25 @@ def test_distribution_finding_from_real_scorer_path():
     assert inc is not None
     md = render_markdown(inc)
     assert "**distribution**" in md
+
+
+def test_mean_finding_from_real_scorer_path():
+    """End-to-end: a real mean-shift finding flows scorer -> incident -> markdown."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 175.0})  # +75%
+    findings = score_dataset(base, cur)
+    inc = build_incident(findings)
+    assert inc is not None
+    md = render_markdown(inc)
+    assert "**mean**" in md
+    # the mean-specific advice (covariate drift), not another kind's line
+    assert "covariate" in md
+
+
+def test_every_drift_kind_has_a_recommended_action():
+    """Guard: a new DriftKind must add an _ACTIONS entry, or render_markdown KeyErrors
+    live (as MEAN did before this map was completed)."""
+    from ogle.narrative import _ACTIONS
+
+    missing = [k for k in DriftKind if k not in _ACTIONS]
+    assert not missing, f"DriftKind(s) with no recommended action: {missing}"

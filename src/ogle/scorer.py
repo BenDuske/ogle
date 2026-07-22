@@ -27,6 +27,7 @@ class DriftKind(str, Enum):
     QUALITY = "quality"
     DISTRIBUTION = "distribution"
     FRESHNESS = "freshness"
+    MEAN = "mean"
 
 
 class Severity(str, Enum):
@@ -71,6 +72,16 @@ class ScoreConfig:
     # drift (a categorical collapsing to one value, or a key losing uniqueness). Only a
     # drop is flagged — cardinality *rising* is usually benign (more variety, not breakage).
     unique_fraction_drop_threshold: float = 0.30
+    # Relative shift in a numeric field's mean that counts as covariate/feature drift
+    # (0.25 = ±25% move vs the baseline mean). Both directions matter — a feature that
+    # doubled or halved has moved under the model either way — unlike the drop-only
+    # distribution rule. A field whose baseline mean is ~0 is skipped (relative shift is
+    # undefined there; see `mean_zero_floor`), never guessed.
+    mean_rel_threshold: float = 0.25
+    # Baseline-mean magnitude below this is treated as "effectively zero": a relative shift
+    # against it explodes (÷~0) and would page on trivial absolute wiggle, so the field is not
+    # scored for mean drift rather than flagged on noise.
+    mean_zero_floor: float = 1e-9
     # Data-freshness SLA in seconds. When set, a dataset whose profile timestamp
     # (`computed_at`) is older than this relative to the walk's `now` flags freshness drift —
     # the classic silent-stall failure (ETL stopped, rows unchanged so volume looks fine, but
@@ -85,6 +96,7 @@ def build_score_config(
     volume_threshold: Optional[float] = None,
     null_threshold: Optional[float] = None,
     unique_drop_threshold: Optional[float] = None,
+    mean_threshold: Optional[float] = None,
     freshness_max_age_seconds: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
@@ -108,6 +120,9 @@ def build_score_config(
         if unique_drop_threshold is None
         else unique_drop_threshold
     )
+    mean = (
+        ScoreConfig.mean_rel_threshold if mean_threshold is None else mean_threshold
+    )
     esc = (
         ScoreConfig.escalate_when_serving
         if escalate_when_serving is None
@@ -128,6 +143,13 @@ def build_score_config(
             f"unique-drop threshold must be in (0, 1] (got {uniq}); it is an absolute "
             "distinct-value-fraction decrease."
         )
+    # A relative band with no upper cap (a 300% mean move is a legitimate threshold), just
+    # strictly positive — zero/negative would flag every field and divide by ~0 in
+    # `_severity_from_ratio`, same failure the volume band guards against.
+    if not (mean > 0):
+        raise ValueError(
+            f"mean threshold must be > 0 (got {mean}); it is a relative mean-shift band."
+        )
     # None keeps the freshness dimension OFF (the default). A supplied SLA must be a positive
     # duration — a zero/negative age would flag every timestamped dataset as stale, and
     # `_severity_from_ratio` divides by it. Reject up front, same as the other bands.
@@ -144,6 +166,7 @@ def build_score_config(
         volume_rel_threshold=float(vol),
         null_fraction_abs_threshold=float(nul),
         unique_fraction_drop_threshold=float(uniq),
+        mean_rel_threshold=float(mean),
         freshness_max_age_seconds=None if fresh is None else float(fresh),
         escalate_when_serving=esc,
     )
@@ -311,13 +334,66 @@ def score_distribution(
     )
 
 
+def score_mean(
+    baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
+) -> Optional[DriftFinding]:
+    """Numeric-mean shift — covariate/feature drift the other dimensions are blind to.
+
+    A feature column can keep its schema, row count, null rate and cardinality while its
+    *values* drift out from under a deployed model — sensor recalibrated, currency switched,
+    a unit changed upstream, or the population genuinely moved. Schema/volume/quality/
+    distribution all stay green; the one signal that moves is the field's mean. This scores
+    the relative shift of each numeric field's mean against its baseline.
+
+    Both directions are flagged (a feature that doubled *or* halved has moved), unlike the
+    drop-only distribution rule. A field with no mean on either side is skipped (never
+    guessed), and a baseline mean whose magnitude is below `cfg.mean_zero_floor` is skipped
+    too — a relative shift against ~0 explodes and would page on trivial wiggle.
+    """
+    worsened: Dict[str, Dict[str, float]] = {}
+    for path, cur_mean in current.field_means.items():
+        base_mean = baseline.field_means.get(path)
+        if base_mean is None:
+            continue
+        if abs(base_mean) < cfg.mean_zero_floor:
+            continue
+        rel_shift = abs(cur_mean - base_mean) / abs(base_mean)
+        if rel_shift >= cfg.mean_rel_threshold:
+            worsened[path] = {
+                "baseline": base_mean,
+                "current": cur_mean,
+                "rel_shift": rel_shift,
+            }
+
+    if not worsened:
+        return None
+
+    max_shift = max(v["rel_shift"] for v in worsened.values())
+    severity = _severity_from_ratio(max_shift, cfg.mean_rel_threshold)
+    fields = sorted(worsened, key=lambda p: worsened[p]["rel_shift"], reverse=True)
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.MEAN,
+        severity=severity,
+        message=(
+            "numeric mean shifted on "
+            + ", ".join(
+                f"{p} ({worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
+                f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%})"
+                for p in fields
+            )
+        ),
+        details={"fields": worsened},
+    )
+
+
 def score_freshness(
     current: DatasetSignature, cfg: ScoreConfig, now: Optional[float]
 ) -> Optional[DriftFinding]:
-    """Data-freshness SLA — the silent-stall dimension the other four can't see.
+    """Data-freshness SLA — the silent-stall dimension the others can't see.
 
     A source whose ETL quietly stopped keeps its rows, schema, null and unique fractions
-    unchanged, so schema/volume/quality/distribution all stay green — yet the data is stale
+    unchanged, so schema/volume/quality/distribution/mean all stay green — yet the data is stale
     and every model retraining on it is learning yesterday's world. The one signal that moves
     is the profile timestamp (`computed_at`), which stops advancing. This dimension compares
     that stamp's age against a configured SLA.
@@ -384,6 +460,7 @@ def score_dataset(
         score_volume(baseline, current, cfg),
         score_quality(baseline, current, cfg),
         score_distribution(baseline, current, cfg),
+        score_mean(baseline, current, cfg),
         score_freshness(current, cfg, now),
     ):
         if finding is None:

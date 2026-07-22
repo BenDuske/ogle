@@ -315,6 +315,93 @@ def test_build_config_unique_drop_tuning_suppresses():
             if f.kind is DriftKind.DISTRIBUTION] == []  # now quiet
 
 
+# ---- mean drift (numeric covariate shift) ------------------------------------------
+
+def test_mean_shift_flagged():
+    """A numeric feature whose mean moved past the band is covariate drift."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})  # +40% > 25% default
+    means = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN]
+    assert len(means) == 1
+    assert "amount" in means[0].message
+    assert means[0].details["fields"]["amount"]["rel_shift"] == pytest.approx(0.40)
+
+
+def test_mean_shift_flags_both_directions():
+    """Unlike distribution's drop-only rule, a mean that *fell* pages too."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 50.0})  # -50%
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN]
+
+
+def test_small_mean_shift_below_threshold_quiet():
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 110.0})  # +10% < 25% default
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN] == []
+
+
+def test_mean_near_zero_baseline_skipped():
+    """A relative shift against a ~0 baseline is undefined — skipped, never guessed."""
+    base = _sig(field_means={"delta": 0.0})
+    cur = _sig(field_means={"delta": 5.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN] == []
+
+
+def test_new_mean_without_baseline_skipped():
+    base = _sig(field_means={})
+    cur = _sig(field_means={"amount": 42.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN] == []
+
+
+def test_mean_severity_scales_with_shift():
+    base = _sig(field_means={"amount": 100.0})
+    mild = _sig(field_means={"amount": 140.0})   # +40% -> ~1.6x band -> MEDIUM-ish
+    severe = _sig(field_means={"amount": 500.0})  # +400% -> >3x band -> HIGH
+    low = [f for f in score_dataset(base, mild) if f.kind is DriftKind.MEAN][0]
+    high = [f for f in score_dataset(base, severe) if f.kind is DriftKind.MEAN][0]
+    assert high.severity.rank > low.severity.rank
+
+
+def test_mean_escalates_on_serving_path():
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 160.0})  # +60%
+    off = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    on = [f for f in score_dataset(base, cur, serving=True) if f.kind is DriftKind.MEAN][0]
+    assert on.severity.rank > off.severity.rank
+    assert on.details.get("serving") is True
+
+
+def test_mean_reports_worst_field_first():
+    base = _sig(field_means={"amount": 100.0, "score": 100.0})
+    cur = _sig(field_means={"amount": 130.0, "score": 400.0})  # score moved more
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert m.message.index("score") < m.message.index("amount")
+
+
+def test_negative_mean_shift_uses_magnitude():
+    """A mean crossing sign (e.g. -100 -> 100) is a 200% move, flagged HIGH."""
+    base = _sig(field_means={"pnl": -100.0})
+    cur = _sig(field_means={"pnl": 100.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert m.details["fields"]["pnl"]["rel_shift"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, -1])
+def test_build_config_rejects_nonpositive_mean_threshold(bad):
+    with pytest.raises(ValueError, match=r"mean threshold must be > 0"):
+        build_score_config(mean_threshold=bad)
+
+
+def test_build_config_mean_tuning_suppresses():
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})  # +40%
+    assert [f for f in score_dataset(base, cur, cfg=build_score_config())
+            if f.kind is DriftKind.MEAN]  # default (0.25) flags it
+    loose = build_score_config(mean_threshold=0.5)
+    assert [f for f in score_dataset(base, cur, cfg=loose)
+            if f.kind is DriftKind.MEAN] == []  # now quiet
+
+
 # ---- freshness drift (data-staleness SLA) ------------------------------------------
 
 DAY = 86_400.0
