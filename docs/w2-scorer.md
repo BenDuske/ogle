@@ -61,8 +61,17 @@ to page (but forbidden to invent an owner). Ownership is **presentation only**: 
 deliberately *not* part of the `fingerprint`, so re-assigning an owner never re-pages a
 still-open incident. Owners are normalized (restricted to the incident's own URNs, stripped,
 deduped, empties dropped) so a stray or blank owner can't leak into an alert. `run_drift_check`
-threads the same `owners` map through to both the incident object and the narrative; the
-live DataHub walk populates it (follow-up wiring in the walker).
+threads the same `owners` map through to both the incident object and the narrative.
+
+The live path now populates it end-to-end: `walker.walk_model` fetches each dataset's
+**Ownership** aspect (`WalkerBackend.get_ownership`, added to `DataHubBackend`), folds it to
+display names via `extract_owner_names` (`urn:li:corpuser:jane.doe → jane.doe`,
+`urn:li:corpGroup:data-eng → data-eng`, deduped, order-preserved) and carries it on
+`WalkResult.owners` (`urn -> names`, unioned across walks). `ogle check`'s live branch passes
+`walk_result.owners` into `run_drift_check`, so a live serving-path incident renders the
+`👤 owner:` line automatically; offline `--signatures` mode has no owner source and cleanly
+omits it. `get_ownership` is probed with `getattr`, so a pre-ownership custom backend degrades
+to "no owners" rather than erroring.
 
 **`fingerprint`** = order-independent SHA over the set of `(urn, kind, severity)` triples.
 It lets Aegis's salience memory dedup a recurring incident across scheduled runs (same

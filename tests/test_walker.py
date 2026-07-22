@@ -22,7 +22,9 @@ from ogle.walker import (
     WalkResult,
     build_signature_from_aspects,
     dataset_urns_for_model,
+    extract_owner_names,
     is_model_serving,
+    owner_display_name,
     walk_model,
     walk_models,
 )
@@ -83,12 +85,23 @@ class FakeModelProps:
 
 
 @dataclass
+class FakeOwner:
+    owner: str  # a corpuser/corpGroup URN, mirroring OwnerClass.owner
+
+
+@dataclass
+class FakeOwnership:
+    owners: List[FakeOwner] = field(default_factory=list)
+
+
+@dataclass
 class FakeBackend:
     model_props: Dict[str, FakeModelProps] = field(default_factory=dict)
     feature_props: Dict[str, FakeFeatureProps] = field(default_factory=dict)
     deployment_props: Dict[str, FakeDeploymentProps] = field(default_factory=dict)
     schemas: Dict[str, FakeSchema] = field(default_factory=dict)
     profiles: Dict[str, FakeProfile] = field(default_factory=dict)
+    ownership: Dict[str, FakeOwnership] = field(default_factory=dict)
 
     def get_model_props(self, urn):
         return self.model_props.get(urn)
@@ -104,6 +117,20 @@ class FakeBackend:
 
     def get_dataset_profile(self, urn):
         return self.profiles.get(urn)
+
+    def get_ownership(self, urn):
+        return self.ownership.get(urn)
+
+
+@dataclass
+class LegacyBackend(FakeBackend):
+    """A backend from before ownership support — deliberately hides `get_ownership` to
+    prove `walk_model` tolerates its absence (getattr probe) rather than raising."""
+
+    def __getattribute__(self, name):
+        if name == "get_ownership":
+            raise AttributeError(name)
+        return super().__getattribute__(name)
 
 
 def _task2_backend() -> FakeBackend:
@@ -138,6 +165,18 @@ def _task2_backend() -> FakeBackend:
                 fieldProfiles=[FakeFieldProfile("email", 0.05)],
             ),
             DS_ORDERS: FakeProfile(rowCount=5000),
+        },
+        ownership={
+            # customers owned by a person; orders by a team + the same person twice
+            # (two ownership types) to exercise dedup.
+            DS_CUSTOMERS: FakeOwnership(owners=[FakeOwner("urn:li:corpuser:jane.doe")]),
+            DS_ORDERS: FakeOwnership(
+                owners=[
+                    FakeOwner("urn:li:corpGroup:data-eng"),
+                    FakeOwner("urn:li:corpuser:jane.doe"),
+                    FakeOwner("urn:li:corpuser:jane.doe"),  # dup -> collapses
+                ]
+            ),
         },
     )
 
@@ -458,3 +497,93 @@ def test_walker_pipeline_flags_serving_escalation_on_second_run():
     assert report.should_alert is True
     assert report.incident.serving_impacted is True
     assert report.incident.overall_severity == Severity.HIGH
+
+
+# =======================================================================================
+# Ownership — "who to page" attribution surfaced through the live walk
+# =======================================================================================
+
+
+def test_owner_display_name_strips_corpuser_and_corpgroup_urns():
+    assert owner_display_name("urn:li:corpuser:jane.doe") == "jane.doe"
+    assert owner_display_name("urn:li:corpGroup:data-eng") == "data-eng"
+    # A bare (non-URN) string is returned stripped, not mangled.
+    assert owner_display_name("  ops-team  ") == "ops-team"
+    # Empty/degenerate never raises.
+    assert owner_display_name("") == ""
+    assert owner_display_name("urn:li:corpuser:") == "urn:li:corpuser:"
+
+
+def test_extract_owner_names_dedups_and_preserves_order():
+    ownership = FakeOwnership(
+        owners=[
+            FakeOwner("urn:li:corpGroup:data-eng"),
+            FakeOwner("urn:li:corpuser:jane.doe"),
+            FakeOwner("urn:li:corpuser:jane.doe"),  # dup
+        ]
+    )
+    assert extract_owner_names(ownership) == ["data-eng", "jane.doe"]
+
+
+def test_extract_owner_names_handles_none_and_empty():
+    assert extract_owner_names(None) == []
+    assert extract_owner_names(FakeOwnership(owners=[])) == []
+    # An owner entry with no `.owner` is skipped, not crashed on.
+    assert extract_owner_names(FakeOwnership(owners=[FakeOwner(owner=None)])) == []  # type: ignore[arg-type]
+
+
+def test_walk_model_populates_owners_per_dataset():
+    result = walk_model(_task2_backend(), MODEL_CHURN)
+    assert result.owners[DS_CUSTOMERS] == ["jane.doe"]
+    # data-eng leads (first-seen), jane.doe deduped from the two ownership entries.
+    assert result.owners[DS_ORDERS] == ["data-eng", "jane.doe"]
+
+
+def test_walk_model_owner_map_omits_unowned_datasets():
+    b = _task2_backend()
+    del b.ownership[DS_ORDERS]  # orders now unowned
+    result = walk_model(b, MODEL_CHURN)
+    assert DS_CUSTOMERS in result.owners
+    assert DS_ORDERS not in result.owners  # cleanly omitted, not an empty list
+
+
+def test_walk_model_tolerates_backend_without_get_ownership():
+    """A pre-ownership custom backend degrades to no owners, never AttributeError."""
+    b = LegacyBackend(**_task2_backend().__dict__)
+    result = walk_model(b, MODEL_CHURN)
+    # Walk still succeeds; owners simply empty.
+    assert {s.urn for s in result.signatures} == {DS_CUSTOMERS, DS_ORDERS}
+    assert result.owners == {}
+
+
+def test_walk_models_unions_owners_across_walks():
+    """A dataset owned in two walks lists each owner once, first-seen order."""
+    left = WalkResult(owners={DS_ORDERS: ["data-eng", "jane.doe"]})
+    right = WalkResult(owners={DS_ORDERS: ["jane.doe", "ml-platform"], DS_PRODUCTS: ["sku-team"]})
+    merged = left.merge(right)
+    assert merged.owners[DS_ORDERS] == ["data-eng", "jane.doe", "ml-platform"]
+    assert merged.owners[DS_PRODUCTS] == ["sku-team"]
+
+
+def test_owners_flow_into_the_narrative_who_to_page_line():
+    """End-to-end: a live-shaped walk's owners reach the rendered incident."""
+    from ogle.pipeline import run_drift_check
+    from ogle.store import BaselineStore
+
+    healthy = walk_model(_task2_backend(), MODEL_CHURN)
+    store = BaselineStore()
+    run_drift_check(store, healthy.signatures, serving_urns=healthy.serving_dataset_urns)
+
+    b = _task2_backend()
+    b.profiles[DS_CUSTOMERS] = FakeProfile(rowCount=0)  # collapse -> HIGH drift
+    broken = walk_model(b, MODEL_CHURN)
+    report = run_drift_check(
+        store,
+        broken.signatures,
+        serving_urns=broken.serving_dataset_urns,
+        owners=broken.owners,
+    )
+    assert report.should_alert is True
+    # The owner reaches the incident and the rendered "who to page" line.
+    assert report.incident.owners.get(DS_CUSTOMERS) == ["jane.doe"]
+    assert "jane.doe" in report.narrative

@@ -307,6 +307,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         serving_urns=serving,
         cfg=cfg,
         update_baselines=not args.no_update,
+        # Live walks carry per-dataset ownership; the narrative renders it as the
+        # "who to page" line. Offline (--signatures) mode has no owner source -> None.
+        owners=(walk_result.owners if walk_result is not None else None),
     )
 
     _emit(render_report(report, as_json=args.json))
@@ -322,7 +325,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"ogle check: {exc}", file=sys.stderr)
             return 2
         _emit("\n---\n\n**Incident summary**\n")
-        _emit(narrate(report.findings, llm=narrator))
+        # Reuse the incident's already-normalized owner map so the LLM summary can name
+        # who to page too (matches the deterministic report above).
+        summary_owners = report.incident.owners if report.incident else None
+        _emit(narrate(report.findings, llm=narrator, owners=summary_owners))
 
     # Persist advanced baselines/incident memory unless asked for a read-only probe.
     if not args.no_update:

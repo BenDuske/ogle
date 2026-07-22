@@ -55,7 +55,7 @@ from .signature import DatasetSignature, SchemaField, build_signature
 
 
 class WalkerBackend(Protocol):
-    """The five aspect fetches the walker needs. Anything that answers these can drive it."""
+    """The aspect fetches the walker needs. Anything that answers these can drive it."""
 
     def get_model_props(self, urn: str) -> Optional[Any]:
         """Return an `MLModelPropertiesClass`-shaped object, or None if absent."""
@@ -71,6 +71,14 @@ class WalkerBackend(Protocol):
 
     def get_dataset_profile(self, urn: str) -> Optional[Any]:
         """Return the latest `DatasetProfileClass`-shaped object, or None if unprofiled."""
+
+    def get_ownership(self, urn: str) -> Optional[Any]:
+        """Return an `OwnershipClass`-shaped object for a dataset, or None if unowned.
+
+        Optional in practice — a backend that predates ownership support (or a fake that
+        omits the method) is tolerated: `walk_model` probes for it with `getattr` and
+        simply records no owners, exactly as if the aspect were absent. This keeps the
+        addition backward-compatible with any existing custom backend."""
 
 
 # The exact string DataHub uses for a running deployment (matches DeploymentStatusClass.IN_SERVICE).
@@ -141,6 +149,44 @@ def build_signature_from_aspects(
     )
 
 
+def owner_display_name(owner_urn: str) -> str:
+    """Turn a DataHub owner URN into a readable name for an alert's "who to page" line.
+
+    `urn:li:corpuser:jane.doe`  -> `jane.doe`
+    `urn:li:corpGroup:data-eng` -> `data-eng`
+    A non-URN string (some backends hand back a bare name/email) is returned stripped.
+    Never raises — a display helper must not be able to break a report.
+    """
+    s = (owner_urn or "").strip()
+    if s.startswith("urn:li:corpuser:"):
+        return s[len("urn:li:corpuser:") :] or s
+    if s.startswith("urn:li:corpGroup:"):
+        return s[len("urn:li:corpGroup:") :] or s
+    return s
+
+
+def extract_owner_names(ownership: Optional[Any]) -> List[str]:
+    """Fold a DataHub `Ownership` aspect into an ordered, deduped list of display names.
+
+    Duck-typed: `ownership.owners[]`, each entry carrying a `.owner` URN string (the shape
+    of `OwnerClass`). An asset owned by the same principal under two ownership types
+    (e.g. TECHNICAL_OWNER + DATAOWNER) collapses to one name; order is first-seen so the
+    primary owner leads. Missing/blank owners are skipped. Returns [] for a None aspect or
+    one with no usable owners (the narrative then cleanly omits the owner line).
+    """
+    if ownership is None:
+        return []
+    names: List[str] = []
+    for entry in getattr(ownership, "owners", None) or ():
+        raw = getattr(entry, "owner", None)
+        if raw is None:
+            continue
+        name = owner_display_name(str(raw))
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 # ---------------------------------------------------------------------------------------
 # Traversal — deployment/model -> features -> datasets, all through the backend.
 # ---------------------------------------------------------------------------------------
@@ -206,6 +252,10 @@ class WalkResult:
     # would mean re-walking. Consumed by `ogle.writeback.plan_writeback` to decide which
     # mlModel entities to tag when their upstream drifts.
     dataset_to_models: Dict[str, List[str]] = field(default_factory=dict)
+    # dataset URN -> owner display names (from DataHub's Ownership aspect). Presentation
+    # only: threaded to the narrative's "who to page" line, never to severity or the dedup
+    # fingerprint (re-assigning an owner is not drift). Empty for unowned datasets.
+    owners: Dict[str, List[str]] = field(default_factory=dict)
     # Diagnostics — populated for debugging live walks; ignored by the pipeline.
     skipped_urns: List[str] = field(default_factory=list)  # dataset URNs with no aspects
     walked_models: List[str] = field(default_factory=list)
@@ -229,10 +279,21 @@ class WalkResult:
                     if m not in bucket:
                         bucket.append(m)
 
+        # Owners union per dataset URN, first-seen order, deduped — same discipline as the
+        # model map so a dataset owned in both walks lists each owner once.
+        merged_owners: Dict[str, List[str]] = {}
+        for src in (self.owners, other.owners):
+            for ds_urn, names in src.items():
+                bucket = merged_owners.setdefault(ds_urn, [])
+                for n in names:
+                    if n not in bucket:
+                        bucket.append(n)
+
         return WalkResult(
             signatures=list(by_urn.values()),
             serving_dataset_urns=self.serving_dataset_urns | other.serving_dataset_urns,
             dataset_to_models=merged_ds_to_models,
+            owners=merged_owners,
             skipped_urns=sorted(set(self.skipped_urns) | set(other.skipped_urns)),
             walked_models=sorted(set(self.walked_models) | set(other.walked_models)),
         )
@@ -252,12 +313,22 @@ def walk_model(
     dataset_urns = dataset_urns_for_model(backend, model_urn)
     serving = is_model_serving(backend, model_urn)
 
+    # `get_ownership` is an optional backend method (added after the original five) — probe
+    # for it so a pre-existing custom backend that lacks it degrades to "no owners", never
+    # an AttributeError.
+    fetch_owners = getattr(backend, "get_ownership", None)
+
     signatures: List[DatasetSignature] = []
     skipped: List[str] = []
+    owners: Dict[str, List[str]] = {}
     for urn in dataset_urns:
         schema_md = backend.get_schema_metadata(urn)
         profile = backend.get_dataset_profile(urn)
         sig = build_signature_from_aspects(urn, schema_md, profile, computed_at=computed_at)
+        if callable(fetch_owners):
+            names = extract_owner_names(fetch_owners(urn))
+            if names:
+                owners[urn] = names
         if sig is None:
             skipped.append(urn)
             continue
@@ -270,6 +341,7 @@ def walk_model(
         # for lack of aspects — writeback should still be able to tag their downstream model
         # if some *other* signal identifies them as drifted).
         dataset_to_models={ds: [model_urn] for ds in dataset_urns},
+        owners=owners,
         skipped_urns=skipped,
         walked_models=[model_urn],
     )
@@ -317,6 +389,7 @@ class DataHubBackend:
             MLFeaturePropertiesClass,
             MLModelDeploymentPropertiesClass,
             MLModelPropertiesClass,
+            OwnershipClass,
             SchemaMetadataClass,
         )
 
@@ -326,6 +399,7 @@ class DataHubBackend:
         self._MLDeploymentProps = MLModelDeploymentPropertiesClass
         self._SchemaMetadata = SchemaMetadataClass
         self._DatasetProfile = DatasetProfileClass
+        self._Ownership = OwnershipClass
 
     def get_model_props(self, urn: str) -> Optional[Any]:
         return self._graph.get_aspect(entity_urn=urn, aspect_type=self._MLModelProps)
@@ -349,6 +423,9 @@ class DataHubBackend:
             aspect_type=self._DatasetProfile,
             filter_criteria_map={},
         )
+
+    def get_ownership(self, urn: str) -> Optional[Any]:
+        return self._graph.get_aspect(entity_urn=urn, aspect_type=self._Ownership)
 
     def discover_deployed_models(self) -> List[str]:
         """Return every `mlModel` URN whose props declare at least one `IN_SERVICE` deployment.
