@@ -52,6 +52,13 @@ OGLE_DRIFT_TAG = "urn:li:tag:ogle-drift-flagged"
 #: severity across runs and hosts.
 OGLE_SEVERITY_TAG_PREFIX = "urn:li:tag:ogle-drift-"
 
+#: Prefix for the optional per-KIND tag (`--write-back-kind`). Orthogonal to severity:
+#: severity answers "how bad", kind answers "what broke" (schema/volume/quality/
+#: distribution). A distinct `ogle-kind-` namespace keeps the two filters unambiguous in
+#: the DataHub UI so `ogle-kind-schema` never collides with `ogle-drift-<severity>`.
+#: Stable string -> one tag entity per kind across runs and hosts.
+OGLE_KIND_TAG_PREFIX = "urn:li:tag:ogle-kind-"
+
 
 def severity_tag_urn(severity: Any) -> str:
     """`urn:li:tag:ogle-drift-<severity>` for a `Severity` (or its string value).
@@ -64,6 +71,18 @@ def severity_tag_urn(severity: Any) -> str:
     value = getattr(severity, "value", severity)
     value = str(value).strip().lower() or "unknown"
     return f"{OGLE_SEVERITY_TAG_PREFIX}{value}"
+
+
+def kind_tag_urn(kind: Any) -> str:
+    """`urn:li:tag:ogle-kind-<kind>` for a `DriftKind` (or its string value).
+
+    Accepts the enum or a raw `"schema"`/`"volume"`/… so callers don't have to import
+    `DriftKind`. An empty/unknown kind yields `...ogle-kind-unknown` rather than raising
+    — a write-back should degrade to a still-useful tag, never crash a scheduler tick.
+    """
+    value = getattr(kind, "value", kind)
+    value = str(value).strip().lower() or "unknown"
+    return f"{OGLE_KIND_TAG_PREFIX}{value}"
 
 
 # ---------------------------------------------------------------------------------------
@@ -145,6 +164,7 @@ def plan_writeback(
     walk_result: Optional[WalkResult] = None,
     tag_urn: str = OGLE_DRIFT_TAG,
     severity_tags: bool = False,
+    kind_tags: bool = False,
 ) -> WritebackPlan:
     """Decide which entities to tag from a batch of drift findings.
 
@@ -161,6 +181,14 @@ def plan_writeback(
     filter DataHub to the worst drift. A dataset's severity tag is the WORST severity
     among its own findings; a model's is the worst among the drifted datasets feeding
     it — the finding that would page you is the one that should colour the model.
+
+    When ``kind_tags`` is set, each entity ALSO receives one per-KIND tag
+    (`urn:li:tag:ogle-kind-schema`, etc.) for EVERY kind that hit it — orthogonal to
+    severity, which collapses to a single worst tag. A dataset carries a kind tag per
+    distinct kind among its own findings (a schema+volume break gets both); a model
+    inherits the UNION of kinds across the drifted datasets feeding it, so filtering to
+    `ogle-kind-schema` surfaces every asset touched by a schema break, not just the
+    worst one.
     """
     if not findings:
         return WritebackPlan()
@@ -202,6 +230,12 @@ def plan_writeback(
                 severity_tag_urn(worst.severity),
                 reason=f"severity: {worst.severity.value}",
             )
+    if kind_tags:
+        # One tag per (dataset, kind). Unlike severity this does NOT collapse to a worst —
+        # every kind that hit the dataset earns its own filterable tag. _push dedups the
+        # repeat of a kind across findings; distinct kinds coexist.
+        for f in findings:
+            _push(f.urn, kind_tag_urn(f.kind), reason=f"kind: {f.kind.value}")
 
     # De-dup drifted dataset URNs while preserving first-seen order.
     seen_ds: Set[str] = set()
@@ -233,6 +267,24 @@ def plan_writeback(
                     severity_tag_urn(worst.severity),
                     reason=f"downstream severity: {worst.severity.value}",
                 )
+
+    if kind_tags:
+        # A model inherits the UNION of kinds across every drifted dataset feeding it.
+        # Iterate findings in order per feeding dataset so the emitted tags are
+        # deterministic; _push dedups the (model, kind) repeats into the union.
+        for ds_urn in ordered_datasets:
+            models = dataset_to_models.get(ds_urn, ())
+            if not models:
+                continue
+            for f in findings:
+                if f.urn != ds_urn:
+                    continue
+                for model_urn in models:
+                    _push(
+                        model_urn,
+                        kind_tag_urn(f.kind),
+                        reason=f"downstream kind: {f.kind.value}",
+                    )
 
     return WritebackPlan(actions=actions)
 

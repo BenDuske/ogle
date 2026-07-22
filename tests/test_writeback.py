@@ -19,6 +19,7 @@ from ogle.writeback import (
     WritebackPlan,
     WritebackResult,
     apply,
+    kind_tag_urn,
     plan_writeback,
     severity_tag_urn,
 )
@@ -221,6 +222,110 @@ def test_severity_tags_apply_end_to_end():
     backend = FakeWritebackBackend()
     apply(plan, backend)
     assert backend.tags[DS_CUSTOMERS] == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-drift-high"}
+
+
+# =======================================================================================
+# per-kind write-back tags (--write-back-kind)
+# =======================================================================================
+
+
+def test_kind_tag_urn_helper():
+    assert kind_tag_urn(DriftKind.SCHEMA) == "urn:li:tag:ogle-kind-schema"
+    assert kind_tag_urn(DriftKind.VOLUME) == "urn:li:tag:ogle-kind-volume"
+    assert kind_tag_urn(DriftKind.QUALITY) == "urn:li:tag:ogle-kind-quality"
+    assert kind_tag_urn(DriftKind.DISTRIBUTION) == "urn:li:tag:ogle-kind-distribution"
+    # Accepts a raw string value + degrades on empty rather than raising.
+    assert kind_tag_urn("schema") == "urn:li:tag:ogle-kind-schema"
+    assert kind_tag_urn("") == "urn:li:tag:ogle-kind-unknown"
+
+
+def test_kind_off_by_default_only_flat_tag():
+    """No --write-back-kind -> the flat tag is the ONLY tag (behavior unchanged)."""
+    plan = plan_writeback([_finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA)])
+    assert {a.tag_urn for a in plan.actions} == {OGLE_DRIFT_TAG}
+
+
+def test_kind_stamps_flat_plus_kind_tag_on_dataset():
+    plan = plan_writeback([_finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA)], kind_tags=True)
+    tags = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert tags == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-kind-schema"}
+
+
+def test_kind_flat_tag_leads_for_an_entity():
+    """The coarse flat tag is emitted before the kind tag for a given dataset."""
+    plan = plan_writeback([_finding(DS_CUSTOMERS, kind=DriftKind.VOLUME)], kind_tags=True)
+    ds_actions = [a for a in plan.actions if a.entity_urn == DS_CUSTOMERS]
+    assert [a.tag_urn for a in ds_actions] == [OGLE_DRIFT_TAG, "urn:li:tag:ogle-kind-volume"]
+
+
+def test_kind_dataset_gets_a_tag_for_EVERY_kind_not_just_worst():
+    """Unlike severity (which collapses to worst), kind keeps one tag per distinct kind."""
+    findings = [
+        _finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA, severity=Severity.HIGH),
+        _finding(DS_CUSTOMERS, kind=DriftKind.VOLUME, severity=Severity.LOW),
+    ]
+    plan = plan_writeback(findings, kind_tags=True)
+    kind_tags = {
+        a.tag_urn for a in plan.actions if a.tag_urn.startswith("urn:li:tag:ogle-kind-")
+    }
+    assert kind_tags == {"urn:li:tag:ogle-kind-schema", "urn:li:tag:ogle-kind-volume"}
+
+
+def test_kind_dedupes_repeat_of_same_kind_on_a_dataset():
+    """The same kind hitting a dataset twice collapses to a single kind tag."""
+    findings = [
+        _finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA),
+        _finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA),
+    ]
+    plan = plan_writeback(findings, kind_tags=True)
+    kind_actions = [
+        a for a in plan.actions if a.tag_urn == "urn:li:tag:ogle-kind-schema"
+    ]
+    assert len(kind_actions) == 1
+
+
+def test_kind_model_inherits_union_of_upstream_kinds():
+    """churn is fed by a SCHEMA-drifted dataset + a VOLUME-drifted dataset -> both kinds."""
+    findings = [
+        _finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA),
+        _finding(DS_ORDERS, kind=DriftKind.VOLUME),
+    ]
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN]})
+    plan = plan_writeback(findings, walk, kind_tags=True)
+    model_tags = {a.tag_urn for a in plan.actions if a.entity_urn == MODEL_CHURN}
+    assert model_tags == {
+        OGLE_DRIFT_TAG,
+        "urn:li:tag:ogle-kind-schema",
+        "urn:li:tag:ogle-kind-volume",
+    }
+
+
+def test_kind_and_severity_tags_coexist_without_collision():
+    """Both flags on: distinct `ogle-drift-<sev>` and `ogle-kind-<kind>` namespaces."""
+    plan = plan_writeback(
+        [_finding(DS_CUSTOMERS, kind=DriftKind.QUALITY, severity=Severity.MEDIUM)],
+        severity_tags=True,
+        kind_tags=True,
+    )
+    tags = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert tags == {
+        OGLE_DRIFT_TAG,
+        "urn:li:tag:ogle-drift-medium",
+        "urn:li:tag:ogle-kind-quality",
+    }
+
+
+def test_kind_tags_apply_end_to_end():
+    """A kind-tagged plan lands the flat + kind tag on the dataset via the fake backend."""
+    plan = plan_writeback(
+        [_finding(DS_CUSTOMERS, kind=DriftKind.DISTRIBUTION)], kind_tags=True
+    )
+    backend = FakeWritebackBackend()
+    apply(plan, backend)
+    assert backend.tags[DS_CUSTOMERS] == {
+        OGLE_DRIFT_TAG,
+        "urn:li:tag:ogle-kind-distribution",
+    }
 
 
 # =======================================================================================

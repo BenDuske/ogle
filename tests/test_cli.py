@@ -479,6 +479,33 @@ def test_demo_write_back_severity_adds_severity_tag(capsys):
     assert "urn:li:tag:ogle-drift-high" in out  # demo drift is HIGH on a serving path
 
 
+def test_demo_write_back_kind_adds_kind_tag(capsys):
+    """`--write-back-kind` layers a per-kind tag onto the keyless preview."""
+    rc = main(["demo", "--write-back", "--write-back-kind"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "urn:li:tag:ogle-drift-flagged" in out
+    assert "urn:li:tag:ogle-kind-" in out  # the demo drift kind is stamped as a filter tag
+
+
+def test_demo_write_back_without_kind_omits_kind_tag(capsys):
+    """No --write-back-kind -> no `ogle-kind-` tag leaks into the preview."""
+    rc = main(["demo", "--write-back"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "urn:li:tag:ogle-kind-" not in out
+
+
+def test_parser_registers_demo_write_back_kind_flag():
+    args = build_parser().parse_args(["demo", "--write-back", "--write-back-kind"])
+    assert args.write_back_kind is True
+
+
+def test_parser_registers_check_write_back_kind_flag():
+    args = build_parser().parse_args(["check", "--write-back", "--write-back-kind"])
+    assert args.write_back_kind is True
+
+
 def test_demo_narrate_and_write_back_number_sequentially(capsys, monkeypatch):
     """Both optional sections requested → narrate is ## 3, write-back is ## 4 (no clash)."""
     monkeypatch.setattr(

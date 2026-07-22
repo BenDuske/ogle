@@ -173,12 +173,16 @@ def _walk_live(gms: str, models: Sequence[str], discover: bool):
     return result.signatures, sorted(result.serving_dataset_urns), result
 
 
-def _do_writeback(findings, walk_result, gms: str, severity_tags: bool = False):
+def _do_writeback(
+    findings, walk_result, gms: str, severity_tags: bool = False, kind_tags: bool = False
+):
     """Live tag write-back. Imported lazily like the walker."""
     from .writeback import DataHubWritebackBackend, apply, plan_writeback
 
     backend = DataHubWritebackBackend(gms_server=gms)
-    plan = plan_writeback(findings, walk_result, severity_tags=severity_tags)
+    plan = plan_writeback(
+        findings, walk_result, severity_tags=severity_tags, kind_tags=kind_tags
+    )
     return plan, apply(plan, backend)
 
 
@@ -191,7 +195,9 @@ def _do_retract(recovered_urns, active_findings, walk_result, gms: str):
     return plan, apply_retract(plan, backend)
 
 
-def _plan_writeback_only(findings, walk_result, severity_tags: bool = False):
+def _plan_writeback_only(
+    findings, walk_result, severity_tags: bool = False, kind_tags: bool = False
+):
     """Compute the write-back plan WITHOUT touching DataHub (no backend, no writes).
 
     Backs `--catalog-dry-run`: `plan_writeback` is pure, so a preview never constructs the
@@ -200,7 +206,9 @@ def _plan_writeback_only(findings, walk_result, severity_tags: bool = False):
     """
     from .writeback import plan_writeback
 
-    return plan_writeback(findings, walk_result, severity_tags=severity_tags)
+    return plan_writeback(
+        findings, walk_result, severity_tags=severity_tags, kind_tags=kind_tags
+    )
 
 
 def _plan_retract_only(recovered_urns, active_findings, walk_result):
@@ -360,6 +368,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 report.findings,
                 walk_result,
                 severity_tags=getattr(args, "write_back_severity", False),
+                kind_tags=getattr(args, "write_back_kind", False),
             )
             _render_plan_preview(plan, as_json=args.json, retract=False)
         else:
@@ -369,6 +378,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     walk_result,
                     args.gms,
                     severity_tags=getattr(args, "write_back_severity", False),
+                    kind_tags=getattr(args, "write_back_kind", False),
                 )
             except Exception as exc:
                 print(f"ogle check: write-back failed: {exc}", file=sys.stderr)
@@ -605,6 +615,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         plan = plan_writeback(
             drift.findings,
             severity_tags=getattr(args, "write_back_severity", False),
+            kind_tags=getattr(args, "write_back_kind", False),
         )
         step += 1
         _emit(f"\n## {step}. Tag write-back (keyless preview)\n")
@@ -2988,6 +2999,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     check.add_argument(
+        "--write-back-kind",
+        action="store_true",
+        help=(
+            "With --write-back, ALSO stamp a per-kind tag "
+            "(`urn:li:tag:ogle-kind-schema|volume|quality|distribution`) so DataHub can be "
+            "filtered to a failure class. Unlike --write-back-severity this does not "
+            "collapse to one tag: an asset gets a tag for EVERY kind that hit it, and a "
+            "model inherits the union of kinds across the datasets feeding it."
+        ),
+    )
+    check.add_argument(
         "--retract-cleared",
         action="store_true",
         help=(
@@ -3055,6 +3077,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "With --write-back, also preview the per-severity tags (e.g. `ogle-drift-high`) "
             "alongside the flat drift tag, mirroring `ogle check --write-back-severity`."
+        ),
+    )
+    demo.add_argument(
+        "--write-back-kind",
+        action="store_true",
+        help=(
+            "With --write-back, also preview the per-kind tags (e.g. `ogle-kind-schema`) "
+            "alongside the flat drift tag, mirroring `ogle check --write-back-kind`."
         ),
     )
     demo.set_defaults(func=cmd_demo)
