@@ -313,3 +313,120 @@ def test_build_config_unique_drop_tuning_suppresses():
     loose = build_score_config(unique_drop_threshold=0.5)
     assert [f for f in score_dataset(base, cur, cfg=loose)
             if f.kind is DriftKind.DISTRIBUTION] == []  # now quiet
+
+
+# ---- freshness drift (data-staleness SLA) ------------------------------------------
+
+DAY = 86_400.0
+# A fixed reference "now" so freshness tests are deterministic (no wall clock).
+NOW = 1_800_000_000.0  # some fixed epoch
+
+
+def _fresh_cfg(max_age_seconds=DAY):
+    return build_score_config(freshness_max_age_seconds=max_age_seconds)
+
+
+def _at(seconds_before_now):
+    """An ISO-8601 `computed_at` stamp `seconds_before_now` earlier than NOW."""
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(NOW - seconds_before_now, tz=timezone.utc).isoformat()
+
+
+def test_freshness_off_by_default_even_when_ancient():
+    """No SLA configured -> freshness never scored, however old the stamp is."""
+    base = _sig(computed_at=_at(30 * DAY))
+    cur = _sig(computed_at=_at(30 * DAY))
+    assert [f for f in score_dataset(base, cur, now=NOW) if f.kind is DriftKind.FRESHNESS] == []
+
+
+def test_stale_data_flagged_when_sla_set():
+    base = _sig(computed_at=_at(3 * DAY))
+    cur = _sig(computed_at=_at(3 * DAY))  # 3 days old, SLA 1 day
+    fresh = [
+        f for f in score_dataset(base, cur, cfg=_fresh_cfg(), now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ]
+    assert len(fresh) == 1
+    assert fresh[0].details["age_seconds"] == pytest.approx(3 * DAY)
+    assert "stale" in fresh[0].message
+
+
+def test_fresh_data_within_sla_is_quiet():
+    cur = _sig(computed_at=_at(6 * 3600))  # 6h old, SLA 24h
+    assert [
+        f for f in score_dataset(_sig(computed_at=_at(6 * 3600)), cur, cfg=_fresh_cfg(), now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ] == []
+
+
+def test_freshness_not_scored_without_now():
+    cur = _sig(computed_at=_at(10 * DAY))
+    assert [
+        f for f in score_dataset(_sig(computed_at=_at(10 * DAY)), cur, cfg=_fresh_cfg(), now=None)
+        if f.kind is DriftKind.FRESHNESS
+    ] == []
+
+
+def test_freshness_unparseable_stamp_skipped_never_guessed():
+    cur = _sig(computed_at="not-a-timestamp")
+    assert [
+        f for f in score_dataset(_sig(computed_at="not-a-timestamp"), cur, cfg=_fresh_cfg(), now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ] == []
+
+
+def test_freshness_absent_stamp_skipped():
+    cur = _sig(computed_at=None)
+    assert [
+        f for f in score_dataset(_sig(), cur, cfg=_fresh_cfg(), now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ] == []
+
+
+def test_freshness_severity_scales_with_age():
+    cfg = _fresh_cfg()  # 1-day SLA
+    mild = _sig(computed_at=_at(int(1.2 * DAY)))   # ~1.2x -> LOW
+    severe = _sig(computed_at=_at(10 * DAY))       # 10x -> HIGH
+    low = [f for f in score_dataset(mild, mild, cfg=cfg, now=NOW) if f.kind is DriftKind.FRESHNESS][0]
+    high = [f for f in score_dataset(severe, severe, cfg=cfg, now=NOW) if f.kind is DriftKind.FRESHNESS][0]
+    assert high.severity.rank > low.severity.rank
+
+
+def test_freshness_escalates_on_serving_path():
+    cur = _sig(computed_at=_at(2 * DAY))  # 2x SLA -> MEDIUM by magnitude
+    off = [f for f in score_dataset(cur, cur, cfg=_fresh_cfg(), now=NOW) if f.kind is DriftKind.FRESHNESS][0]
+    on = [
+        f for f in score_dataset(cur, cur, cfg=_fresh_cfg(), serving=True, now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ][0]
+    assert on.severity.rank > off.severity.rank
+    assert on.details.get("serving") is True
+
+
+def test_future_stamp_clamps_to_zero_age_not_flagged():
+    """Clock skew (stamp ahead of now) reads age 0, not a negative that trips the SLA."""
+    cur = _sig(computed_at=_at(-3600))  # one hour in the future
+    assert [
+        f for f in score_dataset(cur, cur, cfg=_fresh_cfg(), now=NOW)
+        if f.kind is DriftKind.FRESHNESS
+    ] == []
+
+
+def test_stale_but_otherwise_clean_still_pages():
+    """The whole point: schema/volume/quality/distribution identical, only the clock moved."""
+    base = _sig(computed_at=_at(5 * DAY))
+    cur = _sig(computed_at=_at(5 * DAY))  # every other dimension identical to base
+    kinds = {f.kind for f in score_dataset(base, cur, cfg=_fresh_cfg(), now=NOW)}
+    assert kinds == {DriftKind.FRESHNESS}
+
+
+@pytest.mark.parametrize("bad", [0, -1, -86_400])
+def test_build_config_rejects_nonpositive_freshness(bad):
+    with pytest.raises(ValueError, match="freshness max-age must be > 0"):
+        build_score_config(freshness_max_age_seconds=bad)
+
+
+def test_build_config_freshness_none_keeps_off():
+    assert build_score_config().freshness_max_age_seconds is None
+    assert build_score_config(volume_threshold=0.5).freshness_max_age_seconds is None

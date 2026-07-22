@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
-from .signature import DatasetSignature
+from .signature import DatasetSignature, parse_iso_epoch
 
 
 class DriftKind(str, Enum):
@@ -26,6 +26,7 @@ class DriftKind(str, Enum):
     VOLUME = "volume"
     QUALITY = "quality"
     DISTRIBUTION = "distribution"
+    FRESHNESS = "freshness"
 
 
 class Severity(str, Enum):
@@ -70,6 +71,12 @@ class ScoreConfig:
     # drift (a categorical collapsing to one value, or a key losing uniqueness). Only a
     # drop is flagged — cardinality *rising* is usually benign (more variety, not breakage).
     unique_fraction_drop_threshold: float = 0.30
+    # Data-freshness SLA in seconds. When set, a dataset whose profile timestamp
+    # (`computed_at`) is older than this relative to the walk's `now` flags freshness drift —
+    # the classic silent-stall failure (ETL stopped, rows unchanged so volume looks fine, but
+    # the data is stale). Default None = OFF: freshness is opt-in per deployment (a nightly
+    # table and a streaming source have very different SLAs), so it never pages uninvited.
+    freshness_max_age_seconds: Optional[float] = None
     # If the source feeds a deployed model, bump every finding one severity step.
     escalate_when_serving: bool = True
 
@@ -78,6 +85,7 @@ def build_score_config(
     volume_threshold: Optional[float] = None,
     null_threshold: Optional[float] = None,
     unique_drop_threshold: Optional[float] = None,
+    freshness_max_age_seconds: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
     """Validated `ScoreConfig` builder — the single place CLI/config tuning lands.
@@ -120,10 +128,23 @@ def build_score_config(
             f"unique-drop threshold must be in (0, 1] (got {uniq}); it is an absolute "
             "distinct-value-fraction decrease."
         )
+    # None keeps the freshness dimension OFF (the default). A supplied SLA must be a positive
+    # duration — a zero/negative age would flag every timestamped dataset as stale, and
+    # `_severity_from_ratio` divides by it. Reject up front, same as the other bands.
+    fresh = (
+        ScoreConfig.freshness_max_age_seconds
+        if freshness_max_age_seconds is None
+        else freshness_max_age_seconds
+    )
+    if fresh is not None and not (fresh > 0):
+        raise ValueError(
+            f"freshness max-age must be > 0 seconds (got {fresh}); it is a staleness SLA."
+        )
     return ScoreConfig(
         volume_rel_threshold=float(vol),
         null_fraction_abs_threshold=float(nul),
         unique_fraction_drop_threshold=float(uniq),
+        freshness_max_age_seconds=None if fresh is None else float(fresh),
         escalate_when_serving=esc,
     )
 
@@ -290,16 +311,65 @@ def score_distribution(
     )
 
 
+def score_freshness(
+    current: DatasetSignature, cfg: ScoreConfig, now: Optional[float]
+) -> Optional[DriftFinding]:
+    """Data-freshness SLA — the silent-stall dimension the other four can't see.
+
+    A source whose ETL quietly stopped keeps its rows, schema, null and unique fractions
+    unchanged, so schema/volume/quality/distribution all stay green — yet the data is stale
+    and every model retraining on it is learning yesterday's world. The one signal that moves
+    is the profile timestamp (`computed_at`), which stops advancing. This dimension compares
+    that stamp's age against a configured SLA.
+
+    Opt-in and clock-injected, to keep the scorer pure and quiet by default:
+      * `cfg.freshness_max_age_seconds is None` -> not scored (the default).
+      * `now is None` -> not scored (no reference instant; never guess "now").
+      * unparseable/absent `computed_at` -> not scored (age unknown; "never guess" holds).
+    A future stamp (clock skew) clamps to age 0 rather than reading negative, mirroring the
+    CLI's `_baseline_age_seconds`.
+    """
+    if cfg.freshness_max_age_seconds is None or now is None:
+        return None
+    epoch = parse_iso_epoch(current.computed_at)
+    if epoch is None:
+        return None
+    age = max(0.0, now - epoch)
+    if age < cfg.freshness_max_age_seconds:
+        return None
+
+    severity = _severity_from_ratio(age, cfg.freshness_max_age_seconds)
+    age_h = age / 3600.0
+    sla_h = cfg.freshness_max_age_seconds / 3600.0
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.FRESHNESS,
+        severity=severity,
+        message=(
+            f"data is stale: last profiled {current.computed_at} "
+            f"({age_h:.1f}h ago, SLA {sla_h:.1f}h) — feed likely stalled"
+        ),
+        details={
+            "computed_at": current.computed_at,
+            "age_seconds": age,
+            "max_age_seconds": cfg.freshness_max_age_seconds,
+        },
+    )
+
+
 def score_dataset(
     baseline: DatasetSignature,
     current: DatasetSignature,
     cfg: Optional[ScoreConfig] = None,
     serving: bool = False,
+    now: Optional[float] = None,
 ) -> List[DriftFinding]:
     """Score one dataset across all drift dimensions.
 
     `serving=True` means this dataset feeds a deployed (IN_SERVICE) model; findings are
     escalated one severity step because drift on a serving path is production-affecting.
+    `now` (epoch seconds) is the reference instant the freshness dimension measures staleness
+    against; None (the default) or an unconfigured SLA leaves freshness unscored.
     Returns findings sorted most-severe first.
     """
     if baseline.urn != current.urn:
@@ -314,6 +384,7 @@ def score_dataset(
         score_volume(baseline, current, cfg),
         score_quality(baseline, current, cfg),
         score_distribution(baseline, current, cfg),
+        score_freshness(current, cfg, now),
     ):
         if finding is None:
             continue

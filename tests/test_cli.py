@@ -190,11 +190,45 @@ def test_sensitivity_flags_registered_in_help():
     parser = build_parser()
     ns = parser.parse_args(
         ["check", "--signatures", "x", "--volume-threshold", "0.4",
-         "--null-threshold", "0.1", "--no-serving-escalation"]
+         "--null-threshold", "0.1", "--freshness-max-age", "24h", "--no-serving-escalation"]
     )
     assert ns.volume_threshold == 0.4
     assert ns.null_threshold == 0.1
+    assert ns.freshness_max_age == "24h"
     assert ns.no_serving_escalation is True
+
+
+# ---- --freshness-max-age: data-staleness SLA on the CLI ---------------------------
+def test_freshness_flag_flags_stale_data(tmp_path, capsys):
+    """A source last profiled long ago pages once a freshness SLA is passed. The stamp is
+    far in the past so it is stale against any real wall clock -> deterministic."""
+    store = tmp_path / "baselines.json"
+    ancient = "2000-01-01T00:00:00Z"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(computed_at=ancient)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(computed_at=ancient)])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--no-update", "--freshness-max-age", "24h"])
+    assert rc == 1  # new incident
+    assert "stale" in capsys.readouterr().out
+
+
+def test_freshness_off_by_default_leaves_stale_data_quiet(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    ancient = "2000-01-01T00:00:00Z"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(computed_at=ancient)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(computed_at=ancient)])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs), "--no-update"])
+    assert rc == 0  # no SLA -> freshness not scored
+    assert "No drift" in capsys.readouterr().out
+
+
+def test_freshness_bad_duration_is_usage_error(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--freshness-max-age", "soon"])
+    assert rc == 2
+    assert "--freshness-max-age wants a duration" in capsys.readouterr().err
 
 
 # ---- --fail-on: CI severity gate on the exit code ---------------------------------

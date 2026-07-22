@@ -47,6 +47,11 @@ _ACTIONS: Dict[DriftKind, str] = {
         "check the upstream transform for a stuck default or a fan-out join — a collapsed "
         "distinct-value count means the feature lost signal or rows got duplicated"
     ),
+    DriftKind.FRESHNESS: (
+        "check whether the upstream load/profile job is still running — a stale timestamp "
+        "with unchanged rows usually means the feed silently stopped, so every retrain is "
+        "learning yesterday's data"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {

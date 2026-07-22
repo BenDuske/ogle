@@ -87,8 +87,9 @@ def run_drift_check(
         llm: optional callable to phrase the incident; falls back to deterministic markdown.
         update_baselines: when True (default) the current signatures become the new baselines
             so the next run diffs against the latest state. Pass False for a read-only probe.
-        now: epoch seconds used to expire snoozed mutes (defaults to the wall clock). Inject a
-            fixed value in tests for deterministic snooze-expiry behaviour.
+        now: epoch seconds used to expire snoozed mutes and to measure data-freshness staleness
+            (defaults to the wall clock). Inject a fixed value in tests for deterministic
+            snooze-expiry and freshness behaviour.
         owners: optional urn -> owner-names map (DataHub Ownership aspect) surfaced in the
             narrative as a "who to page" line; never affects severity or the dedup fingerprint.
 
@@ -110,7 +111,7 @@ def run_drift_check(
             # First time Ogle has seen this dataset — nothing to diff, just seed it.
             new_urns.append(sig.urn)
             continue
-        findings = score_dataset(baseline, sig, cfg, serving=sig.urn in serving)
+        findings = score_dataset(baseline, sig, cfg, serving=sig.urn in serving, now=now)
         scored_urns.append(sig.urn)
         # A muted dataset is still diffed (so its baseline advances and it can be unmuted
         # later against fresh state), but its findings are held out of the incident so a

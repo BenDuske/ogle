@@ -8,8 +8,8 @@ production ML models. Two pure modules, no live DataHub required to develop or t
   fractions). `schema_hash` is order-independent so two fetches of an unchanged schema
   compare equal. Round-trips through `to_dict` / `from_dict` for the baseline store (Aegis
   memory in W2b); `field_unique_fractions` is optional, so pre-existing baselines load clean.
-- `ogle.scorer` — `score_dataset(baseline, current, cfg, serving)` returns `DriftFinding`s
-  across four dimensions, sorted most-severe first.
+- `ogle.scorer` — `score_dataset(baseline, current, cfg, serving, now)` returns `DriftFinding`s
+  across five dimensions, sorted most-severe first.
 
 ## Drift dimensions
 
@@ -19,12 +19,23 @@ production ML models. Two pure modules, no live DataHub required to develop or t
 | VOLUME       | row count changes past `volume_rel_threshold` (default ±30%)      | banded by how far past threshold; collapse-to-empty = HIGH |
 | QUALITY      | a field's null fraction rises ≥ `null_fraction_abs_threshold` (0.20) | banded by max delta |
 | DISTRIBUTION | a field's distinct-value fraction *drops* ≥ `unique_fraction_drop_threshold` (0.30) | banded by max drop |
+| FRESHNESS    | a dataset's profile timestamp (`computed_at`) ages past `freshness_max_age_seconds` relative to `now` | banded by how far past the SLA |
 
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model
 keeps training on a feature that now carries no signal) and an id/join key losing uniqueness
 (a fan-out join duplicating rows). Only a *drop* pages — cardinality rising is usually benign
 variety, and flagging it would be noise on the serving path we work to keep quiet.
+
+**FRESHNESS** is the silent-stall dimension the other four structurally cannot see: when an
+ETL quietly stops, the rows, schema, null and unique fractions all stay put, so every other
+score is green — yet the data is stale and each retrain learns yesterday's world. The one
+signal that moves is the profile timestamp. It is **opt-in** (`freshness_max_age_seconds` /
+`--freshness-max-age`, default OFF) because a nightly table and a streaming source have very
+different SLAs, and **clock-injected** (`now` is passed in, never read inside the scorer) so
+the module stays pure and deterministic. Age is measured against `now`; an unparseable/absent
+`computed_at`, no SLA, or no `now` all leave it unscored (never guessed), and a future stamp
+(clock skew) clamps to age 0 rather than reading negative.
 
 **Serving escalation:** when the dataset feeds a deployed (IN_SERVICE) model — e.g. the
 Task #2 `churn_predictor` behind `churn_predictor_endpoint` — every finding is bumped one
@@ -33,8 +44,9 @@ production-affecting; that is the whole reason Ogle exists.
 
 ## Guarantees
 
-- **Pure / deterministic** — no clock, network, or LLM. Same inputs → same findings, so a
-  finding computed on Halcyon reproduces in CI.
+- **Pure / deterministic** — no network or LLM, and no clock *read* inside the scorer: the
+  freshness dimension takes `now` as an injected argument, so same inputs → same findings and
+  a finding computed on Halcyon reproduces in CI.
 - **Never guesses** — a dimension with data missing on either side (no profile, new field
   with no baseline) is skipped, not flagged.
 

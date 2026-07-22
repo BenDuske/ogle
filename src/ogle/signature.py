@@ -28,7 +28,34 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
+
+
+def parse_iso_epoch(text: Optional[str]) -> Optional[float]:
+    """Best-effort parse of a `computed_at` provenance string into epoch seconds.
+
+    `computed_at` is free-form (usually DataHub's profile timestamp, e.g.
+    `2026-07-16T00:00:00Z`), so this degrades gracefully: anything that isn't a parseable
+    ISO-8601 instant returns None and the caller treats the age as *unknown* rather than
+    guessing. A trailing `Z` is normalized to `+00:00` for `fromisoformat`; a naive stamp
+    (no offset) is assumed UTC so a bare date still yields a real age.
+
+    Pure and clock-free — the single source of truth both the CLI's staleness views and the
+    scorer's freshness dimension read, so a capture age and a freshness finding never disagree.
+    """
+    if not text:
+        return None
+    raw = text.strip()
+    if raw[-1:] in ("Z", "z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 @dataclass(frozen=True)

@@ -39,7 +39,7 @@ from .llm import build_narrator
 from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
 from .scorer import Severity, build_score_config
-from .signature import DatasetSignature
+from .signature import DatasetSignature, parse_iso_epoch
 from .store import BaselineStore
 
 DEFAULT_STORE = "ogle-baselines.json"
@@ -267,10 +267,24 @@ def gate_should_fail(report: DriftReport, fail_on: Optional[str]) -> bool:
 def cmd_check(args: argparse.Namespace) -> int:
     # Build (and validate) the sensitivity config before any I/O so a bad threshold
     # fails fast with a usage error instead of after a live walk.
+    # `--freshness-max-age` is a duration string (24h, 2d, ...); parse it to seconds with the
+    # shared `_parse_age` grammar before scoring. A malformed value is a hard usage error
+    # (exit 2) rather than a silently-disabled SLA that would mask a real stall.
+    freshness_raw = getattr(args, "freshness_max_age", None)
+    freshness_seconds: Optional[float] = None
+    if freshness_raw is not None:
+        freshness_seconds = _parse_age(freshness_raw)
+        if freshness_seconds is None:
+            print(
+                "ogle check: --freshness-max-age wants a duration like 24h, 2d, 90m, or 1w.",
+                file=sys.stderr,
+            )
+            return 2
     try:
         cfg = build_score_config(
             volume_threshold=getattr(args, "volume_threshold", None),
             null_threshold=getattr(args, "null_threshold", None),
+            freshness_max_age_seconds=freshness_seconds,
             escalate_when_serving=(
                 False if getattr(args, "no_serving_escalation", False) else None
             ),
@@ -898,27 +912,10 @@ def _baseline_row_count(store: "BaselineStore", urn: str) -> int:
     return -1
 
 
-def _parse_iso_epoch(text: Optional[str]) -> Optional[float]:
-    """Best-effort parse of a `computed_at` provenance string into epoch seconds.
-
-    `computed_at` is free-form (usually DataHub's profile timestamp, e.g.
-    `2026-07-16T00:00:00Z`), so this degrades gracefully: anything that isn't a parseable
-    ISO-8601 instant returns None and the caller treats the baseline's age as *unknown*
-    rather than guessing. A trailing `Z` is normalized to `+00:00` for `fromisoformat`; a
-    naive stamp (no offset) is assumed UTC so a bare date still yields a real age.
-    """
-    if not text:
-        return None
-    raw = text.strip()
-    if raw[-1:] in ("Z", "z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+# Timestamp parsing lives in `signature` (pure, no CLI deps) so the scorer's freshness
+# dimension and these staleness views read one source of truth. Re-exported under the old
+# private name to keep every call site here unchanged.
+_parse_iso_epoch = parse_iso_epoch
 
 
 def _baseline_age_seconds(
@@ -2955,6 +2952,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="FRAC",
         help="Absolute null-fraction increase that counts as quality drift (default: 0.20).",
+    )
+    tune.add_argument(
+        "--freshness-max-age",
+        metavar="DURATION",
+        help=(
+            "Data-freshness SLA: flag a dataset whose profile timestamp is older than "
+            "DURATION (e.g. 24h, 2d, 90m) as stale — the silent-stall case volume/schema "
+            "miss. Off by default (freshness is opt-in per deployment)."
+        ),
     )
     tune.add_argument(
         "--no-serving-escalation",

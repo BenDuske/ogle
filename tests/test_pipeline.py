@@ -8,7 +8,7 @@ in-memory, and the LLM seam is a fake callable. Fixtures use the Task #2 shape w
 import pytest
 
 from ogle.pipeline import DriftReport, run_drift_check
-from ogle.scorer import Severity
+from ogle.scorer import DriftKind, Severity, build_score_config
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -43,6 +43,36 @@ def test_unchanged_dataset_produces_no_drift():
     assert report.findings == []
     assert report.incident is None
     assert "No drift" in report.narrative
+    assert report.should_alert is False
+
+
+# ---- freshness flows through the pipeline's injected `now` ------------------------
+def test_freshness_sla_pages_through_pipeline():
+    """A stale-but-otherwise-unchanged serving source pages when an SLA is configured,
+    using the same `now` the pipeline threads into the scorer."""
+    store = BaselineStore()
+    stale_stamp = "2020-01-01T00:00:00Z"  # epoch 1577836800
+    store.put_baseline(_sig(computed_at=stale_stamp))
+    now = 1577836800.0 + 3 * 86_400  # 3 days after the stamp, SLA 1 day
+    cfg = build_score_config(freshness_max_age_seconds=86_400)  # 1-day SLA
+    report = run_drift_check(
+        store, [_sig(computed_at=stale_stamp)], cfg=cfg, now=now, update_baselines=False
+    )
+    assert report.incident is not None
+    assert any(f.kind is DriftKind.FRESHNESS for f in report.findings)
+    assert report.should_alert is True
+
+
+def test_no_freshness_sla_stays_quiet_through_pipeline():
+    """Without an SLA the same stale stamp produces no incident — opt-in default holds."""
+    store = BaselineStore()
+    stale_stamp = "2020-01-01T00:00:00Z"
+    store.put_baseline(_sig(computed_at=stale_stamp))
+    report = run_drift_check(
+        store, [_sig(computed_at=stale_stamp)], now=1577836800.0 + 3 * 86_400,
+        update_baselines=False,
+    )
+    assert report.findings == []
     assert report.should_alert is False
 
 
