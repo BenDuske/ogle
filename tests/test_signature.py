@@ -209,3 +209,74 @@ def test_from_dict_without_stdevs_is_backward_compatible():
     }
     restored = DatasetSignature.from_dict(legacy)
     assert restored.field_stdevs == {}
+
+
+# ---- field_mins / field_maxes (numeric bounds, for range/envelope drift) ------------
+
+def test_mins_maxes_round_trip():
+    sig = build_signature(
+        "urn:li:dataset:x",
+        [("id", "int"), ("amount", "double")],
+        row_count=1000,
+        field_mins={"amount": -5.0, "id": 1.0},
+        field_maxes={"amount": 999.5, "id": 1000.0},
+        computed_at="2026-07-22T00:00:00Z",
+    )
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+    assert restored.field_mins == {"amount": -5.0, "id": 1.0}
+    assert restored.field_maxes == {"amount": 999.5, "id": 1000.0}
+
+
+def test_mins_maxes_default_empty():
+    sig = build_signature("urn:x", [("id", "int")])
+    assert sig.field_mins == {}
+    assert sig.field_maxes == {}
+
+
+def test_mins_maxes_allow_signed_and_large():
+    """A min/max is a signed, unbounded real — negatives and huge values are valid."""
+    sig = build_signature(
+        "urn:x", field_mins={"a": -1e9}, field_maxes={"a": 1e9}
+    )
+    assert sig.field_mins == {"a": -1e9}
+    assert sig.field_maxes == {"a": 1e9}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_min_rejected(bad):
+    with pytest.raises(ValueError, match="min.*finite"):
+        build_signature("urn:x", field_mins={"f": bad})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_max_rejected(bad):
+    with pytest.raises(ValueError, match="max.*finite"):
+        build_signature("urn:x", field_maxes={"f": bad})
+
+
+def test_inverted_envelope_rejected():
+    """A field whose min exceeds its max is a nonsense envelope and is rejected."""
+    with pytest.raises(ValueError, match=r"min for 'f'.*<= max"):
+        build_signature("urn:x", field_mins={"f": 10.0}, field_maxes={"f": 5.0})
+
+
+def test_equal_min_max_allowed():
+    """A constant column (min == max) is a valid, degenerate envelope."""
+    sig = build_signature("urn:x", field_mins={"f": 7.0}, field_maxes={"f": 7.0})
+    assert sig.field_mins == {"f": 7.0}
+    assert sig.field_maxes == {"f": 7.0}
+
+
+def test_from_dict_without_mins_maxes_is_backward_compatible():
+    """A baseline persisted before range drift existed must still load (empty maps)."""
+    legacy = {
+        "urn": "urn:x",
+        "schema_fields": [["id", "int"]],
+        "row_count": 5,
+        "field_means": {"id": 3.0},
+        "field_stdevs": {"id": 1.0},
+    }
+    restored = DatasetSignature.from_dict(legacy)
+    assert restored.field_mins == {}
+    assert restored.field_maxes == {}

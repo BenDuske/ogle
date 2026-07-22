@@ -490,6 +490,120 @@ def test_build_config_stdev_tuning_suppresses():
             if f.kind is DriftKind.STDEV] == []  # now quiet
 
 
+# ---- range drift (numeric min/max bounds breach) -----------------------------------
+
+def test_range_breach_above_flagged():
+    """A max escaping the historical envelope past the band is bounds drift."""
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 140.0})  # +40 over a 100 span
+    rng = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE]
+    assert len(rng) == 1
+    assert "amount" in rng[0].message
+    assert rng[0].details["fields"]["amount"]["breach"] == pytest.approx(0.40)
+
+
+def test_range_breach_below_flagged():
+    """A min dropping below the historical floor is bounds drift, both directions page."""
+    base = _sig(field_mins={"temp": 10.0}, field_maxes={"temp": 30.0})  # span 20
+    cur = _sig(field_mins={"temp": 0.0}, field_maxes={"temp": 30.0})    # -10 below -> 50%
+    rng = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE]
+    assert len(rng) == 1
+    assert rng[0].details["fields"]["temp"]["breach"] == pytest.approx(0.50)
+
+
+def test_range_breach_both_ends_sums():
+    """Breaches at both ends add — the envelope escaped on two sides."""
+    base = _sig(field_mins={"x": 0.0}, field_maxes={"x": 10.0})  # span 10
+    cur = _sig(field_mins={"x": -2.0}, field_maxes={"x": 13.0})  # +3 above, +2 below -> 50%
+    rng = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE]
+    assert rng[0].details["fields"]["x"]["breach"] == pytest.approx(0.50)
+
+
+def test_small_range_breach_below_threshold_quiet():
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 110.0})  # +10% < 25% default
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE] == []
+
+
+def test_range_inside_envelope_quiet():
+    """Values that stayed within the historical [min, max] are not drift."""
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 5.0}, field_maxes={"amount": 95.0})  # tighter, no breach
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE] == []
+
+
+def test_range_zero_span_baseline_skipped():
+    """A relative breach against a ~0 baseline span (constant column) is undefined — skipped."""
+    base = _sig(field_mins={"const": 7.0}, field_maxes={"const": 7.0})  # span 0
+    cur = _sig(field_mins={"const": 7.0}, field_maxes={"const": 99.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE] == []
+
+
+def test_range_partial_envelope_skipped():
+    """A field missing a min or max on either side is not scored (never guessed)."""
+    base = _sig(field_maxes={"amount": 100.0})  # no min
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 200.0})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE] == []
+
+
+def test_range_severity_scales_with_breach():
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    mild = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 140.0})   # +40% of span
+    severe = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 300.0}) # +200% -> HIGH
+    low = [f for f in score_dataset(base, mild) if f.kind is DriftKind.RANGE][0]
+    high = [f for f in score_dataset(base, severe) if f.kind is DriftKind.RANGE][0]
+    assert high.severity.rank > low.severity.rank
+
+
+def test_range_escalates_on_serving_path():
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 160.0})  # +60%
+    off = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE][0]
+    on = [f for f in score_dataset(base, cur, serving=True) if f.kind is DriftKind.RANGE][0]
+    assert on.severity.rank > off.severity.rank
+    assert on.details.get("serving") is True
+
+
+def test_range_reports_worst_field_first():
+    # Field tokens f1/f2 don't collide with the message header words or the numeric values.
+    base = _sig(field_mins={"f1": 0.0, "f2": 0.0}, field_maxes={"f1": 100.0, "f2": 100.0})
+    cur = _sig(field_mins={"f1": 0.0, "f2": 0.0}, field_maxes={"f1": 130.0, "f2": 400.0})  # f2 worse
+    r = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE][0]
+    assert r.message.index("f2") < r.message.index("f1")
+
+
+def test_range_is_independent_of_mean_and_stdev():
+    """A few outliers breach the envelope while mean and stdev stay put — range alone fires."""
+    base = _sig(
+        field_means={"amount": 50.0}, field_stdevs={"amount": 10.0},
+        field_mins={"amount": 0.0}, field_maxes={"amount": 100.0},
+    )
+    cur = _sig(
+        field_means={"amount": 50.0}, field_stdevs={"amount": 10.0},  # moments held
+        field_mins={"amount": 0.0}, field_maxes={"amount": 150.0},    # envelope breached
+    )
+    kinds = {f.kind for f in score_dataset(base, cur)}
+    assert DriftKind.RANGE in kinds
+    assert DriftKind.MEAN not in kinds
+    assert DriftKind.STDEV not in kinds
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, -1])
+def test_build_config_rejects_nonpositive_range_threshold(bad):
+    with pytest.raises(ValueError, match=r"range threshold must be > 0"):
+        build_score_config(range_threshold=bad)
+
+
+def test_build_config_range_tuning_suppresses():
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 140.0})  # +40% of span
+    assert [f for f in score_dataset(base, cur, cfg=build_score_config())
+            if f.kind is DriftKind.RANGE]  # default (0.25) flags it
+    loose = build_score_config(range_threshold=0.5)
+    assert [f for f in score_dataset(base, cur, cfg=loose)
+            if f.kind is DriftKind.RANGE] == []  # now quiet
+
+
 # ---- freshness drift (data-staleness SLA) ------------------------------------------
 
 DAY = 86_400.0

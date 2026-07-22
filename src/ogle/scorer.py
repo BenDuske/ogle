@@ -29,6 +29,7 @@ class DriftKind(str, Enum):
     FRESHNESS = "freshness"
     MEAN = "mean"
     STDEV = "stdev"
+    RANGE = "range"
 
 
 class Severity(str, Enum):
@@ -96,6 +97,18 @@ class ScoreConfig:
     # — stdev 0 — going noisy is real, but scoring it relatively is undefined; it surfaces via
     # mean/distribution drift instead, and this stays quiet rather than dividing by zero.)
     stdev_zero_floor: float = 1e-9
+    # Fraction of the baseline value-range (max - min) that a field's observed min/max may
+    # escape before it counts as range/bounds drift (0.25 = the min or max broke out by a
+    # quarter of the historical span). The breach is measured *relative to the field's own
+    # baseline span*, so the band self-scales to each feature's natural range. Both directions
+    # count — a max that shot up OR a min that dropped below the historical floor. A field whose
+    # baseline span is ~0 (a constant column) is skipped: a relative breach against a zero span
+    # is undefined, and that constant-goes-variable case already surfaces via stdev drift.
+    range_rel_threshold: float = 0.25
+    # Baseline span (max - min) below this is treated as "effectively zero": a relative breach
+    # against it is undefined (division by ~0), so the field is not scored for range drift here
+    # rather than paging on noise. Mirrors `mean_zero_floor` / `stdev_zero_floor`.
+    range_zero_floor: float = 1e-9
     # Data-freshness SLA in seconds. When set, a dataset whose profile timestamp
     # (`computed_at`) is older than this relative to the walk's `now` flags freshness drift —
     # the classic silent-stall failure (ETL stopped, rows unchanged so volume looks fine, but
@@ -112,6 +125,7 @@ def build_score_config(
     unique_drop_threshold: Optional[float] = None,
     mean_threshold: Optional[float] = None,
     stdev_threshold: Optional[float] = None,
+    range_threshold: Optional[float] = None,
     freshness_max_age_seconds: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
@@ -140,6 +154,9 @@ def build_score_config(
     )
     stdev = (
         ScoreConfig.stdev_rel_threshold if stdev_threshold is None else stdev_threshold
+    )
+    rng = (
+        ScoreConfig.range_rel_threshold if range_threshold is None else range_threshold
     )
     esc = (
         ScoreConfig.escalate_when_serving
@@ -174,6 +191,12 @@ def build_score_config(
         raise ValueError(
             f"stdev threshold must be > 0 (got {stdev}); it is a relative spread-shift band."
         )
+    # Same shape as the mean/stdev bands: a relative breach band, strictly positive, no upper
+    # cap. Zero/negative would flag every field and divide by ~0 in `_severity_from_ratio`.
+    if not (rng > 0):
+        raise ValueError(
+            f"range threshold must be > 0 (got {rng}); it is a relative bounds-breach band."
+        )
     # None keeps the freshness dimension OFF (the default). A supplied SLA must be a positive
     # duration — a zero/negative age would flag every timestamped dataset as stale, and
     # `_severity_from_ratio` divides by it. Reject up front, same as the other bands.
@@ -192,6 +215,7 @@ def build_score_config(
         unique_fraction_drop_threshold=float(uniq),
         mean_rel_threshold=float(mean),
         stdev_rel_threshold=float(stdev),
+        range_rel_threshold=float(rng),
         freshness_max_age_seconds=None if fresh is None else float(fresh),
         escalate_when_serving=esc,
     )
@@ -466,6 +490,69 @@ def score_stdev(
     )
 
 
+def score_range(
+    baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
+) -> Optional[DriftFinding]:
+    """Numeric min/max bounds breach — the envelope drift the moment rules can't see.
+
+    Mean drift sees the center move; stdev drift sees the spread move. Both are *aggregate
+    moments*: a handful of out-of-bounds values — an integer overflow, a unit bug on a subset
+    of rows, a new outlier regime — barely nudges either on a large table, yet those extremes
+    push the field's observed min or max clean out of its historical envelope. This scores how
+    far each numeric field's [min, max] escaped its baseline band, measured as a fraction of the
+    baseline span (max - min) so the band self-scales to each feature's natural range.
+
+    Both directions count (a max that shot up *or* a min that dropped below the historical
+    floor). A field is scored only when it carries a full min AND max on BOTH sides — a partial
+    envelope is skipped, never guessed. A baseline span below `cfg.range_zero_floor` (a constant
+    column) is skipped too: a relative breach against a ~0 span is undefined, and that
+    constant-goes-variable case already surfaces via stdev/distribution drift.
+    """
+    worsened: Dict[str, Dict[str, float]] = {}
+    for path, cur_max in current.field_maxes.items():
+        cur_min = current.field_mins.get(path)
+        base_max = baseline.field_maxes.get(path)
+        base_min = baseline.field_mins.get(path)
+        if cur_min is None or base_max is None or base_min is None:
+            continue
+        span = base_max - base_min
+        if span < cfg.range_zero_floor:
+            continue
+        breach_above = max(0.0, cur_max - base_max)
+        breach_below = max(0.0, base_min - cur_min)
+        breach = (breach_above + breach_below) / span
+        if breach >= cfg.range_rel_threshold:
+            worsened[path] = {
+                "baseline_min": base_min,
+                "baseline_max": base_max,
+                "current_min": cur_min,
+                "current_max": cur_max,
+                "breach": breach,
+            }
+
+    if not worsened:
+        return None
+
+    max_breach = max(v["breach"] for v in worsened.values())
+    severity = _severity_from_ratio(max_breach, cfg.range_rel_threshold)
+    fields = sorted(worsened, key=lambda p: worsened[p]["breach"], reverse=True)
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.RANGE,
+        severity=severity,
+        message=(
+            "numeric range breached on "
+            + ", ".join(
+                f"{p} ([{worsened[p]['baseline_min']:g}, {worsened[p]['baseline_max']:g}]"
+                f"->[{worsened[p]['current_min']:g}, {worsened[p]['current_max']:g}], "
+                f"+{worsened[p]['breach']:.0%} of span)"
+                for p in fields
+            )
+        ),
+        details={"fields": worsened},
+    )
+
+
 def score_freshness(
     current: DatasetSignature, cfg: ScoreConfig, now: Optional[float]
 ) -> Optional[DriftFinding]:
@@ -541,6 +628,7 @@ def score_dataset(
         score_distribution(baseline, current, cfg),
         score_mean(baseline, current, cfg),
         score_stdev(baseline, current, cfg),
+        score_range(baseline, current, cfg),
         score_freshness(current, cfg, now),
     ):
         if finding is None:

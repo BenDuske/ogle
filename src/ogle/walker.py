@@ -107,7 +107,7 @@ def build_signature_from_aspects(
       * `schema_metadata.fields[]` -> each has `.fieldPath` and `.nativeDataType`
       * `dataset_profile.rowCount` (Optional[int])
       * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`,
-        `.uniqueProportion`, and (numeric columns only) `.mean` and `.stdev`
+        `.uniqueProportion`, and (numeric columns only) `.mean`, `.stdev`, `.min`, `.max`
 
     Missing sub-fields inside the aspect are treated as missing data (skipped), not zero.
     """
@@ -128,6 +128,8 @@ def build_signature_from_aspects(
     unique_fractions: Dict[str, float] = {}
     means: Dict[str, float] = {}
     stdevs: Dict[str, float] = {}
+    mins: Dict[str, float] = {}
+    maxes: Dict[str, float] = {}
     if dataset_profile is not None:
         rc = getattr(dataset_profile, "rowCount", None)
         if isinstance(rc, int) and rc >= 0:
@@ -148,6 +150,17 @@ def build_signature_from_aspects(
             stdev_val = _coerce_stdev(getattr(fp, "stdev", None))
             if stdev_val is not None:
                 stdevs[str(path)] = stdev_val
+            # `min`/`max` are signed unbounded finite reals, exactly like `mean` — reuse its
+            # coercion (parse, drop NaN/inf; numeric columns only, so text fields yield None).
+            # Range drift needs the WHOLE envelope, so min/max are coupled: a field contributes
+            # only when BOTH parse cleanly AND min <= max. A lone bound (one side junk) or an
+            # inverted pair (DataHub bad-profile) is skipped entirely rather than half-recorded —
+            # never guess a half-envelope, and one junk profile can't blind the rest of the run.
+            min_val = _coerce_mean(getattr(fp, "min", None))
+            max_val = _coerce_mean(getattr(fp, "max", None))
+            if min_val is not None and max_val is not None and min_val <= max_val:
+                mins[str(path)] = min_val
+                maxes[str(path)] = max_val
 
     return build_signature(
         urn=urn,
@@ -157,6 +170,8 @@ def build_signature_from_aspects(
         field_unique_fractions=unique_fractions,
         field_means=means,
         field_stdevs=stdevs,
+        field_mins=mins,
+        field_maxes=maxes,
         computed_at=computed_at,
     )
 

@@ -62,6 +62,11 @@ _ACTIONS: Dict[DriftKind, str] = {
         "a collapsed or exploded spread with an intact mean and schema is scale drift that "
         "moves feature variance under the model without touching its average"
     ),
+    DriftKind.RANGE: (
+        "check the source for an overflow, a unit bug on a subset of rows, or a new outlier "
+        "regime — values escaping the historical min/max envelope while the mean and spread "
+        "hold are out-of-bounds features that can silently break a model's input assumptions"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {

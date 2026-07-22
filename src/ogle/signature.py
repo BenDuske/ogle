@@ -17,6 +17,11 @@ to catch the three drifts that actually break production ML:
                      while its mean held steady: a sensor stuck on one reading (variance
                      ->0) or gone noisy (variance blows up) — a scale shift the mean rule,
                      which only sees location, is blind to.
+  * RANGE drift    — a numeric feature's observed min/max escaped its historical envelope: a
+                     handful of out-of-bounds values (integer overflow, a unit bug on a
+                     subset, a new outlier regime) breach the baseline [min, max] band while
+                     the mean and stdev — aggregate moments a few extremes barely move — both
+                     look fine. The tail signal the moment-based rules cannot see.
 
 Everything here is pure and deterministic (no DataHub client, no clock): the walker hands
 us the aspects it pulled, we fold them into a `DatasetSignature`. That keeps the scoring
@@ -30,6 +35,8 @@ Source aspects (when wired to live DataHub in W2):
   * `field_unique_fractions` <- DatasetProfile.fieldProfiles[].{fieldPath,uniqueProportion}
   * `field_means`            <- DatasetProfile.fieldProfiles[].{fieldPath,mean}
   * `field_stdevs`           <- DatasetProfile.fieldProfiles[].{fieldPath,stdev}
+  * `field_mins`             <- DatasetProfile.fieldProfiles[].{fieldPath,min}
+  * `field_maxes`            <- DatasetProfile.fieldProfiles[].{fieldPath,max}
 """
 
 from __future__ import annotations
@@ -108,6 +115,14 @@ class DatasetSignature:
     # otherwise unbounded. Scoring degrades gracefully: a field with no stdev on either side is
     # not scored for spread drift, never guessed.
     field_stdevs: Dict[str, float] = field(default_factory=dict)
+    # Per-field observed minimum / maximum, from DataHub's profile (`fieldProfiles[].min`/
+    # `.max`). Optional exactly like the mean above; only numeric columns carry them. Each is a
+    # signed, unbounded finite real (a min can be negative, a max huge) — floored nowhere, only
+    # required finite. Together they bound the field's observed value envelope. Scoring degrades
+    # gracefully: a field lacking a full min+max on both sides is not scored for range drift,
+    # never guessed.
+    field_mins: Dict[str, float] = field(default_factory=dict)
+    field_maxes: Dict[str, float] = field(default_factory=dict)
     # Free-form provenance (e.g. the profile timestamp). Never part of the schema hash.
     computed_at: Optional[str] = None
 
@@ -137,6 +152,8 @@ class DatasetSignature:
             "field_unique_fractions": dict(self.field_unique_fractions),
             "field_means": dict(self.field_means),
             "field_stdevs": dict(self.field_stdevs),
+            "field_mins": dict(self.field_mins),
+            "field_maxes": dict(self.field_maxes),
             "computed_at": self.computed_at,
             "schema_hash": self.schema_hash,  # denormalized for quick baseline diffing
         }
@@ -154,6 +171,8 @@ class DatasetSignature:
             field_unique_fractions=dict(data.get("field_unique_fractions", {})),
             field_means=dict(data.get("field_means", {})),
             field_stdevs=dict(data.get("field_stdevs", {})),
+            field_mins=dict(data.get("field_mins", {})),
+            field_maxes=dict(data.get("field_maxes", {})),
             computed_at=data.get("computed_at"),
         )
 
@@ -166,6 +185,8 @@ def build_signature(
     field_unique_fractions: Optional[Dict[str, float]] = None,
     field_means: Optional[Dict[str, float]] = None,
     field_stdevs: Optional[Dict[str, float]] = None,
+    field_mins: Optional[Dict[str, float]] = None,
+    field_maxes: Optional[Dict[str, float]] = None,
     computed_at: Optional[str] = None,
 ) -> DatasetSignature:
     """Convenience builder from plain tuples (what a DataHub aspect walk yields).
@@ -212,6 +233,23 @@ def build_signature(
             raise ValueError(
                 f"stdev for {path!r} must be >= 0 (a dispersion), got {sval!r}"
             )
+    # A min/max is a signed, unbounded finite real (like the mean): reject only NaN/inf, never
+    # a range. Additionally, where a field carries BOTH a min and a max, the min may not exceed
+    # the max — an inverted envelope is nonsense that would make the baseline span negative and
+    # poison the breach math in the scorer. Reject it up front rather than emit garbage.
+    mins = dict(field_mins or {})
+    maxes = dict(field_maxes or {})
+    for label, mapping in (("min", mins), ("max", maxes)):
+        for path, val in mapping.items():
+            if val != val or val in (float("inf"), float("-inf")):
+                raise ValueError(
+                    f"{label} for {path!r} must be a finite number, got {val!r}"
+                )
+    for path in mins.keys() & maxes.keys():
+        if mins[path] > maxes[path]:
+            raise ValueError(
+                f"min for {path!r} ({mins[path]!r}) must be <= max ({maxes[path]!r})"
+            )
     if row_count is not None and row_count < 0:
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
@@ -223,5 +261,7 @@ def build_signature(
         field_unique_fractions=uniques,
         field_means=means,
         field_stdevs=stdevs,
+        field_mins=mins,
+        field_maxes=maxes,
         computed_at=computed_at,
     )

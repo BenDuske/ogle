@@ -63,6 +63,8 @@ class FakeFieldProfile:
     uniqueProportion: Optional[float] = None
     mean: Optional[str] = None  # DataHub reports mean as a numeric string
     stdev: Optional[str] = None  # DataHub reports stdev as a numeric string too
+    min: Optional[str] = None    # DataHub reports min/max as numeric strings too
+    max: Optional[str] = None
 
 
 @dataclass
@@ -342,6 +344,57 @@ def test_build_signature_skips_non_finite_junk_and_negative_stdevs():
     )
     sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
     assert set(sig.field_stdevs) == {"ok"}
+
+
+def test_build_signature_folds_mins_maxes():
+    """`min`/`max` on a field profile (numeric strings, possibly signed) land as floats."""
+    profile = FakeProfile(
+        rowCount=1000,
+        fieldProfiles=[
+            FakeFieldProfile("amount", 0.0, min="-5.0", max="999.5"),
+            FakeFieldProfile("id", 0.0, min="1", max="1000"),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_mins == {"amount": pytest.approx(-5.0), "id": pytest.approx(1.0)}
+    assert sig.field_maxes == {"amount": pytest.approx(999.5), "id": pytest.approx(1000.0)}
+
+
+def test_build_signature_min_max_absent_yields_empty():
+    """Text/categorical columns (no min/max) and older profiles degrade to empty maps."""
+    profile = FakeProfile(rowCount=10, fieldProfiles=[FakeFieldProfile("region", 0.0)])
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_mins == {}
+    assert sig.field_maxes == {}
+
+
+def test_build_signature_skips_non_finite_and_junk_min_max():
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("ok", 0.0, min="0.0", max="10.0"),
+            FakeFieldProfile("nan", 0.0, min="nan", max="5.0"),
+            FakeFieldProfile("inf", 0.0, min="0.0", max="inf"),
+            FakeFieldProfile("junk", 0.0, min="lo", max="hi"),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_mins) == {"ok"}
+    assert set(sig.field_maxes) == {"ok"}
+
+
+def test_build_signature_drops_inverted_min_max_pair():
+    """A profile reporting min > max is nonsense; the pair is dropped, not fatal to the walk."""
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("good", 0.0, min="0.0", max="10.0"),
+            FakeFieldProfile("bad", 0.0, min="10.0", max="5.0"),  # inverted -> dropped
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_mins) == {"good"}
+    assert set(sig.field_maxes) == {"good"}
 
 
 def test_build_signature_skips_partial_schema_fields():
