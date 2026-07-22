@@ -188,7 +188,11 @@ the silence begins, preserved across re-annotation, and cleared with the mute (a
 mute reads its age as unknown rather than faking one). `ogle check` reports how many muted datasets
 it silenced (`silenced N muted dataset(s)`) and lists them under `suppressed_urns` in `--json`,
 so the suppression is visible, never a silent black hole. This is feature #3 (memory of past
-false positives) as a first-class operator control.
+false positives) as a first-class operator control. **`mute --json`** and **`unmute --json`**
+emit a machine receipt in place of the human line — symmetric with `resolve`/`forget --json` —
+so a "quiet this false positive" wrapper can confirm exactly what it changed: `mute --json`
+carries `{urn, newly_muted, snoozed, until, reason}` (`newly_muted:false` on a no-op re-mute),
+`unmute --json` carries `{urn, unmuted}` (`unmuted:false` when the URN wasn't muted).
 
 ### Store health at a glance (`ogle status`)
 

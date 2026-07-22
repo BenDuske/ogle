@@ -704,6 +704,28 @@ def cmd_mute(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"ogle mute: could not save store: {exc}", file=sys.stderr)
         return 2
+    # `--json`: the machine receipt for the mute-side mutating command, symmetric with
+    # `resolve`/`forget --json`. Folds the same outcome the human line carries into one object —
+    # the URN, whether this call NEWLY muted it (vs a reason update on an already-muted URN),
+    # whether it's a snooze and its expiry epoch, and the reason — so a "quiet this false
+    # positive" wrapper confirms exactly what it silenced without scraping prose.
+    if getattr(args, "json", False):
+        _emit(
+            json.dumps(
+                {
+                    "mute": {
+                        "urn": args.urn,
+                        "newly_muted": newly,
+                        "snoozed": until is not None,
+                        "until": until,
+                        "reason": reason,
+                    }
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     rpart = f" (reason: {reason})" if reason else ""
     if not newly:
         # Already muted — but a fresh --reason still lands, so acknowledge that rather than
@@ -727,6 +749,18 @@ def cmd_unmute(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"ogle unmute: could not save store: {exc}", file=sys.stderr)
         return 2
+    # `--json`: the machine receipt symmetric with `mute --json`. `unmuted` reports whether the
+    # URN was actually muted and got lifted (True) vs a no-op on an un-muted URN (False), so a
+    # batch un-mute pipe (`ogle muted --urns | ogle unmute` per line) can confirm real changes.
+    if getattr(args, "json", False):
+        _emit(
+            json.dumps(
+                {"unmute": {"urn": args.urn, "unmuted": was}},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     _emit(
         f"🔔 unmuted {args.urn}" if was else f"_not muted: {args.urn}_"
     )
@@ -3052,12 +3086,24 @@ def build_parser() -> argparse.ArgumentParser:
         "Monday\"). Surfaced by `ogle muted` and `ogle show` so a silence isn't a mystery "
         "weeks later. Can annotate an already-muted URN; cleared when it's unmuted/forgotten.",
     )
+    mute.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable receipt (URN, whether newly muted, snooze expiry, "
+        "reason) instead of the human line — symmetric with `resolve`/`forget --json`.",
+    )
     mute.set_defaults(func=cmd_mute)
 
     unmute = sub.add_parser("unmute", help="Un-mute a dataset so its drift can page again.")
     unmute.add_argument("urn", help="Dataset URN to un-mute.")
     unmute.add_argument(
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
+    )
+    unmute.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable receipt (URN, whether it was actually muted) instead "
+        "of the human line — symmetric with `resolve`/`forget --json`.",
     )
     unmute.set_defaults(func=cmd_unmute)
 

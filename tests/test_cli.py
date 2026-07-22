@@ -538,6 +538,65 @@ def test_unmute_not_muted_reports(tmp_path, capsys):
     assert "not muted" in capsys.readouterr().out
 
 
+def test_mute_json_receipt_for_permanent_mute(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--reason", "monday bounce", "--json", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "🔇" not in out and "muted " not in out  # human line suppressed
+    payload = json.loads(out)["mute"]
+    assert payload == {
+        "urn": CUSTOMERS_URN,
+        "newly_muted": True,
+        "snoozed": False,
+        "until": None,
+        "reason": "monday bounce",
+    }
+    assert BaselineStore.load(store).is_muted(CUSTOMERS_URN) is True
+
+
+def test_mute_json_snooze_carries_expiry(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    rc = main(["mute", CUSTOMERS_URN, "--for-hours", "2", "--json", "--store", str(store)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["mute"]
+    assert payload["snoozed"] is True
+    assert payload["reason"] is None
+    assert payload["until"] is not None and payload["until"] > time.time()
+
+
+def test_mute_json_reports_already_muted_as_not_newly(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["mute", CUSTOMERS_URN, "--json", "--store", str(store)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["mute"]
+    assert payload["newly_muted"] is False  # a re-mute is a no-op, and --json says so
+
+
+def test_unmute_json_reports_whether_it_changed(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    rc = main(["unmute", CUSTOMERS_URN, "--json", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "🔔" not in out  # human line suppressed
+    assert json.loads(out)["unmute"] == {"urn": CUSTOMERS_URN, "unmuted": True}
+    # a second unmute is a no-op → unmuted False
+    rc = main(["unmute", CUSTOMERS_URN, "--json", "--store", str(store)])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["unmute"]["unmuted"] is False
+
+
+def test_mute_unmute_json_registered_in_parser():
+    ns = build_parser().parse_args(["mute", CUSTOMERS_URN])
+    assert ns.json is False  # human by default
+    ns = build_parser().parse_args(["unmute", CUSTOMERS_URN])
+    assert ns.json is False
+
+
 def test_muted_lists_urns(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     main(["mute", CUSTOMERS_URN, "--store", str(store)])
