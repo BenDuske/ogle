@@ -43,6 +43,10 @@ _ACTIONS: Dict[DriftKind, str] = {
         "check the source for a partial/failed load — a null spike usually means an "
         "upstream join or extract broke, not real data"
     ),
+    DriftKind.DISTRIBUTION: (
+        "check the upstream transform for a stuck default or a fan-out join — a collapsed "
+        "distinct-value count means the feature lost signal or rows got duplicated"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {

@@ -25,6 +25,7 @@ class DriftKind(str, Enum):
     SCHEMA = "schema"
     VOLUME = "volume"
     QUALITY = "quality"
+    DISTRIBUTION = "distribution"
 
 
 class Severity(str, Enum):
@@ -65,6 +66,10 @@ class ScoreConfig:
     volume_collapse_floor: int = 1
     # Absolute increase in a field's null fraction that counts as quality drift.
     null_fraction_abs_threshold: float = 0.20
+    # Absolute *drop* in a field's distinct-value fraction that counts as distribution
+    # drift (a categorical collapsing to one value, or a key losing uniqueness). Only a
+    # drop is flagged — cardinality *rising* is usually benign (more variety, not breakage).
+    unique_fraction_drop_threshold: float = 0.30
     # If the source feeds a deployed model, bump every finding one severity step.
     escalate_when_serving: bool = True
 
@@ -72,6 +77,7 @@ class ScoreConfig:
 def build_score_config(
     volume_threshold: Optional[float] = None,
     null_threshold: Optional[float] = None,
+    unique_drop_threshold: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
     """Validated `ScoreConfig` builder — the single place CLI/config tuning lands.
@@ -89,6 +95,11 @@ def build_score_config(
         if null_threshold is None
         else null_threshold
     )
+    uniq = (
+        ScoreConfig.unique_fraction_drop_threshold
+        if unique_drop_threshold is None
+        else unique_drop_threshold
+    )
     esc = (
         ScoreConfig.escalate_when_serving
         if escalate_when_serving is None
@@ -104,9 +115,15 @@ def build_score_config(
             f"null threshold must be in (0, 1] (got {nul}); it is an absolute "
             "null-fraction increase."
         )
+    if not (0 < uniq <= 1):
+        raise ValueError(
+            f"unique-drop threshold must be in (0, 1] (got {uniq}); it is an absolute "
+            "distinct-value-fraction decrease."
+        )
     return ScoreConfig(
         volume_rel_threshold=float(vol),
         null_fraction_abs_threshold=float(nul),
+        unique_fraction_drop_threshold=float(uniq),
         escalate_when_serving=esc,
     )
 
@@ -228,6 +245,51 @@ def score_quality(
     )
 
 
+def score_distribution(
+    baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
+) -> Optional[DriftFinding]:
+    """Distinct-value-fraction collapse — the cardinality half of distribution drift.
+
+    Two real, silent failure modes share one signal, a *drop* in a field's unique fraction
+    (distinct values / rows):
+      * a categorical/feature column stuck on one value (upstream defaulting, a frozen
+        enum) — the model keeps training but the feature carries no signal;
+      * an id/join key that lost uniqueness — a fan-out join now duplicates rows.
+
+    Only a drop is flagged. A *rise* in cardinality is usually benign (more variety), so
+    flagging it would be noise on the serving path we're trying to keep quiet. A field with
+    no unique fraction on either side is skipped, never guessed.
+    """
+    worsened: Dict[str, Dict[str, float]] = {}
+    for path, cur_frac in current.field_unique_fractions.items():
+        base_frac = baseline.field_unique_fractions.get(path)
+        if base_frac is None:
+            continue
+        drop = base_frac - cur_frac
+        if drop >= cfg.unique_fraction_drop_threshold:
+            worsened[path] = {"baseline": base_frac, "current": cur_frac, "drop": drop}
+
+    if not worsened:
+        return None
+
+    max_drop = max(v["drop"] for v in worsened.values())
+    severity = _severity_from_ratio(max_drop, cfg.unique_fraction_drop_threshold)
+    fields = sorted(worsened, key=lambda p: worsened[p]["drop"], reverse=True)
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.DISTRIBUTION,
+        severity=severity,
+        message=(
+            "distinct-value fraction dropped on "
+            + ", ".join(
+                f"{p} ({worsened[p]['baseline']:.0%}->{worsened[p]['current']:.0%})"
+                for p in fields
+            )
+        ),
+        details={"fields": worsened},
+    )
+
+
 def score_dataset(
     baseline: DatasetSignature,
     current: DatasetSignature,
@@ -251,6 +313,7 @@ def score_dataset(
         score_schema(baseline, current),
         score_volume(baseline, current, cfg),
         score_quality(baseline, current, cfg),
+        score_distribution(baseline, current, cfg),
     ):
         if finding is None:
             continue

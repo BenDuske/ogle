@@ -292,3 +292,30 @@ def test_llm_prompt_grounds_on_owner_facts():
     prompt = build_llm_prompt(inc)
     assert "on-call-ml" in prompt      # the fact is handed to the model
     assert "do not invent" in prompt and "owners" in prompt  # and it's forbidden to fabricate
+
+
+# ---- distribution drift renders end-to-end ----
+
+def test_distribution_finding_renders_with_action_line():
+    """A DISTRIBUTION finding must render (no KeyError) and carry its own What-to-check."""
+    inc = build_incident([
+        _finding(kind=DriftKind.DISTRIBUTION, sev=Severity.HIGH,
+                 msg="distinct-value fraction dropped on region (80%->5%)")
+    ])
+    md = render_markdown(inc)
+    assert "distribution" in md
+    assert "region (80%->5%)" in md
+    assert "**What to check**" in md
+    # the distribution-specific advice, not another kind's line
+    assert "fan-out join" in md
+
+
+def test_distribution_finding_from_real_scorer_path():
+    """End-to-end: a real cardinality-collapse finding flows scorer -> incident -> markdown."""
+    base = _sig(field_unique_fractions={"region": 0.90})
+    cur = _sig(field_unique_fractions={"region": 0.05})
+    findings = score_dataset(base, cur)
+    inc = build_incident(findings)
+    assert inc is not None
+    md = render_markdown(inc)
+    assert "**distribution**" in md

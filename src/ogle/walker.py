@@ -106,7 +106,8 @@ def build_signature_from_aspects(
     The aspects are duck-typed:
       * `schema_metadata.fields[]` -> each has `.fieldPath` and `.nativeDataType`
       * `dataset_profile.rowCount` (Optional[int])
-      * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath` and `.nullProportion`
+      * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`, and
+        `.uniqueProportion`
 
     Missing sub-fields inside the aspect are treated as missing data (skipped), not zero.
     """
@@ -124,29 +125,45 @@ def build_signature_from_aspects(
 
     row_count: Optional[int] = None
     null_fractions: Dict[str, float] = {}
+    unique_fractions: Dict[str, float] = {}
     if dataset_profile is not None:
         rc = getattr(dataset_profile, "rowCount", None)
         if isinstance(rc, int) and rc >= 0:
             row_count = rc
         for fp in getattr(dataset_profile, "fieldProfiles", None) or ():
             path = getattr(fp, "fieldPath", None)
-            frac = getattr(fp, "nullProportion", None)
-            if path is None or frac is None:
+            if path is None:
                 continue
-            try:
-                frac_f = float(frac)
-            except (TypeError, ValueError):
-                continue
-            if 0.0 <= frac_f <= 1.0:
-                null_fractions[str(path)] = frac_f
+            null_frac = _coerce_fraction(getattr(fp, "nullProportion", None))
+            if null_frac is not None:
+                null_fractions[str(path)] = null_frac
+            unique_frac = _coerce_fraction(getattr(fp, "uniqueProportion", None))
+            if unique_frac is not None:
+                unique_fractions[str(path)] = unique_frac
 
     return build_signature(
         urn=urn,
         schema_fields=schema_fields,
         row_count=row_count,
         field_null_fractions=null_fractions,
+        field_unique_fractions=unique_fractions,
         computed_at=computed_at,
     )
+
+
+def _coerce_fraction(raw: Any) -> Optional[float]:
+    """A DataHub profile fraction (nullProportion/uniqueProportion) as a clean [0,1] float.
+
+    Returns None for a missing value or one that doesn't parse / falls outside [0,1], so a
+    junk profile entry is skipped (never guessed) exactly like a missing one.
+    """
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if 0.0 <= val <= 1.0 else None
 
 
 def owner_display_name(owner_urn: str) -> str:

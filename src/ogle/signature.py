@@ -8,6 +8,8 @@ to catch the three drifts that actually break production ML:
   * SCHEMA drift   — a feature's source column was renamed / retyped / dropped.
   * VOLUME  drift  — the upstream table stopped filling (row count collapsed) or exploded.
   * QUALITY drift  — a column that used to be populated is now mostly null.
+  * DISTRIBUTION   — a column's distinct-value fraction collapsed (a categorical feature
+                     stuck on one value, or an id/key that lost uniqueness in a bad join).
 
 Everything here is pure and deterministic (no DataHub client, no clock): the walker hands
 us the aspects it pulled, we fold them into a `DatasetSignature`. That keeps the scoring
@@ -15,9 +17,10 @@ logic unit-testable without a live quickstart, and makes signatures reproducible
 schema_hash computed on Halcyon matches one computed in CI.
 
 Source aspects (when wired to live DataHub in W2):
-  * `schema_fields`         <- SchemaMetadata.fields[].{fieldPath,nativeDataType}
-  * `row_count`             <- DatasetProfile.rowCount
-  * `field_null_fractions`  <- DatasetProfile.fieldProfiles[].{fieldPath,nullProportion}
+  * `schema_fields`          <- SchemaMetadata.fields[].{fieldPath,nativeDataType}
+  * `row_count`              <- DatasetProfile.rowCount
+  * `field_null_fractions`   <- DatasetProfile.fieldProfiles[].{fieldPath,nullProportion}
+  * `field_unique_fractions` <- DatasetProfile.fieldProfiles[].{fieldPath,uniqueProportion}
 """
 
 from __future__ import annotations
@@ -52,6 +55,11 @@ class DatasetSignature:
     schema_fields: Tuple[SchemaField, ...] = ()
     row_count: Optional[int] = None
     field_null_fractions: Dict[str, float] = field(default_factory=dict)
+    # Per-field distinct-value fraction (uniqueCount / rowCount), from DataHub's profile.
+    # Optional exactly like null fractions — profiling is opt-in and older profiles may lack
+    # it. Scoring degrades gracefully: a field with no unique fraction on either side is not
+    # scored for distribution drift, never guessed.
+    field_unique_fractions: Dict[str, float] = field(default_factory=dict)
     # Free-form provenance (e.g. the profile timestamp). Never part of the schema hash.
     computed_at: Optional[str] = None
 
@@ -78,6 +86,7 @@ class DatasetSignature:
             "schema_fields": [[f.path, f.native_type] for f in self.schema_fields],
             "row_count": self.row_count,
             "field_null_fractions": dict(self.field_null_fractions),
+            "field_unique_fractions": dict(self.field_unique_fractions),
             "computed_at": self.computed_at,
             "schema_hash": self.schema_hash,  # denormalized for quick baseline diffing
         }
@@ -92,6 +101,7 @@ class DatasetSignature:
             ),
             row_count=data.get("row_count"),
             field_null_fractions=dict(data.get("field_null_fractions", {})),
+            field_unique_fractions=dict(data.get("field_unique_fractions", {})),
             computed_at=data.get("computed_at"),
         )
 
@@ -101,6 +111,7 @@ def build_signature(
     schema_fields: Sequence[Tuple[str, str]] = (),
     row_count: Optional[int] = None,
     field_null_fractions: Optional[Dict[str, float]] = None,
+    field_unique_fractions: Optional[Dict[str, float]] = None,
     computed_at: Optional[str] = None,
 ) -> DatasetSignature:
     """Convenience builder from plain tuples (what a DataHub aspect walk yields).
@@ -120,6 +131,12 @@ def build_signature(
             raise ValueError(
                 f"null fraction for {path!r} must be in [0,1], got {frac!r}"
             )
+    uniques = dict(field_unique_fractions or {})
+    for path, frac in uniques.items():
+        if not 0.0 <= frac <= 1.0:
+            raise ValueError(
+                f"unique fraction for {path!r} must be in [0,1], got {frac!r}"
+            )
     if row_count is not None and row_count < 0:
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
@@ -128,5 +145,6 @@ def build_signature(
         schema_fields=fields,
         row_count=row_count,
         field_null_fractions=nulls,
+        field_unique_fractions=uniques,
         computed_at=computed_at,
     )

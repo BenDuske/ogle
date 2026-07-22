@@ -4,19 +4,27 @@ The analytic core Ogle runs on a schedule to catch silent drift in the datasets 
 production ML models. Two pure modules, no live DataHub required to develop or test:
 
 - `ogle.signature` — `DatasetSignature`, the cheap fingerprint Ogle persists between runs
-  (schema shape + row count + per-field null fractions). `schema_hash` is order-independent
-  so two fetches of an unchanged schema compare equal. Round-trips through `to_dict` /
-  `from_dict` for the baseline store (Aegis memory in W2b).
+  (schema shape + row count + per-field null fractions + per-field distinct-value
+  fractions). `schema_hash` is order-independent so two fetches of an unchanged schema
+  compare equal. Round-trips through `to_dict` / `from_dict` for the baseline store (Aegis
+  memory in W2b); `field_unique_fractions` is optional, so pre-existing baselines load clean.
 - `ogle.scorer` — `score_dataset(baseline, current, cfg, serving)` returns `DriftFinding`s
-  across three dimensions, sorted most-severe first.
+  across four dimensions, sorted most-severe first.
 
 ## Drift dimensions
 
-| Kind    | Fires when                                                        | Severity logic |
-|---------|-------------------------------------------------------------------|----------------|
-| SCHEMA  | a source column is removed / retyped (added-only = LOW)           | remove/retype = HIGH |
-| VOLUME  | row count changes past `volume_rel_threshold` (default ±30%)      | banded by how far past threshold; collapse-to-empty = HIGH |
-| QUALITY | a field's null fraction rises ≥ `null_fraction_abs_threshold` (0.20) | banded by max delta |
+| Kind         | Fires when                                                        | Severity logic |
+|--------------|-------------------------------------------------------------------|----------------|
+| SCHEMA       | a source column is removed / retyped (added-only = LOW)           | remove/retype = HIGH |
+| VOLUME       | row count changes past `volume_rel_threshold` (default ±30%)      | banded by how far past threshold; collapse-to-empty = HIGH |
+| QUALITY      | a field's null fraction rises ≥ `null_fraction_abs_threshold` (0.20) | banded by max delta |
+| DISTRIBUTION | a field's distinct-value fraction *drops* ≥ `unique_fraction_drop_threshold` (0.30) | banded by max drop |
+
+**DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
+categorical/feature column collapsing onto one value (a stuck upstream default — the model
+keeps training on a feature that now carries no signal) and an id/join key losing uniqueness
+(a fan-out join duplicating rows). Only a *drop* pages — cardinality rising is usually benign
+variety, and flagging it would be noise on the serving path we work to keep quiet.
 
 **Serving escalation:** when the dataset feeds a deployed (IN_SERVICE) model — e.g. the
 Task #2 `churn_predictor` behind `churn_predictor_endpoint` — every finding is bumped one

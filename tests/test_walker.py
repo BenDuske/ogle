@@ -60,6 +60,7 @@ class FakeSchema:
 class FakeFieldProfile:
     fieldPath: str
     nullProportion: Optional[float]
+    uniqueProportion: Optional[float] = None
 
 
 @dataclass
@@ -236,6 +237,40 @@ def test_build_signature_skips_null_fractions_out_of_range():
     )
     sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
     assert set(sig.field_null_fractions) == {"ok"}
+
+
+def test_build_signature_folds_unique_fractions():
+    """uniqueProportion on a field profile lands in field_unique_fractions."""
+    profile = FakeProfile(
+        rowCount=1000,
+        fieldProfiles=[
+            FakeFieldProfile("id", 0.0, uniqueProportion=1.0),
+            FakeFieldProfile("region", 0.02, uniqueProportion=0.35),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_unique_fractions == {"id": pytest.approx(1.0), "region": pytest.approx(0.35)}
+
+
+def test_build_signature_unique_fraction_absent_yields_empty():
+    """Older profiles carry nullProportion but no uniqueProportion — degrade to empty."""
+    profile = FakeProfile(rowCount=10, fieldProfiles=[FakeFieldProfile("id", 0.0)])
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_null_fractions == {"id": pytest.approx(0.0)}
+    assert sig.field_unique_fractions == {}
+
+
+def test_build_signature_skips_unique_fractions_out_of_range():
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("ok", 0.0, uniqueProportion=0.5),
+            FakeFieldProfile("bad_high", 0.0, uniqueProportion=1.4),
+            FakeFieldProfile("bad_neg", 0.0, uniqueProportion=-0.2),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_unique_fractions) == {"ok"}
 
 
 def test_build_signature_skips_partial_schema_fields():

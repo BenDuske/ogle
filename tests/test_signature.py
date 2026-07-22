@@ -73,3 +73,42 @@ def test_row_count_and_nulls_optional():
     sig = build_signature("urn:x", [("id", "int")])
     assert sig.row_count is None
     assert sig.field_null_fractions == {}
+
+
+# ---- field_unique_fractions (distinct-value fraction, for distribution drift) ------
+
+def test_unique_fractions_round_trip():
+    sig = build_signature(
+        "urn:li:dataset:x",
+        [("id", "int"), ("region", "string")],
+        row_count=1000,
+        field_null_fractions={"region": 0.01},
+        field_unique_fractions={"id": 1.0, "region": 0.4},
+        computed_at="2026-07-22T00:00:00Z",
+    )
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+    assert restored.field_unique_fractions == {"id": 1.0, "region": 0.4}
+
+
+def test_unique_fractions_default_empty():
+    sig = build_signature("urn:x", [("id", "int")])
+    assert sig.field_unique_fractions == {}
+
+
+@pytest.mark.parametrize("bad", [-0.01, 1.5, 2.0])
+def test_out_of_range_unique_fraction_rejected(bad):
+    with pytest.raises(ValueError, match="unique fraction"):
+        build_signature("urn:x", field_unique_fractions={"f": bad})
+
+
+def test_from_dict_without_unique_fractions_is_backward_compatible():
+    """A baseline persisted before this field existed must still load (empty map)."""
+    legacy = {
+        "urn": "urn:x",
+        "schema_fields": [["id", "int"]],
+        "row_count": 5,
+        "field_null_fractions": {"id": 0.0},
+    }
+    restored = DatasetSignature.from_dict(legacy)
+    assert restored.field_unique_fractions == {}

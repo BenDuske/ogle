@@ -228,3 +228,88 @@ def test_build_config_escalation_toggle_changes_serving_severity():
         base, cur, cfg=build_score_config(escalate_when_serving=False), serving=True
     )
     assert on[0].severity.rank > off[0].severity.rank
+
+
+# ---- distribution drift (distinct-value / cardinality collapse) --------------------
+
+def test_cardinality_collapse_flagged():
+    """A categorical field stuck on ~one value (unique fraction collapses) is drift."""
+    base = _sig(field_unique_fractions={"region": 0.80})
+    cur = _sig(field_unique_fractions={"region": 0.05})
+    findings = score_dataset(base, cur)
+    dist = [f for f in findings if f.kind is DriftKind.DISTRIBUTION]
+    assert len(dist) == 1
+    assert "region" in dist[0].message
+    assert dist[0].details["fields"]["region"]["drop"] == pytest.approx(0.75)
+
+
+def test_key_uniqueness_loss_flagged():
+    """An id column losing uniqueness (1.0 -> 0.5, a fan-out join) is distribution drift."""
+    base = _sig(field_unique_fractions={"id": 1.0})
+    cur = _sig(field_unique_fractions={"id": 0.5})
+    dist = [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION]
+    assert len(dist) == 1
+
+
+def test_cardinality_rise_not_flagged():
+    """More variety is benign — only a *drop* pages."""
+    base = _sig(field_unique_fractions={"region": 0.10})
+    cur = _sig(field_unique_fractions={"region": 0.90})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION] == []
+
+
+def test_small_cardinality_drop_below_threshold_quiet():
+    base = _sig(field_unique_fractions={"region": 0.50})
+    cur = _sig(field_unique_fractions={"region": 0.30})  # drop 0.20 < 0.30 default
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION] == []
+
+
+def test_new_unique_fraction_without_baseline_skipped():
+    base = _sig(field_unique_fractions={})
+    cur = _sig(field_unique_fractions={"region": 0.01})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION] == []
+
+
+def test_distribution_severity_scales_with_drop():
+    """A bigger distinct-value collapse earns a higher severity band."""
+    base = _sig(field_unique_fractions={"region": 0.95})
+    mild = _sig(field_unique_fractions={"region": 0.55})   # drop 0.40 -> ~1.3x -> LOW
+    severe = _sig(field_unique_fractions={"region": 0.00})  # drop 0.95 -> >3x -> HIGH
+    low = [f for f in score_dataset(base, mild) if f.kind is DriftKind.DISTRIBUTION][0]
+    high = [f for f in score_dataset(base, severe) if f.kind is DriftKind.DISTRIBUTION][0]
+    assert high.severity.rank > low.severity.rank
+
+
+def test_distribution_escalates_on_serving_path():
+    base = _sig(field_unique_fractions={"region": 0.90})
+    cur = _sig(field_unique_fractions={"region": 0.40})  # drop 0.50 -> MEDIUM
+    off = [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION][0]
+    on = [
+        f for f in score_dataset(base, cur, serving=True)
+        if f.kind is DriftKind.DISTRIBUTION
+    ][0]
+    assert on.severity.rank > off.severity.rank
+    assert on.details.get("serving") is True
+
+
+def test_distribution_reports_worst_field_first():
+    base = _sig(field_unique_fractions={"region": 0.90, "tier": 0.90})
+    cur = _sig(field_unique_fractions={"region": 0.50, "tier": 0.10})  # tier drops more
+    dist = [f for f in score_dataset(base, cur) if f.kind is DriftKind.DISTRIBUTION][0]
+    assert dist.message.index("tier") < dist.message.index("region")
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, 1.5, 2])
+def test_build_config_rejects_out_of_range_unique_drop(bad):
+    with pytest.raises(ValueError, match=r"unique-drop threshold must be in \(0, 1\]"):
+        build_score_config(unique_drop_threshold=bad)
+
+
+def test_build_config_unique_drop_tuning_suppresses():
+    base = _sig(field_unique_fractions={"region": 0.90})
+    cur = _sig(field_unique_fractions={"region": 0.50})  # drop 0.40
+    assert [f for f in score_dataset(base, cur, cfg=build_score_config())
+            if f.kind is DriftKind.DISTRIBUTION]  # default (0.30) flags it
+    loose = build_score_config(unique_drop_threshold=0.5)
+    assert [f for f in score_dataset(base, cur, cfg=loose)
+            if f.kind is DriftKind.DISTRIBUTION] == []  # now quiet
