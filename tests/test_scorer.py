@@ -12,6 +12,7 @@ from ogle.scorer import (
     DriftKind,
     ScoreConfig,
     Severity,
+    _bh_qvalues,
     _effect_magnitude,
     _mean_shift_z,
     _prob_superiority,
@@ -636,6 +637,71 @@ def test_significance_absent_without_row_count():
     cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=None)
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "z_score" not in m.details["fields"]["amount"]
+
+
+# ---- Benjamini-Hochberg FDR correction across a mean finding's fields ----
+
+def test_bh_qvalues_leaves_a_single_test_unchanged():
+    """With one test there is nothing to correct: q == p (BH factor m/i = 1/1)."""
+    assert _bh_qvalues({"a": 0.02}) == pytest.approx({"a": 0.02})
+
+
+def test_bh_qvalues_empty_input():
+    """No p-values -> no q-values (defined only over a non-empty family)."""
+    assert _bh_qvalues({}) == {}
+
+
+def test_bh_qvalues_match_hand_computed_step_up():
+    """Three ordered p-values map to the textbook BH-adjusted values, monotone in p."""
+    # p sorted: a=0.01 (rank1), b=0.02 (rank2), c=0.03 (rank3), m=3
+    # raw: a=0.01*3/1=0.03, b=0.02*3/2=0.03, c=0.03*3/3=0.03 -> all pinned to 0.03 by step-up
+    q = _bh_qvalues({"a": 0.01, "c": 0.03, "b": 0.02})
+    assert q["a"] == pytest.approx(0.03)
+    assert q["b"] == pytest.approx(0.03)
+    assert q["c"] == pytest.approx(0.03)
+
+
+def test_bh_qvalues_push_a_lone_small_p_up_among_noise():
+    """One small p among many null fields is inflated toward 1 — the false-discovery guard."""
+    pvals = {"real": 0.01, **{f"noise{i}": 0.9 for i in range(19)}}  # 20 tests
+    q = _bh_qvalues(pvals)
+    assert q["real"] == pytest.approx(0.01 * 20 / 1)  # 0.2 — no longer "significant" at 0.05
+    assert all(q[f"noise{i}"] <= 1.0 for i in range(19))
+
+
+def test_bh_qvalues_are_monotone_and_bounded():
+    """q is monotone in the raw p ordering and never exceeds 1."""
+    q = _bh_qvalues({"a": 0.001, "b": 0.4, "c": 0.6, "d": 0.95})
+    assert q["a"] <= q["b"] <= q["c"] <= q["d"]
+    assert all(0.0 <= v <= 1.0 for v in q.values())
+
+
+def test_mean_finding_carries_qvalue_when_multiple_fields_significant():
+    """Two drifted numeric fields with p-values get FDR q-values and a q= annotation."""
+    base = _sig(
+        field_means={"amount": 100.0, "score": 50.0},
+        field_stdevs={"amount": 10.0, "score": 5.0},
+        row_count=10_000,
+    )
+    cur = _sig(
+        field_means={"amount": 140.0, "score": 70.0},
+        field_stdevs={"amount": 10.0, "score": 5.0},
+        row_count=10_000,
+    )
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "q_value" in m.details["fields"]["amount"]
+    assert "q_value" in m.details["fields"]["score"]
+    assert "q=" in m.message
+
+
+def test_mean_finding_omits_qvalue_for_a_single_field():
+    """A lone significant field carries a p but no q — with one test correction is a no-op."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "p_value" in m.details["fields"]["amount"]
+    assert "q_value" not in m.details["fields"]["amount"]
+    assert "q=" not in m.message
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])

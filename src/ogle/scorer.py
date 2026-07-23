@@ -394,6 +394,40 @@ def _two_sided_p(z: float) -> float:
     return math.erfc(abs(z) / math.sqrt(2.0))
 
 
+def _bh_qvalues(pvals: Dict[str, float]) -> Dict[str, float]:
+    """Benjamini-Hochberg FDR-adjusted q-values across a family of simultaneous p-values.
+
+    A two-sided p-value is honest for *one* field, but a mean finding tests every drifted
+    numeric field at once, and testing many fields multiplies the chance that pure noise trips
+    the threshold somewhere: 20 unchanged fields each tested at p<0.05 yield ~1 "significant"
+    hit by luck alone. Reading each raw p in isolation therefore over-pages exactly when a wide
+    table drifts. This applies the Benjamini-Hochberg step-up to the whole family, converting
+    each raw p into a q-value — the false-discovery rate you accept if you call everything at or
+    below it a real move.
+
+    Procedure: sort the m p-values ascending (ranks 1..m); the rank-i value gets p_(i) * m / i,
+    then enforce monotonicity from the largest rank downward (q_(i) = min(q_(i), q_(i+1))) and
+    clamp to [0, 1] so a q never exceeds 1. With one test q == p (nothing to correct); with many,
+    a lone small p among unchanged fields is pushed back toward 1 unless several fields move
+    together, while a genuinely broad drift keeps its low q. Pure enrichment keyed by the same
+    field paths — never gates a finding, only tells the operator which of several simultaneous
+    "significant" moves survive multiplicity. Returned q-values are in [0, 1].
+    """
+    if not pvals:
+        return {}
+    ordered = sorted(pvals.items(), key=lambda kv: kv[1])
+    m = len(ordered)
+    q: Dict[str, float] = {}
+    # Walk from the largest p (rank m) down to the smallest (rank 1), carrying the running
+    # minimum so the adjusted values stay monotone in the raw-p ordering (BH step-up).
+    running_min = 1.0
+    for rank in range(m, 0, -1):
+        path, p = ordered[rank - 1]
+        running_min = min(running_min, min(p * m / rank, 1.0))
+        q[path] = running_min
+    return q
+
+
 def score_schema(baseline: DatasetSignature, current: DatasetSignature) -> Optional[DriftFinding]:
     if baseline.schema_hash == current.schema_hash:
         return None
@@ -608,6 +642,16 @@ def score_mean(
     if not worsened:
         return None
 
+    # Multiple-comparison control: a mean finding tests every drifted numeric field at once, so
+    # a raw per-field p over-states significance on a wide table. When two or more fields carry
+    # a p-value, adjust the family with Benjamini-Hochberg so each entry also reports the
+    # false-discovery rate at which it would be called real. A single test needs no correction
+    # (q == p), so it is left alone to keep the annotation clean.
+    pvals = {p: e["p_value"] for p, e in worsened.items() if "p_value" in e}
+    if len(pvals) >= 2:
+        for p, qv in _bh_qvalues(pvals).items():
+            worsened[p]["q_value"] = qv
+
     max_shift = max(v["rel_shift"] for v in worsened.values())
     severity = _severity_from_ratio(max_shift, cfg.mean_rel_threshold)
     fields = sorted(worsened, key=lambda p: worsened[p]["rel_shift"], reverse=True)
@@ -624,6 +668,9 @@ def score_mean(
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"
+            qval = worsened[p].get("q_value")
+            if qval is not None:
+                base += f", q={qval:.1g}"
         return base + ")"
 
     return DriftFinding(

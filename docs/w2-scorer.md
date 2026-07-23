@@ -39,8 +39,20 @@ CLES) — the chance a value drawn from the new distribution outranks one drawn 
 (`P(new>old) = 0.5*(1 + erf(d/2))`, computed from `d` alone). It turns the abstract `d=+0.1
 negligible` into `P(new>old)=53%` (a coin flip — likely a false page) and `d=+4.0 large` into
 `P(new>old)=100%` (a near-certain shift), so an operator triages without carrying Cohen's
-thresholds in their head. Purely enrichment: it labels the finding, never gates it (a field
-without a stdev is still flagged, just without a `d`).
+thresholds in their head. Because `d` and its CLES are both blind to *how much data* backs each
+mean, a flagged move also carries a **Welch two-sample z-test** when both stdevs and per-field
+sample sizes are known: `z = (mean_cur − mean_base) / sqrt(s_b²/n_b + s_c²/n_c)`, with
+per-field `n` = the non-null row count (row count net of the field's null fraction, since nulls
+back no measurement), rendered as a two-sided **p-value** (`p = erfc(|z|/√2)`). Two identical
++40% moves then triage apart — 10k rows → `p≈0` (real), a handful of rows → a large `p`
+(sampling noise). Finally, since a mean finding tests *every* drifted numeric field at once,
+raw per-field p over-states significance on a wide table (20 unchanged fields at p<0.05 → ~1
+spurious hit); when two or more fields carry a p-value they are corrected together with a
+**Benjamini-Hochberg FDR q-value** (`q=…` beside `p=…`) — the false-discovery rate at which
+each would be called real — so a lone small p among noise is pushed back toward 1 while a broad
+genuine drift keeps its low q. Purely enrichment: it labels the finding, never gates it (a
+field without a stdev is still flagged, just without a `d`; a single significant field carries a
+`p` but no `q`, since with one test the correction is a no-op).
 
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model
