@@ -361,6 +361,47 @@ def _mean_shift_z(
     return (cur_mean - base_mean) / se
 
 
+def _spread_shift_z(
+    base_stdev: float,
+    cur_stdev: float,
+    n_base: Optional[int],
+    n_cur: Optional[int],
+    zero_floor: float,
+) -> Optional[float]:
+    """Log-SD two-sample z-statistic — the spread rule's answer to "is this move real?".
+
+    The stdev rule fires on a relative-spread shift the same way the mean rule fires on a
+    relative-mean shift, and it was just as blind to sample size: a spread that "halved" on a
+    handful of rows is sampling noise, while the same halving on a million rows is a certainty.
+    This is the scale-side twin of `_mean_shift_z`. The right large-sample test for a *ratio* of
+    standard deviations is not a difference-of-SDs z — the SD estimator's own spread grows with
+    its magnitude, so a raw difference is heteroscedastic. Working in log space fixes that: for a
+    sample of size n, ln(s) is approximately normal with variance 1 / (2(n-1)) regardless of the
+    true scale (delta method on the chi-square of the sample variance). So the log-ratio has a
+    clean standard error and
+
+        SE = sqrt( 1 / (2(n_base - 1)) + 1 / (2(n_cur - 1)) )
+        z  = ( ln(s_current) - ln(s_base) ) / SE
+
+    Signed like the shift: positive means the spread grew, negative means it collapsed. Purely
+    enrichment — it never gates the finding (that stays the relative-shift rule) — but where the
+    relative shift only says the spread moved, z says whether the move is distinguishable from
+    sampling noise, and feeds the same `_two_sided_p` / BH machinery the mean rule already uses.
+
+    Returns None when either stdev is at or below `zero_floor` (log undefined at ~0, and the
+    variance-collapse-to-constant case already surfaces via the range/stdev magnitude rules), or
+    when a sample size is missing or below 2 (one row carries no dispersion to speak of).
+    """
+    if base_stdev <= zero_floor or cur_stdev <= zero_floor:
+        return None
+    if n_base is None or n_cur is None or n_base < 2 or n_cur < 2:
+        return None
+    se = (1.0 / (2 * (n_base - 1)) + 1.0 / (2 * (n_cur - 1))) ** 0.5
+    if se < zero_floor:
+        return None
+    return (math.log(cur_stdev) - math.log(base_stdev)) / se
+
+
 def _effective_n(sig: DatasetSignature, path: str) -> Optional[int]:
     """Rows that actually back a field's mean: total row count net of its null fraction.
 
@@ -708,30 +749,63 @@ def score_stdev(
             continue
         rel_shift = abs(cur_stdev - base_stdev) / abs(base_stdev)
         if rel_shift >= cfg.stdev_rel_threshold:
-            worsened[path] = {
+            entry = {
                 "baseline": base_stdev,
                 "current": cur_stdev,
                 "rel_shift": rel_shift,
             }
+            # Significance: does the spread move survive the sample size, or is it noise? Same
+            # effective per-field n as the mean rule (rows net of the null fraction), scored in
+            # log space so a ratio of stdevs gets an honest standard error. Purely enrichment — a
+            # field without a usable n or with a ~0 stdev is still flagged on the relative rule,
+            # it just carries no z.
+            z = _spread_shift_z(
+                base_stdev,
+                cur_stdev,
+                _effective_n(baseline, path),
+                _effective_n(current, path),
+                cfg.stdev_zero_floor,
+            )
+            if z is not None:
+                entry["z_score"] = z
+                entry["p_value"] = _two_sided_p(z)
+            worsened[path] = entry
 
     if not worsened:
         return None
 
+    # Multiple-comparison control, symmetric to the mean rule: a stdev finding tests every drifted
+    # numeric field at once, so a raw per-field p over-states significance on a wide table. When two
+    # or more fields carry a p-value, adjust the family with Benjamini-Hochberg so each entry also
+    # reports the false-discovery rate at which it would be called real. A single test needs no
+    # correction (q == p), so it is left alone to keep the annotation clean.
+    pvals = {p: e["p_value"] for p, e in worsened.items() if "p_value" in e}
+    if len(pvals) >= 2:
+        for p, qv in _bh_qvalues(pvals).items():
+            worsened[p]["q_value"] = qv
+
     max_shift = max(v["rel_shift"] for v in worsened.values())
     severity = _severity_from_ratio(max_shift, cfg.stdev_rel_threshold)
     fields = sorted(worsened, key=lambda p: worsened[p]["rel_shift"], reverse=True)
+
+    def _annotate(p: str) -> str:
+        base = (
+            f"{p} (stdev {worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
+            f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%}"
+        )
+        pval = worsened[p].get("p_value")
+        if pval is not None:
+            base += f", p={pval:.1g}"
+            qval = worsened[p].get("q_value")
+            if qval is not None:
+                base += f", q={qval:.1g}"
+        return base + ")"
+
     return DriftFinding(
         urn=current.urn,
         kind=DriftKind.STDEV,
         severity=severity,
-        message=(
-            "numeric spread shifted on "
-            + ", ".join(
-                f"{p} (stdev {worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
-                f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%})"
-                for p in fields
-            )
-        ),
+        message="numeric spread shifted on " + ", ".join(_annotate(p) for p in fields),
         details={"fields": worsened},
     )
 

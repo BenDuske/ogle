@@ -16,6 +16,7 @@ from ogle.scorer import (
     _effect_magnitude,
     _mean_shift_z,
     _prob_superiority,
+    _spread_shift_z,
     _two_sided_p,
     build_score_config,
     score_dataset,
@@ -790,6 +791,100 @@ def test_stdev_is_independent_of_mean():
     kinds = {f.kind for f in score_dataset(base, cur)}
     assert DriftKind.STDEV in kinds
     assert DriftKind.MEAN not in kinds
+
+
+# ---- stdev significance: log-SD two-sample z-test ----
+
+def test_spread_shift_z_sign_follows_direction():
+    """Spread growing -> positive z; spread collapsing -> negative z (log-ratio sign)."""
+    grew = _spread_shift_z(10.0, 20.0, 10_000, 10_000, 1e-9)
+    shrank = _spread_shift_z(20.0, 10.0, 10_000, 10_000, 1e-9)
+    assert grew is not None and grew > 0
+    assert shrank is not None and shrank < 0
+    assert grew == pytest.approx(-shrank)  # exact ratio symmetry in log space
+
+
+def test_spread_shift_z_matches_closed_form():
+    """z = ln(s_cur/s_base) / sqrt(1/(2(n_b-1)) + 1/(2(n_c-1)))."""
+    import math as _m
+    z = _spread_shift_z(10.0, 15.0, 5_000, 8_000, 1e-9)
+    se = (1.0 / (2 * 4_999) + 1.0 / (2 * 7_999)) ** 0.5
+    assert z == pytest.approx(_m.log(15.0 / 10.0) / se)
+
+
+def test_spread_shift_z_grows_with_sample_size():
+    """The same spread ratio on more rows is more distinguishable from noise -> larger |z|."""
+    small = _spread_shift_z(10.0, 15.0, 100, 100, 1e-9)
+    big = _spread_shift_z(10.0, 15.0, 1_000_000, 1_000_000, 1e-9)
+    assert abs(big) > abs(small)
+
+
+def test_spread_shift_z_none_for_zero_stdev():
+    """A stdev at ~0 -> log undefined -> no z (the collapse-to-constant case is range/stdev's)."""
+    assert _spread_shift_z(0.0, 10.0, 10_000, 10_000, 1e-9) is None
+    assert _spread_shift_z(10.0, 0.0, 10_000, 10_000, 1e-9) is None
+
+
+def test_spread_shift_z_none_for_degenerate_or_missing_sample():
+    """One-row (or unknown) samples carry no dispersion -> z undefined."""
+    assert _spread_shift_z(10.0, 15.0, 1, 10_000, 1e-9) is None
+    assert _spread_shift_z(10.0, 15.0, None, 10_000, 1e-9) is None
+
+
+def test_stdev_finding_carries_significance_when_samples_known():
+    """A flagged spread move with row counts reports z + p and annotates p in the message."""
+    base = _sig(field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_stdevs={"amount": 20.0}, row_count=10_000)  # +100% > 25%
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["amount"]
+    assert entry["z_score"] == pytest.approx(_spread_shift_z(10.0, 20.0, 10_000, 10_000, 1e-9))
+    assert entry["p_value"] == pytest.approx(0.0, abs=1e-6)  # huge n -> vanishing p
+    assert "p=" in s.message
+
+
+def test_stdev_significance_reflects_non_null_sample_size():
+    """A heavily-null field backs its spread with fewer rows -> a smaller |z| than a full one."""
+    base_full = _sig(field_stdevs={"amount": 10.0}, row_count=10_000)
+    full = _sig(field_stdevs={"amount": 20.0}, row_count=10_000)
+    base_sparse = _sig(
+        field_stdevs={"amount": 10.0}, row_count=10_000,
+        field_null_fractions={"amount": 0.99},  # ~100 rows carry a value
+    )
+    sparse = _sig(
+        field_stdevs={"amount": 20.0}, row_count=10_000,
+        field_null_fractions={"amount": 0.99},
+    )
+    z_full = [f for f in score_dataset(base_full, full) if f.kind is DriftKind.STDEV][0].details["fields"]["amount"]["z_score"]
+    z_sparse = [f for f in score_dataset(base_sparse, sparse) if f.kind is DriftKind.STDEV][0].details["fields"]["amount"]["z_score"]
+    assert abs(z_sparse) < abs(z_full)
+
+
+def test_stdev_significance_absent_without_row_count():
+    """No row count -> no sample size -> no z or p, but the spread move still flags."""
+    base = _sig(field_stdevs={"amount": 10.0}, row_count=None)
+    cur = _sig(field_stdevs={"amount": 20.0}, row_count=None)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    assert "z_score" not in s.details["fields"]["amount"]
+    assert "p=" not in s.message
+
+
+def test_stdev_finding_carries_bh_qvalues_across_fields():
+    """Two+ drifted fields with p-values get BH q-values, symmetric to the mean rule."""
+    base = _sig(field_stdevs={"amount": 10.0, "score": 10.0}, row_count=10_000)
+    cur = _sig(field_stdevs={"amount": 20.0, "score": 18.0}, row_count=10_000)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    assert "q_value" in s.details["fields"]["amount"]
+    assert "q_value" in s.details["fields"]["score"]
+    assert "q=" in s.message
+
+
+def test_stdev_single_field_has_no_qvalue():
+    """One drifted field needs no multiplicity correction — q is left off (q == p)."""
+    base = _sig(field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_stdevs={"amount": 20.0}, row_count=10_000)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    assert "q_value" not in s.details["fields"]["amount"]
+    assert "q=" not in s.message
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])
