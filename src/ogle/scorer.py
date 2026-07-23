@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .signature import DatasetSignature, parse_iso_epoch
 
@@ -359,6 +359,60 @@ def _mean_shift_z(
     if se < zero_floor:
         return None
     return (cur_mean - base_mean) / se
+
+
+# Two-sided 95% normal critical value (z_{0.975}). Used to widen the mean-difference
+# standard error into a confidence interval. Hardcoded to the conventional 95% level —
+# the same "widely-cited default" spirit as Cohen's effect-size bands — so the CI needs
+# no inverse-normal (the stdlib carries the forward erf/erfc but no ppf).
+_Z_CRIT_95 = 1.959963984540054
+
+
+def _mean_shift_ci(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    n_base: Optional[int],
+    n_cur: Optional[int],
+    zero_floor: float,
+) -> Optional[Tuple[float, float]]:
+    """95% confidence interval for the mean difference, in the field's *original units*.
+
+    The z-statistic and its p-value answer "is the move distinguishable from noise?" and
+    Cohen's d answers "how big is it in pooled sigma?" — but both discard the one quantity
+    an operator triages a numeric drift with: how far the mean actually moved, in the field's
+    own units, and how tightly that move is pinned down. A page that says "amount rose by 40,
+    95% CI [31, 49]" is immediately actionable — the shift is real *and* its magnitude is
+    bounded away from trivial; "[-2, 82]" says the same point estimate can't even be signed.
+
+    Built on the same Welch standard error `_mean_shift_z` uses, so it is defined under exactly
+    the same conditions and stays honest when one side is noisier than the other:
+
+        SE   = sqrt(s_base^2 / n_base + s_current^2 / n_current)      (Welch — unequal variances)
+        diff = mean_cur - mean_base
+        CI   = diff +/- z_{0.975} * SE            (z_{0.975} = 1.959964, the textbook 5% cutoff)
+
+    Signed and ordered (lo <= hi), centered on the raw move. A normal (z, not t) interval to
+    match `_mean_shift_z`'s large-sample assumption — the ogle-scale row counts that back a
+    field's mean put the t correction well inside rounding. The interval excludes 0 exactly
+    when the two-sided p < 0.05, so it is the same significance verdict expressed as a *range*
+    instead of a single number. Purely enrichment — it never gates the finding.
+
+    Returns None under the same guards as the z-statistic: either stdev missing (no SE to build),
+    a sample size missing or below 2 (no sampling spread), or SE below `zero_floor` (both samples
+    ~constant — the interval collapses and the constant-goes-variable case surfaces elsewhere).
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    if n_base is None or n_cur is None or n_base < 2 or n_cur < 2:
+        return None
+    se = (base_stdev ** 2 / n_base + cur_stdev ** 2 / n_cur) ** 0.5
+    if se < zero_floor:
+        return None
+    diff = cur_mean - base_mean
+    half = _Z_CRIT_95 * se
+    return (diff - half, diff + half)
 
 
 def _spread_shift_z(
@@ -747,6 +801,20 @@ def score_mean(
             if z is not None:
                 entry["z_score"] = z
                 entry["p_value"] = _two_sided_p(z)
+            # Bound the move: the 95% CI for the mean difference in the field's own units, so
+            # the page carries not just "significant" but *how far* it plausibly moved. Same
+            # Welch SE as the z-test, so it appears under exactly the same conditions.
+            ci = _mean_shift_ci(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                _effective_n(baseline, path),
+                _effective_n(current, path),
+                cfg.stdev_zero_floor,
+            )
+            if ci is not None:
+                entry["ci_low"], entry["ci_high"] = ci
             worsened[path] = entry
 
     if not worsened:
@@ -781,6 +849,9 @@ def score_mean(
             qval = worsened[p].get("q_value")
             if qval is not None:
                 base += f", q={qval:.1g}"
+        lo = worsened[p].get("ci_low")
+        if lo is not None:
+            base += f", 95% CI [{lo:+g}, {worsened[p]['ci_high']:+g}]"
         return base + ")"
 
     return DriftFinding(

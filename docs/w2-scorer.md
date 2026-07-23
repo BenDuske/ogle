@@ -45,7 +45,14 @@ sample sizes are known: `z = (mean_cur − mean_base) / sqrt(s_b²/n_b + s_c²/n
 per-field `n` = the non-null row count (row count net of the field's null fraction, since nulls
 back no measurement), rendered as a two-sided **p-value** (`p = erfc(|z|/√2)`). Two identical
 +40% moves then triage apart — 10k rows → `p≈0` (real), a handful of rows → a large `p`
-(sampling noise). Finally, since a mean finding tests *every* drifted numeric field at once,
+(sampling noise). Since the p-value collapses that whole picture to one number, the same Welch
+standard error is also widened into a **95% confidence interval for the mean difference in the
+field's own units** (`diff ± 1.959964·SE`, rendered `95% CI [+39.7, +40.3]`) — the bound an
+operator actually triages a numeric move with: not just *significant* but *how far it plausibly
+moved*. The interval excludes zero exactly when `p < 0.05`, so it is the same verdict expressed
+as a range instead of a scalar — `[+31, +49]` says the shift is real and its size is pinned away
+from trivial, while `[−2, +82]` says the same point estimate can't even be signed. Finally,
+since a mean finding tests *every* drifted numeric field at once,
 raw per-field p over-states significance on a wide table (20 unchanged fields at p<0.05 → ~1
 spurious hit); when two or more fields carry a p-value they are corrected together with a
 **Benjamini-Hochberg FDR q-value** (`q=…` beside `p=…`) — the false-discovery rate at which

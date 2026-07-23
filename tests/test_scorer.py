@@ -15,6 +15,7 @@ from ogle.scorer import (
     _bh_qvalues,
     _breach_sigma,
     _effect_magnitude,
+    _mean_shift_ci,
     _mean_shift_z,
     _null_shift_z,
     _prob_superiority,
@@ -640,6 +641,81 @@ def test_significance_absent_without_row_count():
     cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=None)
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "z_score" not in m.details["fields"]["amount"]
+
+
+# ---- 95% confidence interval for the mean difference (original units) ----
+
+def test_mean_shift_ci_brackets_the_raw_move():
+    """The interval is centered on the raw mean difference, +/- z_0.975 * Welch SE."""
+    # base/cur 100->140, sd 10 both sides, n=10k each. SE=sqrt(0.02); half=1.959964*SE.
+    lo, hi = _mean_shift_ci(100.0, 140.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    se = (100.0 / 10_000 + 100.0 / 10_000) ** 0.5
+    half = 1.959963984540054 * se
+    assert lo == pytest.approx(40.0 - half)
+    assert hi == pytest.approx(40.0 + half)
+    assert lo < hi
+
+
+def test_mean_shift_ci_is_signed_for_a_fall():
+    """A falling mean yields a negative-centered interval, mirroring the move."""
+    lo, hi = _mean_shift_ci(100.0, 60.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    assert (lo + hi) / 2 == pytest.approx(-40.0)
+
+
+def test_mean_shift_ci_widens_with_smaller_samples():
+    """Fewer rows -> a larger standard error -> a wider (less pinned-down) interval."""
+    big_lo, big_hi = _mean_shift_ci(100.0, 140.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    small_lo, small_hi = _mean_shift_ci(100.0, 140.0, 10.0, 10.0, 4, 4, 1e-9)
+    assert (small_hi - small_lo) > (big_hi - big_lo)
+
+
+def test_mean_shift_ci_excludes_zero_exactly_when_significant():
+    """CI excludes 0 iff two-sided p < 0.05 — the same verdict as a range, not a number."""
+    # z just past 1.96 (significant): p<0.05 and the interval must clear 0.
+    lo, hi = _mean_shift_ci(100.0, 100.0 + 2.1 * (0.02 ** 0.5), 10.0, 10.0, 10_000, 10_000, 1e-9)
+    assert lo > 0
+    # z just under 1.96 (not significant): the interval must straddle 0.
+    lo2, hi2 = _mean_shift_ci(100.0, 100.0 + 1.8 * (0.02 ** 0.5), 10.0, 10.0, 10_000, 10_000, 1e-9)
+    assert lo2 < 0 < hi2
+
+
+def test_mean_shift_ci_none_without_stdev():
+    """No spread on a side -> no standard error -> no interval."""
+    assert _mean_shift_ci(100.0, 140.0, None, 10.0, 10_000, 10_000, 1e-9) is None
+
+
+def test_mean_shift_ci_none_without_sample_size():
+    """No row count -> no denominator -> no interval (defined only when n is known)."""
+    assert _mean_shift_ci(100.0, 140.0, 10.0, 10.0, None, 10_000, 1e-9) is None
+
+
+def test_mean_shift_ci_none_for_degenerate_sample():
+    """A one-row sample has no sampling spread -> the interval is undefined."""
+    assert _mean_shift_ci(100.0, 140.0, 10.0, 10.0, 1, 10_000, 1e-9) is None
+
+
+def test_mean_shift_ci_none_when_standard_error_vanishes():
+    """Both samples ~constant -> SE below the floor -> no interval (not a zero-width point)."""
+    assert _mean_shift_ci(100.0, 140.0, 0.0, 0.0, 10_000, 10_000, 1e-9) is None
+
+
+def test_mean_finding_carries_confidence_interval_when_samples_known():
+    """A flagged move with spread + row counts reports ci_low/ci_high and annotates the CI."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["ci_low"] < 40.0 < entry["ci_high"]
+    assert "95% CI" in m.message
+
+
+def test_confidence_interval_absent_without_stdev():
+    """No spread -> no interval fields, but the move still flags on the relative rule."""
+    base = _sig(field_means={"amount": 100.0}, row_count=10_000)
+    cur = _sig(field_means={"amount": 140.0}, row_count=10_000)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "ci_low" not in m.details["fields"]["amount"]
+    assert "95% CI" not in m.message
 
 
 # ---- Benjamini-Hochberg FDR correction across a mean finding's fields ----
