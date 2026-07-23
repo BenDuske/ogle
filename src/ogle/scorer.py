@@ -235,6 +235,40 @@ def _bump(sev: Severity) -> Severity:
     return {Severity.LOW: Severity.MEDIUM, Severity.MEDIUM: Severity.HIGH, Severity.HIGH: Severity.HIGH}[sev]
 
 
+def _cohens_d(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    zero_floor: float,
+) -> Optional[float]:
+    """Standardized mean difference (Cohen's d) — the first two-sample signal Ogle takes.
+
+    The relative-shift rule that gates mean drift answers "how far did the center move,
+    as a fraction of itself?" It is blind to the data's own spread: a 25% mean move on a
+    razor-tight feature is a screaming covariate shift, while the same 25% on a fat-tailed
+    field can be ordinary week-to-week noise. Cohen's d rescales the raw move by the pooled
+    spread of the two samples, so the magnitude is expressed in standard deviations — the
+    language of statistical significance, and the first concrete step toward the two-sample
+    tests on Ogle's roadmap.
+
+        d = (mean_cur - mean_base) / sqrt((s_base^2 + s_current^2) / 2)
+
+    Signed: positive means the mean rose, negative means it fell, mirroring the raw move.
+    Purely enrichment — it never gates the finding (that stays the relative-shift rule, so
+    a field with no stdev is still flagged); it only annotates *how many sigma* the move is
+    so a human can triage. Returns None when either side lacks a stdev (nothing to pool) or
+    the pooled spread is below `zero_floor` (both samples ~constant — a standardized move is
+    undefined there, and the constant-goes-variable case surfaces via stdev/range drift).
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    pooled = ((base_stdev ** 2 + cur_stdev ** 2) / 2.0) ** 0.5
+    if pooled < zero_floor:
+        return None
+    return (cur_mean - base_mean) / pooled
+
+
 def score_schema(baseline: DatasetSignature, current: DatasetSignature) -> Optional[DriftFinding]:
     if baseline.schema_hash == current.schema_hash:
         return None
@@ -408,11 +442,24 @@ def score_mean(
             continue
         rel_shift = abs(cur_mean - base_mean) / abs(base_mean)
         if rel_shift >= cfg.mean_rel_threshold:
-            worsened[path] = {
+            entry = {
                 "baseline": base_mean,
                 "current": cur_mean,
                 "rel_shift": rel_shift,
             }
+            # Enrich with the standardized effect size when both sides carry a stdev — how
+            # many pooled sigma the mean moved. Never gates the finding; a field without a
+            # stdev is still flagged on the relative rule, it just carries no effect size.
+            effect = _cohens_d(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                cfg.stdev_zero_floor,
+            )
+            if effect is not None:
+                entry["effect_size"] = effect
+            worsened[path] = entry
 
     if not worsened:
         return None
@@ -420,18 +467,22 @@ def score_mean(
     max_shift = max(v["rel_shift"] for v in worsened.values())
     severity = _severity_from_ratio(max_shift, cfg.mean_rel_threshold)
     fields = sorted(worsened, key=lambda p: worsened[p]["rel_shift"], reverse=True)
+
+    def _annotate(p: str) -> str:
+        base = (
+            f"{p} ({worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
+            f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%}"
+        )
+        eff = worsened[p].get("effect_size")
+        if eff is not None:
+            base += f", d={eff:+.1f}"
+        return base + ")"
+
     return DriftFinding(
         urn=current.urn,
         kind=DriftKind.MEAN,
         severity=severity,
-        message=(
-            "numeric mean shifted on "
-            + ", ".join(
-                f"{p} ({worsened[p]['baseline']:g}->{worsened[p]['current']:g}, "
-                f"{(worsened[p]['current'] - worsened[p]['baseline']) / abs(worsened[p]['baseline']):+.0%})"
-                for p in fields
-            )
-        ),
+        message="numeric mean shifted on " + ", ".join(_annotate(p) for p in fields),
         details={"fields": worsened},
     )
 

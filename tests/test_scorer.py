@@ -386,6 +386,51 @@ def test_negative_mean_shift_uses_magnitude():
     assert m.details["fields"]["pnl"]["rel_shift"] == pytest.approx(2.0)
 
 
+# ---- mean drift: Cohen's d effect-size enrichment (first two-sample signal) ---------
+
+def test_mean_finding_carries_effect_size_when_stdevs_present():
+    """A flagged mean move is annotated with pooled sigma (Cohen's d) when spread is known."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # +40 raw
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    # pooled sd = sqrt((100+100)/2) = 10; d = (140-100)/10 = +4.0
+    assert m.details["fields"]["amount"]["effect_size"] == pytest.approx(4.0)
+    assert "d=+4.0" in m.message
+
+
+def test_effect_size_is_signed_for_a_falling_mean():
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 20.0})
+    cur = _sig(field_means={"amount": 60.0}, field_stdevs={"amount": 20.0})  # -40 raw
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    # pooled sd = 20; d = (60-100)/20 = -2.0
+    assert m.details["fields"]["amount"]["effect_size"] == pytest.approx(-2.0)
+
+
+def test_effect_size_pools_unequal_stdevs():
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 30.0})
+    cur = _sig(field_means={"amount": 150.0}, field_stdevs={"amount": 40.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    # pooled sd = sqrt((900+1600)/2) = sqrt(1250) ~= 35.355; d = 50/35.355 ~= 1.414
+    assert m.details["fields"]["amount"]["effect_size"] == pytest.approx(50.0 / (1250.0 ** 0.5))
+
+
+def test_mean_finding_omits_effect_size_without_stdev():
+    """No stdev on a side -> nothing to pool -> the move is still flagged, just no d."""
+    base = _sig(field_means={"amount": 100.0})  # no stdevs
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "effect_size" not in m.details["fields"]["amount"]
+    assert "d=" not in m.message
+
+
+def test_effect_size_skipped_when_pooled_spread_is_zero():
+    """Both samples ~constant -> a standardized move is undefined -> no d, still flagged."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 0.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 0.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "effect_size" not in m.details["fields"]["amount"]
+
+
 @pytest.mark.parametrize("bad", [0, -0.1, -1])
 def test_build_config_rejects_nonpositive_mean_threshold(bad):
     with pytest.raises(ValueError, match=r"mean threshold must be > 0"):
