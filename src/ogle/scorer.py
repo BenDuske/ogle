@@ -320,6 +320,80 @@ def _prob_superiority(d: float) -> float:
     return 0.5 * (1.0 + math.erf(d / 2.0))
 
 
+def _mean_shift_z(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    n_base: Optional[int],
+    n_cur: Optional[int],
+    zero_floor: float,
+) -> Optional[float]:
+    """Welch two-sample z-statistic — the first mean-drift signal that weighs *sample size*.
+
+    Cohen's d and its CLES readout answer "how big is the move relative to the spread?" but
+    both are blind to how much data backs each side: they read identically whether each mean
+    came from 5 rows or 5 million. That is exactly the question a page needs answered, though —
+    a half-sigma shift measured on a handful of rows is sampling noise, while the same shift on
+    a million rows is a certainty. This is the first signal that closes that gap: it scales the
+    raw mean move by the *standard error of that difference*, which shrinks as the samples grow.
+
+        SE = sqrt(s_base^2 / n_base + s_current^2 / n_current)      (Welch — unequal variances)
+        z  = (mean_cur - mean_base) / SE
+
+    Welch's form pools the two sampling variances without assuming the spreads are equal, so it
+    stays honest when one side is noisier than the other. Signed like d: positive means the mean
+    rose. Purely enrichment — it never gates the finding (that stays the relative-shift rule) —
+    but where d only says the move is large, z says whether it is *distinguishable from noise*.
+
+    Returns None when either stdev is missing (nothing to build a standard error from), when a
+    sample size is missing or below 2 (a one-row sample has no sampling spread to speak of), or
+    when the standard error is below `zero_floor` (both samples ~constant — z is undefined there,
+    and the constant-goes-variable case already surfaces via stdev/range drift).
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    if n_base is None or n_cur is None or n_base < 2 or n_cur < 2:
+        return None
+    se = (base_stdev ** 2 / n_base + cur_stdev ** 2 / n_cur) ** 0.5
+    if se < zero_floor:
+        return None
+    return (cur_mean - base_mean) / se
+
+
+def _effective_n(sig: DatasetSignature, path: str) -> Optional[int]:
+    """Rows that actually back a field's mean: total row count net of its null fraction.
+
+    A field's sample size for a two-sample test is not the table's row count — it is the count
+    of *non-null* values, since nulls carry no measurement. A 10k-row table where a field is 40%
+    null backs that field's mean with only ~6k samples, and the standard error should reflect
+    that. Returns None when the row count is unknown (no denominator to scale); a missing null
+    fraction is treated as fully populated (0% null), matching how the signature omits it.
+    """
+    if sig.row_count is None:
+        return None
+    null_frac = sig.field_null_fractions.get(path, 0.0)
+    return int(round(sig.row_count * (1.0 - null_frac)))
+
+
+def _two_sided_p(z: float) -> float:
+    """Two-sided normal p-value for a z-statistic: P(|Z| >= |z|) under the null of no shift.
+
+    The z-score from `_mean_shift_z` grows without bound as samples pile up, so a bare "z=41"
+    is as opaque as a bare d. This maps it onto the one number an operator reads cold: the
+    probability of seeing a mean move at least this extreme *if nothing actually changed*. Small
+    p (say < 0.01) means the shift is very unlikely to be sampling luck — a real move worth a
+    page; a p near 1 means the relative rule fired but the data can't distinguish it from noise.
+
+        p = P(|Z| >= |z|) = erfc(|z| / sqrt(2))
+
+    Sign-independent (a rise and an equal-magnitude fall are equally surprising under the null),
+    monot, and in [0, 1]: z=0 -> 1.0 (no evidence of a shift), |z|=1.96 -> ~0.05, big |z| -> ~0.
+    Pure labeling computed from z alone — defined exactly when the z-statistic is.
+    """
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
 def score_schema(baseline: DatasetSignature, current: DatasetSignature) -> Optional[DriftFinding]:
     if baseline.schema_hash == current.schema_hash:
         return None
@@ -514,6 +588,21 @@ def score_mean(
                 # Same normal approximation d already carries, expressed as the one number an
                 # operator reads cold: the chance a new row outranks an old one.
                 entry["prob_superiority"] = _prob_superiority(effect)
+            # Significance: does the move survive the sample size, or is it noise? Effective
+            # per-field n = rows that actually carry a value (row_count net of the null
+            # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
+            z = _mean_shift_z(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                _effective_n(baseline, path),
+                _effective_n(current, path),
+                cfg.stdev_zero_floor,
+            )
+            if z is not None:
+                entry["z_score"] = z
+                entry["p_value"] = _two_sided_p(z)
             worsened[path] = entry
 
     if not worsened:
@@ -532,6 +621,9 @@ def score_mean(
         if eff is not None:
             base += f", d={eff:+.1f} {worsened[p]['effect_magnitude']}"
             base += f", P(new>old)={worsened[p]['prob_superiority']:.0%}"
+        pval = worsened[p].get("p_value")
+        if pval is not None:
+            base += f", p={pval:.1g}"
         return base + ")"
 
     return DriftFinding(

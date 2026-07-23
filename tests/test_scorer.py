@@ -13,7 +13,9 @@ from ogle.scorer import (
     ScoreConfig,
     Severity,
     _effect_magnitude,
+    _mean_shift_z,
     _prob_superiority,
+    _two_sided_p,
     build_score_config,
     score_dataset,
 )
@@ -522,6 +524,118 @@ def test_prob_superiority_absent_without_effect_size():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "prob_superiority" not in m.details["fields"]["amount"]
     assert "P(new>old)" not in m.message
+
+
+# ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------
+
+def test_mean_shift_z_uses_sample_size():
+    """The z-statistic scales the raw move by the standard error of the difference."""
+    # base/cur mean 100->140, sd 10 both sides, n = 10k rows each.
+    # SE = sqrt(100/10000 + 100/10000) = sqrt(0.02); z = 40 / sqrt(0.02).
+    z = _mean_shift_z(100.0, 140.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    assert z == pytest.approx(40.0 / (0.02 ** 0.5))
+
+
+def test_mean_shift_z_is_signed_for_a_fall():
+    """A falling mean yields a negative z, mirroring the direction of the move."""
+    z = _mean_shift_z(100.0, 60.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    assert z < 0
+
+
+def test_mean_shift_z_shrinks_with_smaller_samples():
+    """Same means and spread, fewer rows -> a smaller (less significant) z."""
+    big = _mean_shift_z(100.0, 140.0, 10.0, 10.0, 10_000, 10_000, 1e-9)
+    small = _mean_shift_z(100.0, 140.0, 10.0, 10.0, 4, 4, 1e-9)
+    assert abs(small) < abs(big)
+
+
+def test_mean_shift_z_none_without_stdev():
+    """No spread on a side -> no standard error to build -> no z."""
+    assert _mean_shift_z(100.0, 140.0, None, 10.0, 10_000, 10_000, 1e-9) is None
+
+
+def test_mean_shift_z_none_without_sample_size():
+    """No row count -> no denominator -> no z (defined only when n is known)."""
+    assert _mean_shift_z(100.0, 140.0, 10.0, 10.0, None, 10_000, 1e-9) is None
+
+
+def test_mean_shift_z_none_for_degenerate_sample():
+    """A one-row sample has no sampling spread -> z is undefined."""
+    assert _mean_shift_z(100.0, 140.0, 10.0, 10.0, 1, 10_000, 1e-9) is None
+
+
+def test_mean_shift_z_none_when_standard_error_vanishes():
+    """Both samples ~constant -> SE below the floor -> z undefined (not a divide-by-zero)."""
+    assert _mean_shift_z(100.0, 140.0, 0.0, 0.0, 10_000, 10_000, 1e-9) is None
+
+
+@pytest.mark.parametrize(
+    "z, p",
+    [
+        (0.0, 1.0),        # no shift -> no evidence against the null
+        (1.959964, 0.05),  # the textbook two-sided 5% critical value
+        (-1.959964, 0.05), # sign-independent: a fall is as surprising as a rise
+        (5.656854, 1.5417e-08),
+    ],
+)
+def test_two_sided_p_from_z(z, p):
+    """p = erfc(|z|/sqrt(2)): the chance of a move this extreme if nothing changed."""
+    assert _two_sided_p(z) == pytest.approx(p, rel=1e-3, abs=1e-12)
+
+
+def test_two_sided_p_is_sign_independent():
+    """A rise and an equal-magnitude fall carry the same p-value."""
+    assert _two_sided_p(2.3) == pytest.approx(_two_sided_p(-2.3))
+
+
+def test_mean_finding_carries_significance_when_samples_known():
+    """A flagged move with spread + row counts reports z and a p-value, and annotates p."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["z_score"] == pytest.approx(40.0 / (0.02 ** 0.5))
+    assert entry["p_value"] == pytest.approx(0.0, abs=1e-6)  # ~283 sigma -> vanishing p
+    assert "p=" in m.message
+
+
+def test_significance_reflects_non_null_sample_size():
+    """A heavily-null field backs its mean with fewer rows -> a smaller z than a full one."""
+    full = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, row_count=10_000)
+    sparse = _sig(
+        field_means={"amount": 140.0},
+        field_stdevs={"amount": 10.0},
+        row_count=10_000,
+        field_null_fractions={"amount": 0.99},  # only ~100 rows carry a value
+    )
+    base_sparse = _sig(
+        field_means={"amount": 100.0},
+        field_stdevs={"amount": 10.0},
+        row_count=10_000,
+        field_null_fractions={"amount": 0.99},
+    )
+    z_full = [f for f in score_dataset(base, full) if f.kind is DriftKind.MEAN][0].details["fields"]["amount"]["z_score"]
+    z_sparse = [f for f in score_dataset(base_sparse, sparse) if f.kind is DriftKind.MEAN][0].details["fields"]["amount"]["z_score"]
+    assert abs(z_sparse) < abs(z_full)
+
+
+def test_significance_absent_without_stdev():
+    """No spread -> no z or p (defined only when a standard error exists)."""
+    base = _sig(field_means={"amount": 100.0}, row_count=10_000)
+    cur = _sig(field_means={"amount": 140.0}, row_count=10_000)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "z_score" not in m.details["fields"]["amount"]
+    assert "p_value" not in m.details["fields"]["amount"]
+    assert "p=" not in m.message
+
+
+def test_significance_absent_without_row_count():
+    """No row count on a side -> no sample size -> no z or p, but the move still flags."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, row_count=None)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0}, row_count=None)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "z_score" not in m.details["fields"]["amount"]
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])
