@@ -13,6 +13,7 @@ from ogle.scorer import (
     ScoreConfig,
     Severity,
     _effect_magnitude,
+    _prob_superiority,
     build_score_config,
     score_dataset,
 )
@@ -481,6 +482,46 @@ def test_effect_magnitude_absent_without_effect_size():
     cur = _sig(field_means={"amount": 140.0})
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "effect_magnitude" not in m.details["fields"]["amount"]
+
+
+# ---- mean drift: probability-of-superiority (common-language effect size) ------------
+
+@pytest.mark.parametrize(
+    "d, prob",
+    [
+        (0.0, 0.5),          # coincident distributions -> a coin flip
+        (0.8, 0.7141),       # Cohen's "large" -> ~71% (the textbook CLES value)
+        (-0.8, 0.2859),      # symmetric: a fall of equal size is 1 - the rise
+        (4.0, 0.9977),       # a big positive d saturates toward 1.0
+        (-4.0, 0.0023),      # ...and a big negative toward 0.0
+    ],
+)
+def test_prob_superiority_from_cohens_d(d, prob):
+    """P(new>old) = 0.5*(1+erf(d/2)) under the normal, equal-spread approximation."""
+    assert _prob_superiority(d) == pytest.approx(prob, abs=1e-4)
+
+
+def test_prob_superiority_is_symmetric_about_a_half():
+    """A rise and an equal-magnitude fall are mirror images around 0.5."""
+    assert _prob_superiority(1.3) + _prob_superiority(-1.3) == pytest.approx(1.0)
+
+
+def test_mean_finding_carries_prob_superiority_when_effect_size_present():
+    """A flagged move with known spread reports the chance a new row outranks an old one."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # d=+4.0
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert m.details["fields"]["amount"]["prob_superiority"] == pytest.approx(0.9977, abs=1e-4)
+    assert "P(new>old)=100%" in m.message  # 0.9977 rounds to 100% at :.0%
+
+
+def test_prob_superiority_absent_without_effect_size():
+    """No stdev -> no d -> no probability either (defined exactly when d is)."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "prob_superiority" not in m.details["fields"]["amount"]
+    assert "P(new>old)" not in m.message
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])

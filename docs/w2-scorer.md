@@ -33,8 +33,14 @@ a relative shift against zero is undefined and would page on trivial wiggle. Nev
 When both sides carry a stdev, each flagged move is annotated with the pooled-sigma **Cohen's
 d** effect size and its conventional band (`d=+4.0 large`, `d=+0.1 negligible`) — the first
 two-sample signal, so an operator can tell a genuine population shift from a relative move that
-is noise against the field's own spread. Purely enrichment: it labels the finding, never gates
-it (a field without a stdev is still flagged, just without a `d`).
+is noise against the field's own spread. Alongside the band, the same `d` is rendered as a
+**probability of superiority** — `P(new>old)`, the common-language effect size (McGraw & Wong's
+CLES) — the chance a value drawn from the new distribution outranks one drawn from the old
+(`P(new>old) = 0.5*(1 + erf(d/2))`, computed from `d` alone). It turns the abstract `d=+0.1
+negligible` into `P(new>old)=53%` (a coin flip — likely a false page) and `d=+4.0 large` into
+`P(new>old)=100%` (a near-certain shift), so an operator triages without carrying Cohen's
+thresholds in their head. Purely enrichment: it labels the finding, never gates it (a field
+without a stdev is still flagged, just without a `d`).
 
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model

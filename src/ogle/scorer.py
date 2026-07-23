@@ -14,6 +14,7 @@ Design rules:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
@@ -296,6 +297,29 @@ def _effect_magnitude(d: float) -> str:
     return "large"
 
 
+def _prob_superiority(d: float) -> float:
+    """Common-language effect size: P(a random *current* value exceeds a random *baseline* one).
+
+    Cohen's d says how far apart the two means are in pooled sigma, but "d=+2.3, large" is
+    still statistician's shorthand. This converts the same number into the one quantity an
+    operator reads without any convention memorized: the probability that a value drawn from
+    the new distribution lands above a value drawn from the old one (McGraw & Wong's CLES).
+
+    Under the same normal, equal-spread approximation Cohen's d already assumes, the
+    difference of two independent draws is normal with mean (mu_cur - mu_base) and variance
+    2*sigma^2, so:
+
+        P(X_cur > X_base) = Phi(d / sqrt(2)) = 0.5 * (1 + erf(d / 2))
+
+    d=0 -> 0.5 (distributions coincide, a coin flip); d=+0.8 (large) -> ~0.71; a big positive
+    d saturates toward 1.0, a big negative d toward 0.0. Signed through d: it mirrors the
+    direction of the mean move. Pure enrichment computed from d alone — no sample size, no new
+    signature data — so it is defined exactly when the effect size is, and never gates a
+    finding. Value is in [0, 1].
+    """
+    return 0.5 * (1.0 + math.erf(d / 2.0))
+
+
 def score_schema(baseline: DatasetSignature, current: DatasetSignature) -> Optional[DriftFinding]:
     if baseline.schema_hash == current.schema_hash:
         return None
@@ -487,6 +511,9 @@ def score_mean(
             if effect is not None:
                 entry["effect_size"] = effect
                 entry["effect_magnitude"] = _effect_magnitude(effect)
+                # Same normal approximation d already carries, expressed as the one number an
+                # operator reads cold: the chance a new row outranks an old one.
+                entry["prob_superiority"] = _prob_superiority(effect)
             worsened[path] = entry
 
     if not worsened:
@@ -504,6 +531,7 @@ def score_mean(
         eff = worsened[p].get("effect_size")
         if eff is not None:
             base += f", d={eff:+.1f} {worsened[p]['effect_magnitude']}"
+            base += f", P(new>old)={worsened[p]['prob_superiority']:.0%}"
         return base + ")"
 
     return DriftFinding(
