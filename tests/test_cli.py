@@ -424,6 +424,25 @@ def test_demo_seeds_then_alerts_exit_one(capsys):
     assert "d232226d661c10d6" in out
 
 
+def test_demo_shows_freshness_as_eighth_dimension(capsys):
+    """The always-on ## 3 section exercises freshness — the demo now covers all 8 dimensions.
+
+    Freshness is clock-driven, so the showcase injects a fixed stamp + clock: the age (90.0h)
+    and SLA (24.0h) are deterministic, and it must fire ALONE (every other dimension green) to
+    make the silent-stall point. The churn incident above stays the untouched 7-dim alert.
+    """
+    rc = main(["demo"])
+    out = capsys.readouterr().out
+    assert rc == 1  # exit code still driven by the churn serving-path incident
+    assert "## 3. The 8th dimension: freshness" in out
+    # Deterministic, and the only finding in its section (fired alone on a green-everywhere source).
+    assert "**freshness** — data is stale" in out
+    assert "90.0h ago, SLA 24.0h" in out
+    assert "**1 finding** across 1 dataset" in out
+    # The churn incident is unchanged — same 7-dim fingerprint, not perturbed by the new section.
+    assert "d232226d661c10d6" in out
+
+
 def test_demo_never_writes_to_cwd(tmp_path, monkeypatch):
     """The in-memory demo store must not leave a baseline file behind."""
     monkeypatch.chdir(tmp_path)
@@ -541,14 +560,17 @@ def test_parser_registers_check_write_back_kind_flag():
 
 
 def test_demo_narrate_and_write_back_number_sequentially(capsys, monkeypatch):
-    """Both optional sections requested → narrate is ## 3, write-back is ## 4 (no clash)."""
+    """Both optional sections requested → narrate is ## 4, write-back is ## 5 (no clash).
+
+    ## 3 is the always-on freshness showcase, so the two opt-in sections start at ## 4.
+    """
     monkeypatch.setattr(
         "ogle.cli.build_narrator", lambda spec: (lambda prompt: "INJECTED-LLM-SUMMARY")
     )
     main(["demo", "--narrate", "--write-back"])
     out = capsys.readouterr().out
-    assert "## 3. LLM root-cause summary" in out
-    assert "## 4. Tag write-back (keyless preview)" in out
+    assert "## 4. LLM root-cause summary" in out
+    assert "## 5. Tag write-back (keyless preview)" in out
 
 
 def test_demo_never_writes_to_cwd_with_write_back(tmp_path, monkeypatch):

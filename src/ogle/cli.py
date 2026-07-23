@@ -39,7 +39,7 @@ from .llm import build_narrator
 from .narrative import narrate
 from .pipeline import DriftReport, run_drift_check
 from .scorer import DriftKind, Severity, build_score_config
-from .signature import DatasetSignature, parse_iso_epoch
+from .signature import DatasetSignature, build_signature, parse_iso_epoch
 from .store import BaselineStore
 
 DEFAULT_STORE = "ogle-baselines.json"
@@ -600,9 +600,58 @@ def cmd_demo(args: argparse.Namespace) -> int:
     drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
     _emit(render_report(drift, as_json=False))
 
+    # 8th-dimension showcase: freshness — the silent-stall signal the other seven can't see.
+    # Runs as its own keyless mini-scenario against a *separate* in-memory store, so the churn
+    # incident above stays the exact 7-dimension alert `examples/alerts/churn-orders-drift.md`
+    # captured, while the demo as a whole exercises all eight of Ogle's drift dimensions in one
+    # command. The source below is byte-for-byte unchanged — same schema, rows, nulls, means,
+    # spread and range — but its profile timestamp stopped advancing: every other dimension
+    # stays green, only freshness fires. Clock + stamps are fixed so the output is deterministic
+    # (freshness is opt-in and clock-driven; `ogle check --freshness-max-age 24h` is the live
+    # equivalent an operator wires per-deployment).
+    fresh_store = BaselineStore.load(_DEMO_DIR / "__demo_never_written__.json")
+    fresh_urn = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.events_hourly,PROD)"
+    fresh_fields = [
+        ("event_id", "BIGINT"),
+        ("customer_id", "BIGINT"),
+        ("event_ts", "TIMESTAMP"),
+    ]
+    fresh_nulls = {"customer_id": 0.0}
+    healthy_source = build_signature(
+        fresh_urn,
+        schema_fields=fresh_fields,
+        row_count=8_400_000,
+        field_null_fractions=fresh_nulls,
+        computed_at="2026-07-22T18:00:00Z",
+    )
+    stale_source = build_signature(
+        fresh_urn,
+        schema_fields=fresh_fields,
+        row_count=8_400_000,
+        field_null_fractions=fresh_nulls,
+        # Identical to the baseline except the stamp: the hourly ETL stalled ~3.75 days ago.
+        computed_at="2026-07-19T02:00:00Z",
+    )
+    fresh_now = parse_iso_epoch("2026-07-22T20:00:00Z")
+    fresh_cfg = build_score_config(freshness_max_age_seconds=24 * 3600)
+    run_drift_check(
+        fresh_store, [healthy_source], serving_urns=[fresh_urn], now=fresh_now
+    )
+    fresh_drift = run_drift_check(
+        fresh_store, [stale_source], cfg=fresh_cfg, serving_urns=[fresh_urn], now=fresh_now
+    )
+    _emit("\n## 3. The 8th dimension: freshness (the silent stall)\n")
+    _emit(
+        "_Same rows, schema, nulls and distributions as yesterday — only the profile "
+        "timestamp stopped advancing, so a model retraining on it learns a frozen world. "
+        "Every other dimension stays green; only freshness fires. Live switch: "
+        "`ogle check --freshness-max-age 24h`._\n"
+    )
+    _emit(render_report(fresh_drift, as_json=False))
+
     # Optional showcase sections share a running step counter so their headings stay
-    # correctly numbered whether one, both, or neither is asked for (## 1/## 2 are fixed).
-    step = 2
+    # correctly numbered whether one, both, or neither is asked for (## 1/## 2/## 3 are fixed).
+    step = 3
 
     # Optional feature-#2 showcase: the same LLM root-cause narrator `ogle check --narrate`
     # exposes, so a judge sees BOTH flagship features from the one keyless command. `narrate`
