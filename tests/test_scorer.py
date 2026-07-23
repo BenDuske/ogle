@@ -13,6 +13,7 @@ from ogle.scorer import (
     ScoreConfig,
     Severity,
     _bh_qvalues,
+    _breach_sigma,
     _effect_magnitude,
     _mean_shift_z,
     _null_shift_z,
@@ -984,6 +985,71 @@ def test_range_reports_worst_field_first():
     cur = _sig(field_mins={"f1": 0.0, "f2": 0.0}, field_maxes={"f1": 130.0, "f2": 400.0})  # f2 worse
     r = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE][0]
     assert r.message.index("f2") < r.message.index("f1")
+
+
+# ---- range breach in baseline-sigma (extreme-value analogue of Cohen's d) -----------
+
+def test_breach_sigma_scales_by_baseline_stdev():
+    """A +40 excursion beyond a stdev-20 field reads 2.0 sigma past the envelope."""
+    assert _breach_sigma(0.0, 100.0, 0.0, 140.0, 20.0, 1e-9) == pytest.approx(2.0)
+
+
+def test_breach_sigma_uses_worst_edge():
+    """A two-sided breach reports its larger one-sided excursion, not a blend."""
+    # +3 above (13 vs 10), +2 below (-2 vs 0) -> worst edge is 3, over stdev 1.5 -> 2.0.
+    assert _breach_sigma(0.0, 10.0, -2.0, 13.0, 1.5, 1e-9) == pytest.approx(2.0)
+
+
+def test_breach_sigma_unsigned_for_a_low_breach():
+    """A min that fell below the floor is a positive sigma (direction lives in [min, max])."""
+    assert _breach_sigma(10.0, 30.0, 0.0, 30.0, 5.0, 1e-9) == pytest.approx(2.0)
+
+
+def test_breach_sigma_zero_inside_envelope():
+    """No excursion -> 0 sigma (the rule won't flag it, but the scale is still defined)."""
+    assert _breach_sigma(0.0, 100.0, 10.0, 90.0, 20.0, 1e-9) == pytest.approx(0.0)
+
+
+def test_breach_sigma_none_without_stdev():
+    """No baseline stdev -> nothing to scale by -> no sigma."""
+    assert _breach_sigma(0.0, 100.0, 0.0, 140.0, None, 1e-9) is None
+
+
+def test_breach_sigma_none_for_constant_field():
+    """A ~constant baseline (stdev below the floor) has no defined sigma scale."""
+    assert _breach_sigma(0.0, 100.0, 0.0, 140.0, 1e-12, 1e-9) is None
+
+
+def test_range_annotates_breach_sigma():
+    """A flagged field carrying a baseline stdev reports its excursion in sigma."""
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0}, field_stdevs={"amount": 20.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 140.0}, field_stdevs={"amount": 20.0})
+    rng = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE][0]
+    assert rng.details["fields"]["amount"]["breach_sigma"] == pytest.approx(
+        _breach_sigma(0.0, 100.0, 0.0, 140.0, 20.0, 1e-9)
+    )
+    assert "2.0σ past" in rng.message
+
+
+def test_range_breach_sigma_absent_without_stdev():
+    """A field with no baseline stdev is still flagged, but carries no sigma annotation."""
+    base = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 100.0})
+    cur = _sig(field_mins={"amount": 0.0}, field_maxes={"amount": 140.0})
+    rng = [f for f in score_dataset(base, cur) if f.kind is DriftKind.RANGE][0]
+    assert "breach_sigma" not in rng.details["fields"]["amount"]
+    assert "σ" not in rng.message
+
+
+def test_range_breach_sigma_distinguishes_tight_from_wide():
+    """The same span-fraction breach is many sigma on a tight field, sub-sigma on a wide one."""
+    base_tight = _sig(field_mins={"a": 0.0}, field_maxes={"a": 100.0}, field_stdevs={"a": 5.0})
+    base_wide = _sig(field_mins={"a": 0.0}, field_maxes={"a": 100.0}, field_stdevs={"a": 50.0})
+    cur = _sig(field_mins={"a": 0.0}, field_maxes={"a": 140.0}, field_stdevs={"a": 5.0})
+    cur_wide = _sig(field_mins={"a": 0.0}, field_maxes={"a": 140.0}, field_stdevs={"a": 50.0})
+    tight = [f for f in score_dataset(base_tight, cur) if f.kind is DriftKind.RANGE][0]
+    wide = [f for f in score_dataset(base_wide, cur_wide) if f.kind is DriftKind.RANGE][0]
+    assert tight.details["fields"]["a"]["breach_sigma"] > wide.details["fields"]["a"]["breach_sigma"]
+    assert tight.details["fields"]["a"]["breach_sigma"] == pytest.approx(8.0)
 
 
 def test_range_is_independent_of_mean_and_stdev():

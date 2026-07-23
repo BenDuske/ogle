@@ -879,6 +879,39 @@ def score_stdev(
     )
 
 
+def _breach_sigma(
+    base_min: float,
+    base_max: float,
+    cur_min: float,
+    cur_max: float,
+    base_stdev: Optional[float],
+    zero_floor: float,
+) -> Optional[float]:
+    """How far the worst envelope excursion sits beyond the historical bound, in baseline sigma.
+
+    The range rule scores a breach as a fraction of the baseline *span* (max - min), which
+    self-scales to the field's range but says nothing about how *surprising* the new extreme is
+    given the field's spread. A max that pokes 40% past a wide, flat envelope is ordinary; the
+    same 40% on a tight, low-variance field is a screaming integrity fault. This rescales the
+    worst single-side excursion by the baseline standard deviation — the extreme-value analogue
+    of the mean rule's Cohen's d — so an operator reads "3.0σ past" (a genuine new regime) apart
+    from "0.2σ past" (rounding at the edge).
+
+    Uses the larger of the two one-sided excursions (a max that shot up or a min that fell), each
+    measured beyond its own historical bound, so a two-sided breach reports its worst edge rather
+    than a blended number. Unsigned — direction is already legible in the [min, max] annotation.
+    Pure enrichment: returns None when the baseline carries no stdev (nothing to scale by) or its
+    stdev is below `zero_floor` (a ~constant field, where a sigma scale is undefined and the
+    constant-goes-variable case already surfaces via stdev drift).
+    """
+    if base_stdev is None or base_stdev < zero_floor:
+        return None
+    breach_above = max(0.0, cur_max - base_max)
+    breach_below = max(0.0, base_min - cur_min)
+    excursion = max(breach_above, breach_below)
+    return excursion / base_stdev
+
+
 def score_range(
     baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
 ) -> Optional[DriftFinding]:
@@ -911,13 +944,24 @@ def score_range(
         breach_below = max(0.0, base_min - cur_min)
         breach = (breach_above + breach_below) / span
         if breach >= cfg.range_rel_threshold:
-            worsened[path] = {
+            entry = {
                 "baseline_min": base_min,
                 "baseline_max": base_max,
                 "current_min": cur_min,
                 "current_max": cur_max,
                 "breach": breach,
             }
+            # Enrich: how surprising is the worst excursion given the field's own spread? Express
+            # the larger one-sided breach in baseline-sigma — the extreme-value analogue of the
+            # mean rule's Cohen's d. Never gates; a field without a usable baseline stdev is still
+            # flagged on the span-fraction rule, it just carries no sigma.
+            sigma = _breach_sigma(
+                base_min, base_max, cur_min, cur_max,
+                baseline.field_stdevs.get(path), cfg.stdev_zero_floor,
+            )
+            if sigma is not None:
+                entry["breach_sigma"] = sigma
+            worsened[path] = entry
 
     if not worsened:
         return None
@@ -925,19 +969,24 @@ def score_range(
     max_breach = max(v["breach"] for v in worsened.values())
     severity = _severity_from_ratio(max_breach, cfg.range_rel_threshold)
     fields = sorted(worsened, key=lambda p: worsened[p]["breach"], reverse=True)
+
+    def _annotate(p: str) -> str:
+        e = worsened[p]
+        base = (
+            f"{p} ([{e['baseline_min']:g}, {e['baseline_max']:g}]"
+            f"->[{e['current_min']:g}, {e['current_max']:g}], "
+            f"+{e['breach']:.0%} of span"
+        )
+        sigma = e.get("breach_sigma")
+        if sigma is not None:
+            base += f", {sigma:.1f}σ past"
+        return base + ")"
+
     return DriftFinding(
         urn=current.urn,
         kind=DriftKind.RANGE,
         severity=severity,
-        message=(
-            "numeric range breached on "
-            + ", ".join(
-                f"{p} ([{worsened[p]['baseline_min']:g}, {worsened[p]['baseline_max']:g}]"
-                f"->[{worsened[p]['current_min']:g}, {worsened[p]['current_max']:g}], "
-                f"+{worsened[p]['breach']:.0%} of span)"
-                for p in fields
-            )
-        ),
+        message="numeric range breached on " + ", ".join(_annotate(p) for p in fields),
         details={"fields": worsened},
     )
 
