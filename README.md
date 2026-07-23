@@ -35,8 +35,9 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.
-3. **Memory of past incidents.** Ogle's brain is a salience-ranked, forgetful memory
-   store (based on [Aegis MemoryAgent](https://github.com/BenDuske/qwen-memoryagent)).
+3. **Memory of past incidents.** Ogle keeps a persistent baseline + incident memory
+   store, built behind one seam so it can swap onto the salience-ranked, forgetful
+   [Aegis MemoryAgent](https://github.com/BenDuske/qwen-memoryagent).
    It remembers past false positives ("this dashboard bounces every Monday, ignore") and
    past real incidents ("last time table X row count dropped 40%, the ETL job Y had
    silently failed — check that first"). Findings are written *back* into DataHub as tags

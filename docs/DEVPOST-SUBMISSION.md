@@ -38,7 +38,7 @@ above-threshold anomaly on a serving-path asset is
 detected, Ogle writes a root-cause **narrative** an on-call engineer can act on in
 30 seconds: what changed, when, who owns it, which downstream models are exposed,
 and a direct link to inspect. Findings are written **back into DataHub as tags** on
-the affected assets, and into a salience-ranked memory so the agent stops re-paging
+the affected assets, and into a persistent incident memory so the agent stops re-paging
 on incidents it has already reported. It runs as a one-shot `ogle check` or as a
 scheduled `ogle watch` loop that pages **once per incident**.
 
@@ -49,10 +49,14 @@ traverses DataHub's graph via the MCP server / Skills layer, a **scorer** that
 computes per-asset signatures and anomaly scores, a **narrative writer** that turns
 a flagged walk plus DataHub ownership/docs context into an actionable alert, and an
 **alert writer** that persists the narrative and writes an `ogle:flagged` tag back
-to the graph. The agent's memory — "Ogle-Brain" — is built on the
-[Aegis MemoryAgent](https://github.com/BenDuske/qwen-memoryagent): a forgetful,
-salience-ranked store of facts, episodes, and preferences so past false positives
-and real incidents sharpen future walks. The whole suite is keyless and
+to the graph. Between runs Ogle keeps a persistent **baseline + incident memory**
+(the `BaselineStore`): the last known-good signature per asset, the fingerprints of
+incidents it has already paged on, and operator-muted assets — so a scheduled loop
+pages **once per incident** instead of every tick. That store sits behind one seam
+built to swap onto the salience-ranked
+[Aegis MemoryAgent](https://github.com/BenDuske/qwen-memoryagent) — a forgetful
+store of facts, episodes, and preferences — so past false positives and real
+incidents sharpen future walks. The whole suite is keyless and
 Docker-free to test — every network call is monkeypatched — so `pytest -q` runs
 green with no DataHub and no API key (840+ tests at submission).
 
