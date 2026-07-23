@@ -68,9 +68,21 @@ true metric bounded in `[0,1]` (0 = coincident, 1 = disjoint) with round bands
 (`<0.1` negligible … `≥0.6` large). It catches what the mean signals miss: a half-sigma creep
 *and* a doubled variance can each sit under threshold while the two distributions barely overlap;
 `H` folds both moments into one number. Unsigned (separation, not direction — the sign lives on
-`d`), it appears under the same guard as `d` (both stdevs, non-degenerate spread). Purely
+`d`), it appears under the same guard as `d` (both stdevs, non-degenerate spread). Alongside it
+rides its *unbounded twin*, the **Gaussian PSI** (`PSI=6.75 significant`) — the metric the
+Devpost roadmap names first. PSI is what ML teams actually deploy: bin both samples and sum
+`(cur% − base%)·ln(cur%/base%)`, which is exactly the **symmetric KL (Jeffreys) divergence** of
+the two distributions. Modeling each side as its Gaussian gives that a binning-free closed form,
+`J = ½·(v_b/v_c + v_c/v_b − 2) + ½·(m_c−m_b)²·(1/v_b + 1/v_c)` (a pure *scale* penalty plus a
+*location* penalty) with the industry-canonical bands `<0.1` stable · `0.1–0.25` moderate ·
+`≥0.25` significant. Where Hellinger saturates toward 1 once the two Gaussians barely overlap —
+losing the ability to *rank* two already-far-apart moves — PSI keeps climbing on the open-ended
+scale those thresholds are written against, so an operator reads both: `H` for calibrated "how
+separated," PSI for the magnitude. Its guard is *stricter* than Hellinger's (Jeffreys divides by
+each variance, so it needs **both** stdevs individually non-degenerate, not just the pooled
+spread) — a one-sided variance collapse carries `H` but not PSI. Purely
 enrichment: it labels the finding, never gates it (a field without a stdev is still flagged, just
-without a `d` or `H`; a single significant field carries a `p` but no `q`, since with one test the
+without a `d`/`H`/PSI; a single significant field carries a `p` but no `q`, since with one test the
 correction is a no-op).
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't

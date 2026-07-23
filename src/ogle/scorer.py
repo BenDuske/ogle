@@ -401,6 +401,73 @@ def _hellinger_band(h: float) -> str:
     return "large"
 
 
+def _gaussian_psi(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    zero_floor: float,
+) -> Optional[float]:
+    """Population Stability Index between the two samples modeled as Gaussians — the *unbounded*
+    twin of the Hellinger distance, and the metric the Devpost roadmap names first (PSI) in the
+    two-sample distribution-distance family.
+
+    PSI is the drift number ML practitioners actually deploy: bin both samples, then sum
+    `(cur% - base%) * ln(cur% / base%)` over the bins. That sum is exactly the *symmetric* KL
+    divergence (Jeffreys divergence) `KL(base‖cur) + KL(cur‖base)` of the two distributions —
+    PSI is Jeffreys on a histogram. Modeling each side as the Gaussian its mean+stdev already
+    imply, Jeffreys has a closed form with no binning, no bin-count knob, and no zero-bin
+    epsilon fudge:
+
+        J = 0.5 * (v_b/v_c + v_c/v_b - 2) + 0.5 * (m_c - m_b)^2 * (1/v_b + 1/v_c)
+
+    where v = stdev^2. The first bracket is the pure *scale* penalty (0 iff the spreads match,
+    growing as the variance ratio departs 1 in either direction); the second is the *location*
+    penalty (the mean gap, weighted by both precisions). Both moments, one number — same joint
+    reading as Hellinger, but where Hellinger saturates toward 1 once the Gaussians barely
+    overlap, PSI keeps climbing, so it still *ranks* two already-far-apart moves. That is why an
+    operator wants both: Hellinger for a calibrated [0,1] "how separated," PSI for the open-ended
+    magnitude on the scale the industry's 0.1 / 0.25 thresholds are written against.
+
+    Unsigned by design (it measures separation, not direction — that lives on Cohen's d). Pure
+    enrichment computed from the two moments alone, so it never gates a finding.
+
+    Returns None when either side lacks a stdev (nothing to model) or *either* stdev is below
+    `zero_floor` — Jeffreys divides by each variance, so unlike Hellinger (which only needs the
+    pooled spread non-zero) it needs both individual spreads non-degenerate; a variance collapse
+    to ~0 is the constant-goes-variable case that surfaces via stdev/range drift instead.
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    if base_stdev < zero_floor or cur_stdev < zero_floor:
+        return None
+    v_base = base_stdev ** 2
+    v_cur = cur_stdev ** 2
+    scale_term = 0.5 * (v_base / v_cur + v_cur / v_base - 2.0)
+    loc_term = 0.5 * (cur_mean - base_mean) ** 2 * (1.0 / v_base + 1.0 / v_cur)
+    return scale_term + loc_term
+
+
+def _psi_band(psi: float) -> str:
+    """Classify a PSI value into the industry-canonical stability band.
+
+    Unlike Hellinger, PSI carries a widely-used convention an operator likely already knows, so
+    the bands are the standard cutoffs rather than invented ones:
+
+        PSI < 0.1     stable        (no material population shift)
+        0.1..0.25     moderate      (shift worth investigating)
+        PSI >= 0.25   significant   (a real population move — retrain / action)
+
+    A value on a boundary lands in the higher band. Pure labeling — it never gates the finding,
+    it only puts the number on the scale those thresholds were written for.
+    """
+    if psi < 0.1:
+        return "stable"
+    if psi < 0.25:
+        return "moderate"
+    return "significant"
+
+
 def _mean_shift_z(
     base_mean: float,
     cur_mean: float,
@@ -928,6 +995,22 @@ def score_mean(
             if dist is not None:
                 entry["dist_shift"] = dist
                 entry["dist_magnitude"] = _hellinger_band(dist)
+            # The unbounded twin of Hellinger: Gaussian PSI (symmetric KL / Jeffreys). Hellinger
+            # saturates near 1 once the two Gaussians barely overlap, so it stops ranking moves
+            # that are all "far"; PSI keeps climbing and reads on the scale the industry's
+            # 0.1/0.25 thresholds are written against. Stricter guard than Hellinger (needs each
+            # stdev non-degenerate, not just the pooled spread), so a field can carry H but not
+            # PSI when one side is ~constant.
+            psi = _gaussian_psi(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                cfg.stdev_zero_floor,
+            )
+            if psi is not None:
+                entry["psi"] = psi
+                entry["psi_band"] = _psi_band(psi)
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -988,6 +1071,9 @@ def score_mean(
         dist = worsened[p].get("dist_shift")
         if dist is not None:
             base += f", H={dist:.2f} {worsened[p]['dist_magnitude']}"
+        psi = worsened[p].get("psi")
+        if psi is not None:
+            base += f", PSI={psi:.2f} {worsened[p]['psi_band']}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"

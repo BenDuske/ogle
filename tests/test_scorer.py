@@ -19,6 +19,8 @@ from ogle.scorer import (
     _effect_magnitude,
     _gaussian_hellinger,
     _hellinger_band,
+    _gaussian_psi,
+    _psi_band,
     _mean_shift_ci,
     _mean_shift_z,
     _null_shift_z,
@@ -629,6 +631,89 @@ def test_mean_finding_omits_hellinger_without_stdev():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "dist_shift" not in m.details["fields"]["amount"]
     assert "H=" not in m.message
+
+
+def test_psi_is_zero_for_identical_distributions():
+    """Same mean and same spread -> no divergence -> PSI = 0."""
+    assert _gaussian_psi(50.0, 50.0, 12.0, 12.0, 1e-9) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_psi_from_pure_mean_shift_equal_spread():
+    """m 100->140, sd 10 both sides: scale term 0, PSI = Delta^2 / v = 40^2/100 = 16.0."""
+    psi = _gaussian_psi(100.0, 140.0, 10.0, 10.0, 1e-9)
+    assert psi == pytest.approx(16.0, abs=1e-9)
+
+
+def test_psi_catches_pure_scale_change_with_no_mean_move():
+    """Identical means, 2x spread: loc term 0, scale = 0.5*(1/4 + 4 - 2) = 1.125 (d would be 0)."""
+    psi = _gaussian_psi(0.0, 0.0, 1.0, 2.0, 1e-9)
+    assert psi == pytest.approx(1.125, abs=1e-12)
+
+
+def test_psi_is_symmetric_in_its_two_sides():
+    """Jeffreys divergence is symmetric: swapping baseline and current yields the same value."""
+    fwd = _gaussian_psi(100.0, 150.0, 20.0, 35.0, 1e-9)
+    rev = _gaussian_psi(150.0, 100.0, 35.0, 20.0, 1e-9)
+    assert fwd == pytest.approx(rev)
+
+
+def test_psi_is_unbounded_where_hellinger_saturates():
+    """On a huge gap Hellinger pins to ~1 (loses ranking power) while PSI keeps climbing."""
+    h = _gaussian_hellinger(0.0, 1e6, 1.0, 500.0, 1e-9)
+    psi = _gaussian_psi(0.0, 1e6, 1.0, 500.0, 1e-9)
+    assert h == pytest.approx(1.0, abs=1e-3)
+    assert psi > 1e6  # still ranks the magnitude the saturated metric can't
+
+
+def test_psi_none_without_a_stdev_on_a_side():
+    """No spread on one side -> no Gaussian to model -> None (mirrors Hellinger / Cohen's d)."""
+    assert _gaussian_psi(100.0, 140.0, None, 10.0, 1e-9) is None
+    assert _gaussian_psi(100.0, 140.0, 10.0, None, 1e-9) is None
+
+
+def test_psi_stricter_guard_than_hellinger_on_one_sided_collapse():
+    """Jeffreys divides by *each* variance, so one ~constant side yields None -- even though
+    Hellinger (which only needs the pooled spread non-zero) still returns a value there."""
+    assert _gaussian_psi(100.0, 140.0, 0.0, 10.0, 1e-9) is None
+    assert _gaussian_psi(100.0, 140.0, 10.0, 0.0, 1e-9) is None
+    # ...where Hellinger, on the very same inputs, is defined:
+    assert _gaussian_hellinger(100.0, 140.0, 0.0, 10.0, 1e-9) is not None
+
+
+@pytest.mark.parametrize(
+    "psi, band",
+    [
+        (0.0, "stable"),
+        (0.09, "stable"),
+        (0.1, "moderate"),   # boundary lands in the higher band
+        (0.24, "moderate"),
+        (0.25, "significant"),
+        (2.0, "significant"),
+    ],
+)
+def test_psi_bands(psi, band):
+    """Industry-canonical 0.1 / 0.25 cutoffs, boundary-inclusive on the upper band."""
+    assert _psi_band(psi) == band
+
+
+def test_mean_finding_carries_psi_when_stdevs_present():
+    """A flagged mean move with known spread is annotated with PSI + its stability band."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # PSI=16.0
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["psi"] == pytest.approx(16.0, abs=1e-9)
+    assert entry["psi_band"] == "significant"
+    assert "PSI=16.00 significant" in m.message
+
+
+def test_mean_finding_omits_psi_without_stdev():
+    """No stdev -> no Gaussian -> the move is still flagged, just no PSI."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "psi" not in m.details["fields"]["amount"]
+    assert "PSI=" not in m.message
 
 
 # ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------
