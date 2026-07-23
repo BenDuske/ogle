@@ -12,6 +12,7 @@ from ogle.scorer import (
     DriftKind,
     ScoreConfig,
     Severity,
+    _effect_magnitude,
     build_score_config,
     score_dataset,
 )
@@ -429,6 +430,57 @@ def test_effect_size_skipped_when_pooled_spread_is_zero():
     cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 0.0})
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "effect_size" not in m.details["fields"]["amount"]
+
+
+@pytest.mark.parametrize(
+    "d, band",
+    [
+        (0.0, "negligible"),
+        (0.19, "negligible"),
+        (0.2, "small"),  # boundary lands in the higher band
+        (0.49, "small"),
+        (0.5, "medium"),
+        (0.79, "medium"),
+        (0.8, "large"),
+        (4.0, "large"),
+    ],
+)
+def test_effect_magnitude_bands(d, band):
+    """Cohen's (1988) cutoffs, boundary-inclusive on the upper band."""
+    assert _effect_magnitude(d) == band
+
+
+def test_effect_magnitude_is_sign_independent():
+    """A rise and a fall of equal standardized size read the same magnitude."""
+    assert _effect_magnitude(-1.2) == _effect_magnitude(1.2) == "large"
+    assert _effect_magnitude(-0.3) == _effect_magnitude(0.3) == "small"
+
+
+def test_mean_finding_carries_effect_magnitude_band():
+    """A large standardized move is labeled 'large' in details and narrative alike."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # d=+4.0
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert m.details["fields"]["amount"]["effect_magnitude"] == "large"
+    assert "d=+4.0 large" in m.message
+
+
+def test_negligible_effect_labeled_on_a_wide_field():
+    """The relative rule can fire while the move is tiny vs the field's own spread."""
+    # +30% relative move (past the 0.25 default) but pooled sd ~= 300 -> d ~= 0.1 negligible.
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 300.0})
+    cur = _sig(field_means={"amount": 130.0}, field_stdevs={"amount": 300.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert m.details["fields"]["amount"]["effect_magnitude"] == "negligible"
+    assert "negligible" in m.message
+
+
+def test_effect_magnitude_absent_without_effect_size():
+    """No stdev -> no d -> no magnitude band either (nothing to label)."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "effect_magnitude" not in m.details["fields"]["amount"]
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])

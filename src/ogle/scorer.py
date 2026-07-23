@@ -269,6 +269,33 @@ def _cohens_d(
     return (cur_mean - base_mean) / pooled
 
 
+def _effect_magnitude(d: float) -> str:
+    """Classify a Cohen's d value into its conventional interpretation band.
+
+    A raw `d=+2.3` on the alert is only actionable to someone who already carries Cohen's
+    thresholds in their head. This maps |d| onto the standard bands so the narrative can say
+    "large" next to the number and an operator can triage without the convention memorized:
+
+        |d| < 0.2   negligible   (within-noise; the relative rule fired but the shift is small
+                                  vs the field's own spread — a likely false-page candidate)
+        0.2..0.5    small
+        0.5..0.8    medium
+        |d| >= 0.8  large        (a genuine population move, not spread-scaled noise)
+
+    Sign-independent — a rise and a fall of equal standardized size read the same magnitude.
+    Bands are the widely-cited Cohen (1988) cutoffs; a value on a boundary lands in the
+    higher band. Pure labeling: it never gates the finding, it only makes the number legible.
+    """
+    mag = abs(d)
+    if mag < 0.2:
+        return "negligible"
+    if mag < 0.5:
+        return "small"
+    if mag < 0.8:
+        return "medium"
+    return "large"
+
+
 def score_schema(baseline: DatasetSignature, current: DatasetSignature) -> Optional[DriftFinding]:
     if baseline.schema_hash == current.schema_hash:
         return None
@@ -459,6 +486,7 @@ def score_mean(
             )
             if effect is not None:
                 entry["effect_size"] = effect
+                entry["effect_magnitude"] = _effect_magnitude(effect)
             worsened[path] = entry
 
     if not worsened:
@@ -475,7 +503,7 @@ def score_mean(
         )
         eff = worsened[p].get("effect_size")
         if eff is not None:
-            base += f", d={eff:+.1f}"
+            base += f", d={eff:+.1f} {worsened[p]['effect_magnitude']}"
         return base + ")"
 
     return DriftFinding(

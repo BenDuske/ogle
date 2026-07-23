@@ -30,6 +30,11 @@ each numeric field's mean and flags **both directions** (a feature that doubled 
 moved either way), unlike DISTRIBUTION's drop-only rule. A field with no mean on either side is
 skipped, and a baseline mean whose magnitude is below `mean_zero_floor` (~0) is skipped too —
 a relative shift against zero is undefined and would page on trivial wiggle. Never guessed.
+When both sides carry a stdev, each flagged move is annotated with the pooled-sigma **Cohen's
+d** effect size and its conventional band (`d=+4.0 large`, `d=+0.1 negligible`) — the first
+two-sample signal, so an operator can tell a genuine population shift from a relative move that
+is noise against the field's own spread. Purely enrichment: it labels the finding, never gates
+it (a field without a stdev is still flagged, just without a `d`).
 
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model
