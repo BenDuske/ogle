@@ -57,9 +57,21 @@ raw per-field p over-states significance on a wide table (20 unchanged fields at
 spurious hit); when two or more fields carry a p-value they are corrected together with a
 **Benjamini-Hochberg FDR q-value** (`q=…` beside `p=…`) — the false-discovery rate at which
 each would be called real — so a lone small p among noise is pushed back toward 1 while a broad
-genuine drift keeps its low q. Purely enrichment: it labels the finding, never gates it (a
-field without a stdev is still flagged, just without a `d`; a single significant field carries a
-`p` but no `q`, since with one test the correction is a no-op).
+genuine drift keeps its low q. Every signal so far reads one *piece* of the move — `d` and the
+Welch z scale the mean shift by (but stay blind to a change in) spread, so a flagged move also
+carries the **Gaussian Hellinger distance** (`H=0.93 large`), the first *joint* location-and-scale
+signal and Ogle's first step into the two-sample distribution-distance family (KS / PSI /
+Jensen–Shannon) on the roadmap. Modeling each side as a Gaussian from the mean+stdev already in
+the signature, the Bhattacharyya affinity has a closed form and Hellinger is its complement —
+`BC = sqrt(2·s_b·s_c / (s_b²+s_c²)) · exp(−¼·(m_c−m_b)² / (s_b²+s_c²))`, `H = sqrt(1 − BC)` — a
+true metric bounded in `[0,1]` (0 = coincident, 1 = disjoint) with round bands
+(`<0.1` negligible … `≥0.6` large). It catches what the mean signals miss: a half-sigma creep
+*and* a doubled variance can each sit under threshold while the two distributions barely overlap;
+`H` folds both moments into one number. Unsigned (separation, not direction — the sign lives on
+`d`), it appears under the same guard as `d` (both stdevs, non-degenerate spread). Purely
+enrichment: it labels the finding, never gates it (a field without a stdev is still flagged, just
+without a `d` or `H`; a single significant field carries a `p` but no `q`, since with one test the
+correction is a no-op).
 
 **QUALITY** carries the same significance story on the null-rate side. A null fraction is a
 *proportion*, so a flagged spike is scored with the classic **two-proportion z-test**, which

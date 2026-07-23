@@ -6,6 +6,8 @@ showcase `customers` dataset, and `churn_predictor` (deployed via
 is the realistic case, not a contrived one.
 """
 
+import math
+
 import pytest
 
 from ogle.scorer import (
@@ -15,6 +17,8 @@ from ogle.scorer import (
     _bh_qvalues,
     _breach_sigma,
     _effect_magnitude,
+    _gaussian_hellinger,
+    _hellinger_band,
     _mean_shift_ci,
     _mean_shift_z,
     _null_shift_z,
@@ -529,6 +533,101 @@ def test_prob_superiority_absent_without_effect_size():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "prob_superiority" not in m.details["fields"]["amount"]
     assert "P(new>old)" not in m.message
+
+
+# ---- mean drift: Gaussian Hellinger distance (joint location+scale separation) ------
+
+def test_hellinger_is_zero_for_identical_distributions():
+    """Same mean and same spread -> the distributions coincide -> H = 0."""
+    assert _gaussian_hellinger(50.0, 50.0, 12.0, 12.0, 1e-9) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_hellinger_from_pure_mean_shift_equal_spread():
+    """m 100->140, sd 10 both sides: BC = exp(-2), H = sqrt(1 - exp(-2)) ~= 0.9299."""
+    h = _gaussian_hellinger(100.0, 140.0, 10.0, 10.0, 1e-9)
+    assert h == pytest.approx((1.0 - math.exp(-2.0)) ** 0.5, abs=1e-9)
+    assert h == pytest.approx(0.9299, abs=1e-4)
+
+
+def test_hellinger_catches_pure_scale_change_with_no_mean_move():
+    """Identical means but a 2x spread still separates the distributions (d would be 0 here)."""
+    # var_sum=5, coef=sqrt(0.8), expo=1 -> BC=sqrt(0.8), H=sqrt(1-sqrt(0.8)) ~= 0.3249
+    h = _gaussian_hellinger(0.0, 0.0, 1.0, 2.0, 1e-9)
+    assert h == pytest.approx((1.0 - (0.8 ** 0.5)) ** 0.5, abs=1e-9)
+    assert h == pytest.approx(0.3249, abs=1e-4)
+
+
+def test_hellinger_is_symmetric_in_its_two_sides():
+    """A true metric: swapping baseline and current yields the same distance."""
+    fwd = _gaussian_hellinger(100.0, 150.0, 20.0, 35.0, 1e-9)
+    rev = _gaussian_hellinger(150.0, 100.0, 35.0, 20.0, 1e-9)
+    assert fwd == pytest.approx(rev)
+
+
+def test_hellinger_stays_in_unit_interval_on_a_huge_gap():
+    """Far-apart, differently-scaled Gaussians saturate toward but never exceed 1."""
+    h = _gaussian_hellinger(0.0, 1e6, 1.0, 500.0, 1e-9)
+    assert 0.0 <= h <= 1.0
+    assert h == pytest.approx(1.0, abs=1e-3)
+
+
+def test_hellinger_none_without_a_stdev_on_a_side():
+    """No spread on one side -> no Gaussian to model -> None (mirrors Cohen's d)."""
+    assert _gaussian_hellinger(100.0, 140.0, None, 10.0, 1e-9) is None
+    assert _gaussian_hellinger(100.0, 140.0, 10.0, None, 1e-9) is None
+
+
+def test_hellinger_none_when_pooled_spread_degenerate():
+    """Both samples ~constant -> the Gaussian degenerates -> None (same guard as d)."""
+    assert _gaussian_hellinger(100.0, 140.0, 0.0, 0.0, 1e-9) is None
+
+
+@pytest.mark.parametrize(
+    "h, band",
+    [
+        (0.0, "negligible"),
+        (0.09, "negligible"),
+        (0.1, "small"),   # boundary lands in the higher band
+        (0.29, "small"),
+        (0.3, "moderate"),
+        (0.59, "moderate"),
+        (0.6, "large"),
+        (1.0, "large"),
+    ],
+)
+def test_hellinger_bands(h, band):
+    """Round [0,1] cutoffs, boundary-inclusive on the upper band."""
+    assert _hellinger_band(h) == band
+
+
+def test_mean_finding_carries_hellinger_when_stdevs_present():
+    """A flagged mean move with known spread is annotated with the joint distance + band."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # H~=0.93
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["dist_shift"] == pytest.approx(0.9299, abs=1e-4)
+    assert entry["dist_magnitude"] == "large"
+    assert "H=0.93 large" in m.message
+
+
+def test_hellinger_small_on_a_wide_field_modest_move():
+    """A 40% mean move on a fat-tailed field separates the distributions only a little."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 50.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 50.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["dist_shift"] == pytest.approx((1.0 - math.exp(-0.08)) ** 0.5, abs=1e-9)
+    assert entry["dist_magnitude"] == "small"
+
+
+def test_mean_finding_omits_hellinger_without_stdev():
+    """No stdev -> no Gaussian -> the move is still flagged, just no H."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "dist_shift" not in m.details["fields"]["amount"]
+    assert "H=" not in m.message
 
 
 # ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------

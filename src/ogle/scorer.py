@@ -320,6 +320,87 @@ def _prob_superiority(d: float) -> float:
     return 0.5 * (1.0 + math.erf(d / 2.0))
 
 
+def _gaussian_hellinger(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    zero_floor: float,
+) -> Optional[float]:
+    """Hellinger distance between the two samples modeled as Gaussians — the first *joint*
+    location-and-scale distributional signal, and Ogle's first step into the two-sample
+    distribution-distance family (KS / PSI / Jensen–Shannon) the roadmap names next.
+
+    Every other numeric signal splits the distribution into a piece. Cohen's d and the
+    Welch z read the *mean* move rescaled by (but blind to changes in) spread; the stdev
+    z reads the *spread* move ignoring location. Each can sit under its own threshold while
+    the two distributions have, jointly, pulled well apart — a mean that crept half a sigma
+    *and* a variance that doubled overlap far less than either move alone implies. Hellinger
+    folds both moments into one number: how much probability mass the old and new
+    distributions actually share.
+
+    Modeling each side as a Gaussian from the mean+stdev already in the signature, the
+    Bhattacharyya coefficient (their affinity) has a closed form, and Hellinger is its
+    complement:
+
+        BC = sqrt( 2*s_b*s_c / (s_b^2 + s_c^2) ) * exp( -0.25 * (m_c - m_b)^2 / (s_b^2 + s_c^2) )
+        H  = sqrt( 1 - BC )
+
+    H is a true metric bounded in [0, 1]: 0 when the distributions coincide, 1 when they are
+    disjoint. Unsigned by design — it measures *separation*, not direction (the sign lives on
+    d); a rise and a fall of equal joint magnitude read the same. Pure enrichment computed
+    from the two moments alone — no sample size, no new signature data — so it never gates a
+    finding; it only says how far the whole distribution moved, not just its center.
+
+    Returns None when either side lacks a stdev (nothing to model) or the pooled spread is
+    below `zero_floor` (both samples ~constant — the Gaussian degenerates to a spike and the
+    constant-goes-variable case surfaces via stdev/range drift instead), mirroring the exact
+    guard Cohen's d uses so the two annotations appear under the same conditions.
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    v_base = base_stdev ** 2
+    v_cur = cur_stdev ** 2
+    pooled = ((v_base + v_cur) / 2.0) ** 0.5
+    if pooled < zero_floor:
+        return None
+    var_sum = v_base + v_cur
+    coef = (2.0 * base_stdev * cur_stdev / var_sum) ** 0.5
+    expo = math.exp(-0.25 * (cur_mean - base_mean) ** 2 / var_sum)
+    bc = coef * expo
+    # Clamp for float safety: BC is analytically in [0, 1], but rounding can nudge it a hair
+    # past either end, which would make sqrt(1 - BC) NaN or push H above 1.
+    bc = min(1.0, max(0.0, bc))
+    return (1.0 - bc) ** 0.5
+
+
+def _hellinger_band(h: float) -> str:
+    """Classify a Hellinger distance into a plain-language separation band.
+
+    A bare `H=0.42` is only actionable to someone who carries the metric's scale in their
+    head. This maps H onto four bands so the narrative can say "moderate" next to the number
+    and an operator can triage the joint move without the convention memorized:
+
+        H < 0.1    negligible   (distributions all but coincide — the mean rule fired, but
+                                 old and new still overlap almost entirely)
+        0.1..0.3   small
+        0.3..0.6   moderate
+        H >= 0.6   large        (distributions largely disjoint — a genuine population move
+                                 in location and/or scale, not a nudge)
+
+    Bands are round cutoffs on the [0, 1] metric (there is no Cohen-style canon for
+    Hellinger); a value on a boundary lands in the higher band. Pure labeling — it never
+    gates the finding, it only makes the number legible.
+    """
+    if h < 0.1:
+        return "negligible"
+    if h < 0.3:
+        return "small"
+    if h < 0.6:
+        return "moderate"
+    return "large"
+
+
 def _mean_shift_z(
     base_mean: float,
     cur_mean: float,
@@ -786,6 +867,20 @@ def score_mean(
                 # Same normal approximation d already carries, expressed as the one number an
                 # operator reads cold: the chance a new row outranks an old one.
                 entry["prob_superiority"] = _prob_superiority(effect)
+            # Joint location+scale signal: how far the *whole* distribution moved, not just its
+            # center. Cohen's d rescales the mean move by spread but is blind to a spread change
+            # itself; Hellinger folds both moments into one bounded [0,1] separation. Same guard
+            # as d (needs both stdevs, non-degenerate spread), so it rides alongside it.
+            dist = _gaussian_hellinger(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                cfg.stdev_zero_floor,
+            )
+            if dist is not None:
+                entry["dist_shift"] = dist
+                entry["dist_magnitude"] = _hellinger_band(dist)
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -843,6 +938,9 @@ def score_mean(
         if eff is not None:
             base += f", d={eff:+.1f} {worsened[p]['effect_magnitude']}"
             base += f", P(new>old)={worsened[p]['prob_superiority']:.0%}"
+        dist = worsened[p].get("dist_shift")
+        if dist is not None:
+            base += f", H={dist:.2f} {worsened[p]['dist_magnitude']}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"
