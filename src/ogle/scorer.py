@@ -537,6 +537,53 @@ def _spread_shift_z(
     return (math.log(cur_stdev) - math.log(base_stdev)) / se
 
 
+def _spread_shift_ci(
+    base_stdev: float,
+    cur_stdev: float,
+    n_base: Optional[int],
+    n_cur: Optional[int],
+    zero_floor: float,
+) -> Optional[Tuple[float, float]]:
+    """95% confidence interval for the spread *ratio* (current stdev / baseline stdev).
+
+    `_spread_shift_z` and its p-value answer "is the spread move distinguishable from noise?",
+    but — exactly like the mean rule before it got `_mean_shift_ci` — they collapse the move to
+    a single verdict and discard its magnitude. The operator triaging a spread drift wants the
+    bound: did the spread grow by "1.4x-2.1x" (real and sized) or "0.8x-2.5x" (can't even tell
+    if it grew or shrank)? This is the scale-side twin of the mean's confidence interval.
+
+    A stdev is a *ratio* quantity, not a difference: the natural interval lives in log space,
+    where `_spread_shift_z` already establishes ln(s) is approximately normal with the clean
+    standard error SE = sqrt(1/(2(n_base-1)) + 1/(2(n_cur-1))). Build the symmetric interval on
+    the log-ratio, then exponentiate back so the operator reads a *multiplicative* band on the
+    ratio itself:
+
+        logr = ln(s_current) - ln(s_base)
+        CI   = ( exp(logr - z_{0.975} * SE),  exp(logr + z_{0.975} * SE) )
+
+    The interval is strictly positive (a stdev ratio can never be negative — exp guarantees it),
+    ordered (lo <= hi), asymmetric in original units (the multiplicative geometry a ratio wants),
+    and — because it is built from the same SE as the z — it brackets 1.0 exactly when the
+    two-sided p >= 0.05, so it is the same significance verdict expressed as a *range*. A ratio
+    below 1 means the spread collapsed, above 1 means it grew. Purely enrichment — it never gates
+    the finding (that stays the relative-shift rule).
+
+    Returns None under the same guards as `_spread_shift_z`: either stdev at or below `zero_floor`
+    (log undefined at ~0), a sample size missing or below 2 (no dispersion to bound), or SE below
+    `zero_floor` (the interval collapses to a point).
+    """
+    if base_stdev <= zero_floor or cur_stdev <= zero_floor:
+        return None
+    if n_base is None or n_cur is None or n_base < 2 or n_cur < 2:
+        return None
+    se = (1.0 / (2 * (n_base - 1)) + 1.0 / (2 * (n_cur - 1))) ** 0.5
+    if se < zero_floor:
+        return None
+    logr = math.log(cur_stdev) - math.log(base_stdev)
+    half = _Z_CRIT_95 * se
+    return (math.exp(logr - half), math.exp(logr + half))
+
+
 def _null_shift_z(
     base_frac: float,
     cur_frac: float,
@@ -1007,6 +1054,19 @@ def score_stdev(
             if z is not None:
                 entry["z_score"] = z
                 entry["p_value"] = _two_sided_p(z)
+            # Bound the move: the 95% CI for the spread ratio (current/baseline stdev), so the
+            # page carries not just "significant" but *how many times* the spread plausibly
+            # moved. Same log-space SE as the z-test, so it appears under exactly the same
+            # conditions — the scale-side twin of the mean rule's confidence interval.
+            ci = _spread_shift_ci(
+                base_stdev,
+                cur_stdev,
+                _effective_n(baseline, path),
+                _effective_n(current, path),
+                cfg.stdev_zero_floor,
+            )
+            if ci is not None:
+                entry["ci_low"], entry["ci_high"] = ci
             worsened[path] = entry
 
     if not worsened:
@@ -1037,6 +1097,9 @@ def score_stdev(
             qval = worsened[p].get("q_value")
             if qval is not None:
                 base += f", q={qval:.1g}"
+        lo = worsened[p].get("ci_low")
+        if lo is not None:
+            base += f", 95% CI [{lo:.3g}x, {worsened[p]['ci_high']:.3g}x]"
         return base + ")"
 
     return DriftFinding(

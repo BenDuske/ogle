@@ -23,6 +23,7 @@ from ogle.scorer import (
     _mean_shift_z,
     _null_shift_z,
     _prob_superiority,
+    _spread_shift_ci,
     _spread_shift_z,
     _two_sided_p,
     build_score_config,
@@ -1062,6 +1063,63 @@ def test_stdev_single_field_has_no_qvalue():
     s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
     assert "q_value" not in s.details["fields"]["amount"]
     assert "q=" not in s.message
+
+
+def test_spread_shift_ci_brackets_the_ratio_and_is_multiplicative():
+    """The CI is a positive multiplicative band on cur/base; a doubled spread sits above 1x."""
+    lo, hi = _spread_shift_ci(10.0, 20.0, 10_000, 10_000, 1e-9)
+    assert 0 < lo < 2.0 < hi          # point ratio is 2.0x, bracketed on both sides
+    assert lo == pytest.approx(1.0 / _spread_shift_ci(20.0, 10.0, 10_000, 10_000, 1e-9)[1])
+
+
+def test_spread_shift_ci_matches_closed_form():
+    """CI = exp( ln(s_cur/s_base) +/- 1.959964 * SE ), SE the same as the z-test's."""
+    import math as _m
+    se = (1.0 / (2 * 9_999) + 1.0 / (2 * 9_999)) ** 0.5
+    logr = _m.log(20.0 / 10.0)
+    lo, hi = _spread_shift_ci(10.0, 20.0, 10_000, 10_000, 1e-9)
+    assert lo == pytest.approx(_m.exp(logr - 1.959963984540054 * se))
+    assert hi == pytest.approx(_m.exp(logr + 1.959963984540054 * se))
+
+
+def test_spread_shift_ci_brackets_one_exactly_when_not_significant():
+    """The ratio CI excludes 1.0 iff the two-sided p < 0.05 — same verdict as a range."""
+    # Tiny sample: a doubled spread on 5 rows can't be distinguished from noise.
+    lo, hi = _spread_shift_ci(10.0, 20.0, 5, 5, 1e-9)
+    z = _spread_shift_z(10.0, 20.0, 5, 5, 1e-9)
+    assert _two_sided_p(z) >= 0.05
+    assert lo < 1.0 < hi              # brackets 1x -> not significant
+    # Huge sample: the same ratio is a certainty and the band clears 1x.
+    lo2, hi2 = _spread_shift_ci(10.0, 20.0, 1_000_000, 1_000_000, 1e-9)
+    assert _two_sided_p(_spread_shift_z(10.0, 20.0, 1_000_000, 1_000_000, 1e-9)) < 0.05
+    assert lo2 > 1.0
+
+
+def test_spread_shift_ci_none_under_same_guards_as_z():
+    """No CI where the z is undefined: ~0 stdev, or a degenerate/missing sample size."""
+    assert _spread_shift_ci(0.0, 20.0, 10_000, 10_000, 1e-9) is None
+    assert _spread_shift_ci(10.0, 20.0, 1, 10_000, 1e-9) is None
+    assert _spread_shift_ci(10.0, 20.0, None, 10_000, 1e-9) is None
+
+
+def test_stdev_finding_carries_ci_and_annotates_it():
+    """A flagged spread move with row counts reports ci_low/ci_high and annotates the band."""
+    base = _sig(field_stdevs={"amount": 10.0}, row_count=10_000)
+    cur = _sig(field_stdevs={"amount": 20.0}, row_count=10_000)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["amount"]
+    assert entry["ci_low"] < 2.0 < entry["ci_high"]   # point ratio 2.0x, inside the band
+    assert entry["ci_low"] > 0
+    assert "95% CI [" in s.message and "x]" in s.message
+
+
+def test_stdev_ci_absent_without_row_count():
+    """No row count -> no sample size -> no CI, but the spread move still flags."""
+    base = _sig(field_stdevs={"amount": 10.0}, row_count=None)
+    cur = _sig(field_stdevs={"amount": 20.0}, row_count=None)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    assert "ci_low" not in s.details["fields"]["amount"]
+    assert "95% CI" not in s.message
 
 
 @pytest.mark.parametrize("bad", [0, -0.1, -1])

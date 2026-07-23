@@ -73,6 +73,22 @@ enrichment: it labels the finding, never gates it (a field without a stdev is st
 without a `d` or `H`; a single significant field carries a `p` but no `q`, since with one test the
 correction is a no-op).
 
+**STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
+see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a
+**ratio** quantity, its right large-sample test lives in log space: `ln(s)` is approximately
+normal with a clean, magnitude-free standard error `SE = sqrt(1/(2(n_b−1)) + 1/(2(n_c−1)))`, so
+the **log-SD two-sample z-test** `z = (ln s_cur − ln s_base)/SE` scores whether a "spread halved"
+is a real move or sampling noise (rendered as the same two-sided **p-value**, and across two or
+more spread-drifted fields the same **Benjamini-Hochberg q-value**). Collapsing that to one
+number discards the magnitude, so — exactly as the mean rule gained a CI on the *difference* —
+the same log-space SE is widened into a **95% confidence interval for the spread ratio**
+`cur/base`, exponentiated back so the operator reads a *multiplicative* band: `95% CI [1.96x,
+2.04x]` (a real, sized move) versus `[0.83x, 4.8x]` (can't even tell if it grew or shrank). The
+band is strictly positive (a ratio can never go negative — `exp` guarantees it) and brackets
+`1.0x` exactly when `p ≥ 0.05`, the same significance verdict as a range. All enrichment, under
+the same guards as the z (both stdevs above the zero-floor, per-field non-null `n ≥ 2`); a field
+without a usable sample size still flags on the relative-spread rule, just without a `z`/CI.
+
 **QUALITY** carries the same significance story on the null-rate side. A null fraction is a
 *proportion*, so a flagged spike is scored with the classic **two-proportion z-test**, which
 pools the two samples under the null of equal rates: `z = (p_cur − p_base) / sqrt(p_pool·(1 −
