@@ -1,5 +1,5 @@
 {
-  "_comment": "Ogle offline demo — DRIFTED signatures. Same graph as healthy-signatures.json, but dbt.orders (a serving-path table feeding the churn model) has three simultaneous drifts: SCHEMA (order_total DOUBLE -> STRING), VOLUME (row count collapsed 1.25M -> 40K), and QUALITY (order_total null fraction 0.001 -> 0.42). customers is unchanged, so the alert stays scoped to the real blast radius.",
+  "_comment": "Ogle offline demo — DRIFTED signatures. Same graph as healthy-signatures.json. Two serving-path failures, deliberately different in character: (1) dbt.orders breaks LOUDLY — SCHEMA (order_total DOUBLE -> STRING), VOLUME (row count collapsed 1.25M -> 40K), QUALITY (order_total null 0.001 -> 0.42); (2) dbt.churn_features drifts SILENTLY — same schema, same 312K rows, same null rates, but its value distributions moved out from under the model: DISTRIBUTION (customer_id uniqueness 100% -> 55%, a fan-out join now duplicating keys), MEAN (monthly_charges 64.8 -> 88.2, +36% covariate shift), STDEV (tenure_days spread 420 -> 90, collapsed), RANGE (num_support_calls max 12 -> 45, a handful of overflow rows the mean/stdev never feel). customers is unchanged, so the alert stays scoped to the real blast radius. Together the two tables exercise 7 of Ogle's 8 drift dimensions in one keyless run (freshness is opt-in/clock-driven, out of scope for a static fixture).",
   "signatures": [
     {
       "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)",
@@ -14,6 +14,23 @@
       "field_null_fractions": {"order_total": 0.42, "status": 0.0}
     },
     {
+      "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.churn_features,PROD)",
+      "schema_fields": [
+        ["customer_id", "BIGINT"],
+        ["tenure_days", "INT"],
+        ["monthly_charges", "DOUBLE"],
+        ["num_support_calls", "INT"],
+        ["plan_tier", "STRING"]
+      ],
+      "row_count": 312000,
+      "field_null_fractions": {"monthly_charges": 0.0, "plan_tier": 0.0},
+      "field_unique_fractions": {"customer_id": 0.55},
+      "field_means": {"tenure_days": 545.0, "monthly_charges": 88.2, "num_support_calls": 1.9},
+      "field_stdevs": {"tenure_days": 90.0, "monthly_charges": 33.0, "num_support_calls": 1.6},
+      "field_mins": {"tenure_days": 1, "monthly_charges": 18.5, "num_support_calls": 0},
+      "field_maxes": {"tenure_days": 3000, "monthly_charges": 118.0, "num_support_calls": 45}
+    },
+    {
       "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.customers,PROD)",
       "schema_fields": [
         ["customer_id", "BIGINT"],
@@ -26,6 +43,7 @@
     }
   ],
   "serving_urns": [
-    "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)"
+    "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.churn_features,PROD)"
   ]
 }

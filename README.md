@@ -61,9 +61,11 @@ ogle check --gms http://localhost:8080 --discover --store live.json
 ```
 
 Steps 3–4 prove Ogle seeds baselines then reports **no false drift** on a stable graph
-(both exit 0). To watch the alert path actually fire — schema/volume/quality drift on a
-serving-path table — run the offline demo below; it's the same drift-check code path,
-fully reproducible without Docker, and its captured alert lives in
+(both exit 0). To watch the alert path actually fire — two serving-path tables drifting at
+once, one loudly (schema/volume/quality) and one silently in its value distributions
+(distribution/mean/stdev/range), 7 of Ogle's 8 dimensions in a single alert — run the
+offline demo below; it's the same drift-check code path, fully reproducible without Docker,
+and its captured alert lives in
 [`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md).
 
 ### Without Docker (offline signatures)

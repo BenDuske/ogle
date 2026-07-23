@@ -421,7 +421,7 @@ def test_demo_seeds_then_alerts_exit_one(capsys):
     assert "Seed baselines" in out
     assert "HIGH drift" in out
     # Reproduces the captured alert's incident fingerprint, not a coincidental one.
-    assert "fd6f829c77ff9fb4" in out
+    assert "d232226d661c10d6" in out
 
 
 def test_demo_never_writes_to_cwd(tmp_path, monkeypatch):
