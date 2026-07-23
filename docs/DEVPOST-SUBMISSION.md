@@ -29,9 +29,12 @@ catches the change before the deploy.)*
 Ogle walks your DataHub lineage graph on a schedule and catches silent
 training-data drift before it reaches production. Given a deployed model, it
 traverses upstream through the lineage graph (model → feature tables → source
-tables) and, at each hop, computes a lightweight **signature** — row-count delta,
-schema hash, and coarse distribution stats — which it compares against the last
-known-good state. When an above-threshold anomaly on a serving-path asset is
+tables) and, at each hop, computes a lightweight **signature** it compares against
+the last known-good state across **eight drift dimensions** — schema, volume,
+quality (null-rate), categorical distribution, freshness (stale-feed SLA), and the
+per-feature numeric moments mean, stdev, and range — so covariate shift, a silent
+stall, and a broken load each surface as their own labeled signal. When an
+above-threshold anomaly on a serving-path asset is
 detected, Ogle writes a root-cause **narrative** an on-call engineer can act on in
 30 seconds: what changed, when, who owns it, which downstream models are exposed,
 and a direct link to inspect. Findings are written **back into DataHub as tags** on
@@ -51,7 +54,7 @@ to the graph. The agent's memory — "Ogle-Brain" — is built on the
 salience-ranked store of facts, episodes, and preferences so past false positives
 and real incidents sharpen future walks. The whole suite is keyless and
 Docker-free to test — every network call is monkeypatched — so `pytest -q` runs
-green with no DataHub and no API key (660+ tests at submission).
+green with no DataHub and no API key (840+ tests at submission).
 
 ### Challenges we ran into
 - **Scoping drift to what matters.** A naïve diff flags every table that moves.
@@ -75,8 +78,10 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-Richer scorers (true distribution tests beyond the coarse proxy), agent-to-agent
-Ogle deployments that share incident memory across teams, and publishing Ogle's
+With the eight moment-and-metric drift dimensions now shipping, the next scorer
+frontier is **true two-sample distribution tests** (KS / PSI / Jensen–Shannon)
+that page on shape change the per-feature moments miss; then agent-to-agent Ogle
+deployments that share incident memory across teams, and publishing Ogle's
 DataHub Skill wrapper back upstream as an OSS contribution.
 
 ---
