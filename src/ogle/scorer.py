@@ -402,6 +402,47 @@ def _spread_shift_z(
     return (math.log(cur_stdev) - math.log(base_stdev)) / se
 
 
+def _null_shift_z(
+    base_frac: float,
+    cur_frac: float,
+    n_base: Optional[int],
+    n_cur: Optional[int],
+) -> Optional[float]:
+    """Two-proportion z-statistic — the null-rate rule's answer to "is this spike real?".
+
+    The quality rule fires on an *absolute* jump in a field's null fraction the same way the
+    mean rule fires on a relative mean shift, and it was just as blind to sample size: a null
+    rate that "jumped" from 0% to 40% on 5 rows is two extra nulls — sampling noise — while the
+    same jump on a million rows is a pipeline that broke. A null fraction is a *proportion*, so
+    the right two-sample test is not a z on means but the classic two-proportion z-test, which
+    pools the two samples under the null of equal rates and scores the observed gap against the
+    standard error of that pooled proportion:
+
+        p_pool = (x_base + x_cur) / (n_base + n_cur)      x = frac * n  (the null counts)
+        SE     = sqrt( p_pool * (1 - p_pool) * (1/n_base + 1/n_cur) )
+        z      = (cur_frac - base_frac) / SE
+
+    Note the sample size here is the *full* row count on each side, not the effective-n the mean
+    and spread rules use: every row either is or is not null, so all rows carry the proportion —
+    there is no "net of nulls" to subtract. Signed like the shift (quality only flags increases,
+    so z is >= 0). Purely enrichment — it never gates the finding (that stays the absolute-jump
+    rule) — and feeds the same `_two_sided_p` / BH machinery the mean and spread rules already use.
+
+    Returns None when a row count is missing or below 1 (no denominator for a proportion), or when
+    the pooled variance is <= 0 (both sides all-null or all-populated — degenerate, and a jump that
+    large is already carried by the absolute rule).
+    """
+    if n_base is None or n_cur is None or n_base < 1 or n_cur < 1:
+        return None
+    x_base = base_frac * n_base
+    x_cur = cur_frac * n_cur
+    p_pool = (x_base + x_cur) / (n_base + n_cur)
+    var = p_pool * (1.0 - p_pool) * (1.0 / n_base + 1.0 / n_cur)
+    if var <= 0:
+        return None
+    return (cur_frac - base_frac) / (var ** 0.5)
+
+
 def _effective_n(sig: DatasetSignature, path: str) -> Optional[int]:
     """Rows that actually back a field's mean: total row count net of its null fraction.
 
@@ -552,22 +593,50 @@ def score_quality(
             continue
         delta = cur_frac - base_frac
         if delta >= cfg.null_fraction_abs_threshold:
-            worsened[path] = {"baseline": base_frac, "current": cur_frac, "delta": delta}
+            entry = {"baseline": base_frac, "current": cur_frac, "delta": delta}
+            # Significance: does the null-rate jump survive the sample size, or is it a couple
+            # of extra nulls on a tiny table? A null fraction is a proportion, so the sample
+            # size is the full row count on each side (every row carries the proportion — no
+            # net-of-nulls). Purely enrichment — a field with an unknown row count is still
+            # flagged on the absolute-jump rule, it just carries no z.
+            z = _null_shift_z(base_frac, cur_frac, baseline.row_count, current.row_count)
+            if z is not None:
+                entry["z_score"] = z
+                entry["p_value"] = _two_sided_p(z)
+            worsened[path] = entry
 
     if not worsened:
         return None
 
+    # Multiple-comparison control, symmetric to the mean/stdev rules: a quality finding tests every
+    # field's null rate at once, so a raw per-field p over-states significance on a wide table. When
+    # two or more fields carry a p-value, adjust the family with Benjamini-Hochberg so each entry also
+    # reports the false-discovery rate at which it would be called real. A single test needs no
+    # correction (q == p), so it is left alone to keep the annotation clean.
+    pvals = {p: e["p_value"] for p, e in worsened.items() if "p_value" in e}
+    if len(pvals) >= 2:
+        for p, qv in _bh_qvalues(pvals).items():
+            worsened[p]["q_value"] = qv
+
     max_delta = max(v["delta"] for v in worsened.values())
     severity = _severity_from_ratio(max_delta, cfg.null_fraction_abs_threshold)
     fields = sorted(worsened, key=lambda p: worsened[p]["delta"], reverse=True)
+
+    def _annotate(p: str) -> str:
+        base = f"{p} ({worsened[p]['baseline']:.0%}->{worsened[p]['current']:.0%}"
+        pval = worsened[p].get("p_value")
+        if pval is not None:
+            base += f", p={pval:.1g}"
+            qval = worsened[p].get("q_value")
+            if qval is not None:
+                base += f", q={qval:.1g}"
+        return base + ")"
+
     return DriftFinding(
         urn=current.urn,
         kind=DriftKind.QUALITY,
         severity=severity,
-        message=(
-            "null rate spiked on "
-            + ", ".join(f"{p} ({worsened[p]['baseline']:.0%}->{worsened[p]['current']:.0%})" for p in fields)
-        ),
+        message="null rate spiked on " + ", ".join(_annotate(p) for p in fields),
         details={"fields": worsened},
     )
 

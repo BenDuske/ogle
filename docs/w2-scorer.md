@@ -54,6 +54,17 @@ genuine drift keeps its low q. Purely enrichment: it labels the finding, never g
 field without a stdev is still flagged, just without a `d`; a single significant field carries a
 `p` but no `q`, since with one test the correction is a no-op).
 
+**QUALITY** carries the same significance story on the null-rate side. A null fraction is a
+*proportion*, so a flagged spike is scored with the classic **two-proportion z-test**, which
+pools the two samples under the null of equal rates: `z = (p_cur − p_base) / sqrt(p_pool·(1 −
+p_pool)·(1/n_b + 1/n_c))`. Here `n` is the *full* row count on each side, not the non-null
+effective-n the mean/spread tests use — every row either is or is not null, so all rows carry the
+proportion. It renders as the same two-sided **p-value** and, across two or more null-spiked
+fields, the same **Benjamini-Hochberg q-value** (`p=…, q=…` beside the `1%→42%` jump). A 40-point
+jump then triages by evidence: 50k rows → `p≈0` (a broken pipeline), a couple of extra nulls on a
+12-row table → a large `p` (noise). Purely enrichment — a field with an unknown row count still
+flags on the absolute-jump rule, just without a `p`.
+
 **DISTRIBUTION** is the cardinality half of true distribution drift: it catches a
 categorical/feature column collapsing onto one value (a stuck upstream default — the model
 keeps training on a feature that now carries no signal) and an id/join key losing uniqueness

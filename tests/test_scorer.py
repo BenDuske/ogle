@@ -15,6 +15,7 @@ from ogle.scorer import (
     _bh_qvalues,
     _effect_magnitude,
     _mean_shift_z,
+    _null_shift_z,
     _prob_superiority,
     _spread_shift_z,
     _two_sided_p,
@@ -1132,3 +1133,92 @@ def test_build_config_rejects_nonpositive_freshness(bad):
 def test_build_config_freshness_none_keeps_off():
     assert build_score_config().freshness_max_age_seconds is None
     assert build_score_config(volume_threshold=0.5).freshness_max_age_seconds is None
+
+
+# ---- null-rate significance (two-proportion z-test) ----
+
+def test_null_shift_z_is_positive_for_a_spike():
+    """A null rate that rose -> positive z (quality only flags increases)."""
+    z = _null_shift_z(0.01, 0.40, 10_000, 10_000)
+    assert z is not None and z > 0
+
+
+def test_null_shift_z_matches_closed_form():
+    """z = (p_cur - p_base) / sqrt(p_pool*(1-p_pool)*(1/n_b + 1/n_c))."""
+    z = _null_shift_z(0.05, 0.25, 4_000, 6_000)
+    x_base, x_cur = 0.05 * 4_000, 0.25 * 6_000
+    p_pool = (x_base + x_cur) / (4_000 + 6_000)
+    se = (p_pool * (1.0 - p_pool) * (1.0 / 4_000 + 1.0 / 6_000)) ** 0.5
+    assert z == pytest.approx((0.25 - 0.05) / se)
+
+
+def test_null_shift_z_grows_with_sample_size():
+    """The same null-rate jump on more rows is more distinguishable from noise -> larger |z|."""
+    small = _null_shift_z(0.01, 0.40, 10, 10)
+    big = _null_shift_z(0.01, 0.40, 1_000_000, 1_000_000)
+    assert abs(big) > abs(small)
+
+
+def test_null_shift_z_none_without_row_count():
+    """No denominator -> no proportion -> no z."""
+    assert _null_shift_z(0.01, 0.40, None, 10_000) is None
+    assert _null_shift_z(0.01, 0.40, 10_000, None) is None
+    assert _null_shift_z(0.01, 0.40, 0, 10_000) is None
+
+
+def test_null_shift_z_none_for_degenerate_variance():
+    """Both sides all-null (or all-populated) -> pooled variance 0 -> z undefined."""
+    assert _null_shift_z(1.0, 1.0, 10_000, 10_000) is None
+    assert _null_shift_z(0.0, 0.0, 10_000, 10_000) is None
+
+
+def test_quality_finding_carries_significance_when_row_count_known():
+    """A flagged null spike with row counts reports z + p and annotates p in the message."""
+    base = _sig(field_null_fractions={"email": 0.01}, row_count=10_000)
+    cur = _sig(field_null_fractions={"email": 0.40}, row_count=10_000)
+    q = [f for f in score_dataset(base, cur) if f.kind is DriftKind.QUALITY][0]
+    entry = q.details["fields"]["email"]
+    assert entry["z_score"] == pytest.approx(_null_shift_z(0.01, 0.40, 10_000, 10_000))
+    assert entry["p_value"] == pytest.approx(0.0, abs=1e-6)  # huge n -> vanishing p
+    assert "p=" in q.message
+
+
+def test_quality_significance_reflects_sample_size():
+    """The same null jump on a tiny table is less distinguishable from noise -> smaller |z|."""
+    z_big = [f for f in score_dataset(
+        _sig(field_null_fractions={"email": 0.01}, row_count=1_000_000),
+        _sig(field_null_fractions={"email": 0.40}, row_count=1_000_000),
+    ) if f.kind is DriftKind.QUALITY][0].details["fields"]["email"]["z_score"]
+    z_small = [f for f in score_dataset(
+        _sig(field_null_fractions={"email": 0.01}, row_count=12),
+        _sig(field_null_fractions={"email": 0.40}, row_count=12),
+    ) if f.kind is DriftKind.QUALITY][0].details["fields"]["email"]["z_score"]
+    assert abs(z_small) < abs(z_big)
+
+
+def test_quality_significance_absent_without_row_count():
+    """No row count -> no sample size -> no z or p, but the null spike still flags."""
+    base = _sig(field_null_fractions={"email": 0.01}, row_count=None)
+    cur = _sig(field_null_fractions={"email": 0.40}, row_count=None)
+    q = [f for f in score_dataset(base, cur) if f.kind is DriftKind.QUALITY][0]
+    assert "z_score" not in q.details["fields"]["email"]
+    assert "p=" not in q.message
+
+
+def test_quality_finding_carries_bh_qvalues_across_fields():
+    """Two+ null-spiked fields with p-values get BH q-values, symmetric to the mean/stdev rules."""
+    base = _sig(field_null_fractions={"email": 0.01, "region": 0.02}, row_count=10_000)
+    cur = _sig(field_null_fractions={"email": 0.40, "region": 0.45}, row_count=10_000)
+    q = [f for f in score_dataset(base, cur) if f.kind is DriftKind.QUALITY][0]
+    assert "q_value" in q.details["fields"]["email"]
+    assert "q_value" in q.details["fields"]["region"]
+    assert "q=" in q.message
+
+
+def test_quality_single_field_has_no_qvalue():
+    """One null-spiked field needs no multiplicity correction — q is left off (q == p)."""
+    base = _sig(field_null_fractions={"email": 0.01}, row_count=10_000)
+    cur = _sig(field_null_fractions={"email": 0.40}, row_count=10_000)
+    q = [f for f in score_dataset(base, cur) if f.kind is DriftKind.QUALITY][0]
+    assert "q_value" not in q.details["fields"]["email"]
+    assert "q=" not in q.message
