@@ -32,6 +32,13 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    (a source whose profile timestamp has gone stale past its SLA — the silent stall the others
    miss because rows/schema look unchanged). Freshness is opt-in via `--freshness-max-age`
    (e.g. `24h`), since a nightly table and a streaming source have very different staleness SLAs.
+   A numeric-moment finding also carries a **whole-distribution distance** readout beside the
+   per-moment stats — Gaussian Hellinger (bounded [0,1] separation), Jeffreys/PSI (unbounded
+   divergence), and the 2-Wasserstein (the move in the feature's own units) fold a feature's
+   location *and* scale shift into one number, and where a signature ships sample quantiles an
+   **empirical 1-Wasserstein** rides alongside to catch skew/multimodal shifts the Gaussian
+   summaries idealize away. These label severity for the operator; the eight dimensions above are
+   what gate a page.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.

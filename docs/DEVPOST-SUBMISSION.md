@@ -82,15 +82,19 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-The eight moment-and-metric drift dimensions now ship alongside a first layer of
-**distribution-distance** signals — Gaussian Hellinger, Jeffreys/PSI, and the
-2-Wasserstein — that fold a feature's location *and* scale move into one
+The eight moment-and-metric drift dimensions now ship alongside a
+**distribution-distance** layer — Gaussian Hellinger, Jeffreys/PSI, and the
+2-Wasserstein — that folds a feature's location *and* scale move into one
 whole-distribution number instead of reading each moment alone. Those model each
-side as a Gaussian from the mean+stdev already in the signature, so the next scorer
-frontier is the **empirical** twin: nonparametric two-sample tests (KS / empirical
-JS / histogram-PSI) computed from raw sample bins, which page on the multimodal and
-skew shifts a Gaussian summary can't represent. After that: agent-to-agent Ogle
-deployments that share incident memory across teams, and publishing Ogle's
+side as a Gaussian from the mean+stdev already in the signature, and the **empirical**
+twin has already begun: an empirical 1-Wasserstein rides beside the Gaussian W2,
+computed nonparametrically from the two sides' raw quantile functions in the
+feature's own units — so when a signature carries sample quantiles, a multimodal or
+skew shift that both sides' Gaussian summaries idealize away still surfaces. The
+remaining empirical frontier is the rest of that family — nonparametric two-sample
+tests (KS / empirical JS / histogram-PSI) from raw sample bins. After that:
+agent-to-agent Ogle deployments that share incident memory across teams, and
+publishing Ogle's
 DataHub Skill wrapper back upstream as an OSS contribution.
 
 ---
