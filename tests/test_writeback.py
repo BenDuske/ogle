@@ -587,3 +587,145 @@ def test_retract_round_trips_a_full_write_then_clear():
     apply_retract(plan_retract([DS_CUSTOMERS], walk_result=walk), backend)
     assert backend.tags[DS_CUSTOMERS] == set()
     assert backend.tags[MODEL_CHURN] == set()
+
+
+# =======================================================================================
+# DataHubWritebackBackend — live-adapter wiring (the one seam that WRITES to DataHub).
+#
+# The `acryl-datahub` SDK is NOT installed at test time, so we stub `datahub.emitter.mcp`
+# and `datahub.metadata.schema_classes` in sys.modules and inject a fake graph. Every
+# other writeback test uses the dict-backed FakeWritebackBackend and never touches this
+# adapter — yet this is the only code in Ogle that mutates a customer's metadata graph.
+# These pin the read contract (GlobalTags via get_aspect, tag-URN extraction, None->empty)
+# and the write contract (TagAssociation-per-URN, sorted+deduped, wrapped in an MCP whose
+# entityUrn is the target, emitted once) — all silent live-breaks if the mapping drifts.
+# =======================================================================================
+
+
+@pytest.fixture
+def stub_writeback_sdk(monkeypatch):
+    import sys
+    import types
+
+    class TagAssociationClass:
+        def __init__(self, tag):
+            self.tag = tag
+
+    class GlobalTagsClass:
+        def __init__(self, tags):
+            self.tags = tags
+
+    class MetadataChangeProposalWrapper:
+        def __init__(self, entityUrn, aspect):
+            self.entityUrn = entityUrn
+            self.aspect = aspect
+
+    schema = types.ModuleType("datahub.metadata.schema_classes")
+    schema.GlobalTagsClass = GlobalTagsClass
+    schema.TagAssociationClass = TagAssociationClass
+    emitter_mcp = types.ModuleType("datahub.emitter.mcp")
+    emitter_mcp.MetadataChangeProposalWrapper = MetadataChangeProposalWrapper
+
+    # Parent packages must resolve too, or the `from datahub... import ...` lines fail
+    # before they reach the stubs.
+    monkeypatch.setitem(sys.modules, "datahub", types.ModuleType("datahub"))
+    monkeypatch.setitem(sys.modules, "datahub.metadata", types.ModuleType("datahub.metadata"))
+    monkeypatch.setitem(sys.modules, "datahub.metadata.schema_classes", schema)
+    monkeypatch.setitem(sys.modules, "datahub.emitter", types.ModuleType("datahub.emitter"))
+    monkeypatch.setitem(sys.modules, "datahub.emitter.mcp", emitter_mcp)
+    return schema
+
+
+class RecordingWriteGraph:
+    """Fake `DataHubGraph`. Records get_aspect calls and captures emitted MCPs."""
+
+    def __init__(self, *, aspect_return=None):
+        self.calls = []
+        self.emitted = []
+        self._aspect_return = aspect_return
+
+    def get_aspect(self, entity_urn, aspect_type):
+        self.calls.append(("get_aspect", entity_urn, aspect_type))
+        return self._aspect_return
+
+    def emit(self, mcp):
+        self.emitted.append(mcp)
+
+
+def _make_backend(graph, stub_writeback_sdk):
+    from ogle.writeback import DataHubWritebackBackend
+
+    return DataHubWritebackBackend(graph=graph)
+
+
+def test_writeback_backend_reads_globaltags_via_get_aspect(stub_writeback_sdk):
+    """existing_tag_urns pulls GlobalTags with get_aspect and extracts every .tag."""
+    schema = stub_writeback_sdk
+    import types as _t
+
+    aspect = _t.SimpleNamespace(
+        tags=[_t.SimpleNamespace(tag=OGLE_DRIFT_TAG), _t.SimpleNamespace(tag=_SEV_HIGH)]
+    )
+    graph = RecordingWriteGraph(aspect_return=aspect)
+    backend = _make_backend(graph, stub_writeback_sdk)
+
+    urn = DS_CUSTOMERS
+    assert backend.existing_tag_urns(urn) == {OGLE_DRIFT_TAG, _SEV_HIGH}
+    assert graph.calls == [("get_aspect", urn, schema.GlobalTagsClass)]
+
+
+def test_writeback_backend_missing_aspect_is_empty_set(stub_writeback_sdk):
+    """No GlobalTags aspect -> empty set, never a crash (drives the additive merge in apply)."""
+    graph = RecordingWriteGraph(aspect_return=None)
+    backend = _make_backend(graph, stub_writeback_sdk)
+    assert backend.existing_tag_urns(DS_ORDERS) == set()
+
+
+def test_writeback_backend_skips_tagless_associations(stub_writeback_sdk):
+    """Associations without a usable .tag are dropped, not surfaced as empty URNs."""
+    import types as _t
+
+    aspect = _t.SimpleNamespace(
+        tags=[
+            _t.SimpleNamespace(tag=OGLE_DRIFT_TAG),
+            _t.SimpleNamespace(tag=None),
+            _t.SimpleNamespace(tag=""),
+        ]
+    )
+    graph = RecordingWriteGraph(aspect_return=aspect)
+    backend = _make_backend(graph, stub_writeback_sdk)
+    assert backend.existing_tag_urns(DS_CUSTOMERS) == {OGLE_DRIFT_TAG}
+
+
+def test_writeback_backend_emits_one_globaltags_mcp(stub_writeback_sdk):
+    """set_tag_urns wraps sorted+deduped TagAssociations in a GlobalTags MCP and emits once."""
+    schema = stub_writeback_sdk
+    graph = RecordingWriteGraph()
+    backend = _make_backend(graph, stub_writeback_sdk)
+
+    urn = MODEL_CHURN
+    # Deliberately unsorted + duplicated to pin the sort+dedup contract.
+    backend.set_tag_urns(urn, [_SEV_HIGH, OGLE_DRIFT_TAG, OGLE_DRIFT_TAG])
+
+    assert len(graph.emitted) == 1                       # exactly one write per entity
+    mcp = graph.emitted[0]
+    assert mcp.entityUrn == urn                          # aimed at the target entity
+    assert isinstance(mcp.aspect, schema.GlobalTagsClass)
+    urns_in_order = [assoc.tag for assoc in mcp.aspect.tags]
+    assert urns_in_order == sorted({_SEV_HIGH, OGLE_DRIFT_TAG})   # sorted, deduped
+    assert all(isinstance(a, schema.TagAssociationClass) for a in mcp.aspect.tags)
+
+
+def test_writeback_backend_read_then_write_round_trip(stub_writeback_sdk):
+    """The adapter honours the additive contract apply() relies on: read set | new tag."""
+    import types as _t
+
+    existing = _t.SimpleNamespace(tags=[_t.SimpleNamespace(tag=OGLE_DRIFT_TAG)])
+    graph = RecordingWriteGraph(aspect_return=existing)
+    backend = _make_backend(graph, stub_writeback_sdk)
+
+    current = backend.existing_tag_urns(DS_CUSTOMERS)
+    backend.set_tag_urns(DS_CUSTOMERS, current | {_SEV_HIGH})
+
+    emitted_urns = {assoc.tag for assoc in graph.emitted[0].aspect.tags}
+    assert emitted_urns == {OGLE_DRIFT_TAG, _SEV_HIGH}   # merged, nothing dropped
