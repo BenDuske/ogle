@@ -39,8 +39,11 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    **empirical** distances ride alongside to catch skew/multimodal shifts the Gaussian summaries
    idealize away: a 1-Wasserstein (the mass move in the feature's own units) and a two-sample
    Kolmogorov-Smirnov statistic (`sup|ΔCDF|`, a bounded [0,1] separation), both read
-   nonparametrically off the raw quantile functions. These label severity for the operator; the
-   eight dimensions above are what gate a page.
+   nonparametrically off the raw quantile functions. The empirical pair also rides the **spread**
+   finding — a symmetric variance move (a sensor stuck, a source gone noisy) leaves the *mean*
+   untouched, so the mean rule and its Gaussian trio never fire there, yet the quantile functions
+   still pull apart and W1/KS read the separation the ratio stats alone can't picture. These label
+   severity for the operator; the eight dimensions above are what gate a page.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.

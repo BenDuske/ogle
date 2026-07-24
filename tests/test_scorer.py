@@ -1487,6 +1487,61 @@ def test_stdev_ci_absent_without_row_count():
     assert "95% CI" not in s.message
 
 
+# ---- stdev drift: empirical distance family (W1 + KS), symmetric to the mean rule ----
+
+def test_stdev_finding_carries_empirical_w1_and_ks():
+    """A spread move whose fields carry quantiles gets W1emp + KS — the same empirical family
+    the mean rule rides, wired onto the scorer that actually fires when only the spread moves."""
+    # Mean held at ~0 offset (symmetric widen) so ONLY score_stdev fires, not score_mean.
+    q_base = {"reading": [(0.1, 8.0), (0.5, 10.0), (0.9, 12.0)]}   # tight
+    q_cur = {"reading": [(0.1, 2.0), (0.5, 10.0), (0.9, 18.0)]}    # blown out, same median
+    base = _sig(field_means={"reading": 10.0}, field_stdevs={"reading": 2.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"reading": 10.0}, field_stdevs={"reading": 6.0}, field_quantiles=q_cur)
+    kinds = {f.kind for f in score_dataset(base, cur)}
+    assert DriftKind.STDEV in kinds and DriftKind.MEAN not in kinds  # pure spread event
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["reading"]
+    assert entry["w1_emp"] > 0
+    assert entry["w1_emp_band"] in {"negligible", "small", "moderate", "large"}
+    assert entry["ks"] > 0
+    assert entry["ks_band"] in {"negligible", "small", "moderate", "large"}
+    assert "W1emp=" in s.message and "KS=" in s.message
+
+
+def test_stdev_empirical_w1_always_banded_here():
+    """Unlike the mean rule (which can carry W1 without a stdev), a stdev finding fires only when
+    both stdevs are present and non-degenerate -> W1's spread-based band is always available."""
+    q_base = {"reading": [(0.25, 9.0), (0.75, 11.0)]}
+    q_cur = {"reading": [(0.25, 4.0), (0.75, 16.0)]}
+    base = _sig(field_stdevs={"reading": 2.0}, field_quantiles=q_base)
+    cur = _sig(field_stdevs={"reading": 8.0}, field_quantiles=q_cur)  # +300% > 25%
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["reading"]
+    assert "w1_emp" in entry and "w1_emp_band" in entry  # band never missing on this path
+
+
+def test_stdev_finding_omits_empirical_distances_without_quantiles():
+    """No quantiles on a side -> the spread move still flags, just no W1/KS enrichment."""
+    base = _sig(field_stdevs={"amount": 10.0})
+    cur = _sig(field_stdevs={"amount": 20.0})
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["amount"]
+    assert "w1_emp" not in entry and "ks" not in entry
+    assert "W1emp=" not in s.message and "KS=" not in s.message
+
+
+def test_stdev_empirical_ks_omitted_when_no_shared_probability_band():
+    """Non-overlapping sampled levels -> KS/W1 return None -> absent, but the move still flags."""
+    q_base = {"reading": [(0.1, 8.0), (0.2, 12.0)]}
+    q_cur = {"reading": [(0.8, 2.0), (0.9, 18.0)]}  # disjoint probability band
+    base = _sig(field_stdevs={"reading": 2.0}, field_quantiles=q_base)
+    cur = _sig(field_stdevs={"reading": 8.0}, field_quantiles=q_cur)
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["reading"]
+    assert "ks" not in entry and "w1_emp" not in entry
+    assert "KS=" not in s.message
+
+
 @pytest.mark.parametrize("bad", [0, -0.1, -1])
 def test_build_config_rejects_nonpositive_stdev_threshold(bad):
     with pytest.raises(ValueError, match=r"stdev threshold must be > 0"):

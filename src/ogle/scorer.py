@@ -1452,6 +1452,32 @@ def score_stdev(
             )
             if ci is not None:
                 entry["ci_low"], entry["ci_high"] = ci
+            # Whole-distribution separation, symmetric to the mean rule's empirical family: a spread
+            # shift pulls the two quantile functions apart even when the mean holds still — and a
+            # symmetric variance change is invisible to `score_mean`, which never fires on this
+            # field, so the only distribution-distance readings Ogle computes would otherwise be
+            # dropped on the exact path they best describe. W1 reads how far the mass had to travel
+            # between the two sides' sampled quantile functions (the field's own units, banded by the
+            # pooled spread like W2); KS reads how cleanly the two populations pull apart at their
+            # point of maximum divergence (bounded [0,1], nonparametric — so it catches a variance
+            # move that is really a bimodal split rather than a uniform widening). Both ride on the
+            # raw quantiles alone, independent of the stdev magnitude the finding already fired on;
+            # pure enrichment, never gates. base_stdev/cur_stdev are guaranteed present and
+            # non-degenerate here, so W1 always carries its band when the quantiles exist.
+            w1 = _empirical_w1(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if w1 is not None:
+                entry["w1_emp"] = w1
+                entry["w1_emp_band"] = _w2_band(w1, base_stdev, cur_stdev)
+            ks = _empirical_ks(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if ks is not None:
+                entry["ks"] = ks
+                entry["ks_band"] = _ks_band(ks)
             worsened[path] = entry
 
     if not worsened:
@@ -1482,6 +1508,12 @@ def score_stdev(
             qval = worsened[p].get("q_value")
             if qval is not None:
                 base += f", q={qval:.1g}"
+        w1 = worsened[p].get("w1_emp")
+        if w1 is not None:
+            base += f", W1emp={w1:g} {worsened[p]['w1_emp_band']}"
+        ks = worsened[p].get("ks")
+        if ks is not None:
+            base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
         lo = worsened[p].get("ci_low")
         if lo is not None:
             base += f", 95% CI [{lo:.3g}x, {worsened[p]['ci_high']:.3g}x]"
