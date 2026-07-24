@@ -80,9 +80,26 @@ losing the ability to *rank* two already-far-apart moves — PSI keeps climbing 
 scale those thresholds are written against, so an operator reads both: `H` for calibrated "how
 separated," PSI for the magnitude. Its guard is *stricter* than Hellinger's (Jeffreys divides by
 each variance, so it needs **both** stdevs individually non-degenerate, not just the pooled
-spread) — a one-sided variance collapse carries `H` but not PSI. Purely
+spread) — a one-sided variance collapse carries `H` but not PSI. Completing the distance family,
+the same flagged move also carries the **2-Wasserstein (earth-mover) distance**
+(`W2=40.3 large`) — the one member that reads in the field's *own units*. Hellinger and PSI both
+answer "how far did the whole distribution move" as a *unitless* number (a bounded separation, an
+unbounded divergence), so an operator has to carry each metric's convention in their head; the
+2-Wasserstein is the minimum cost to reshape the old distribution into the new one, and for two
+Gaussians that optimal-transport cost collapses to `W2 = sqrt((m_c−m_b)² + (s_c−s_b)²)` — the mean
+gap and the spread gap in quadrature, a plain Euclidean distance in the (location, scale) plane.
+When the spread is unchanged it is exactly the mean move, so it sits directly comparable to the
+`100→140` already in the line ("the distribution shifted by 40 units"); when the spread also
+moves it grows past the bare gap by the scale leg. A true metric, unsigned like its siblings, it
+shares Hellinger's guard (pooled spread non-degenerate — not PSI's stricter both-sides rule), so
+the two true-metric readings ride together. Its band standardizes by the pooled sigma
+(`W2 / sqrt((s_b²+s_c²)/2)` — how many typical σ of mass transport) onto Cohen-style cutoffs
+(`<0.2` negligible … `≥0.8` large), a dimensionless magnitude that carries across features. Where
+PSI is unbounded but on an abstract log scale and Hellinger stays legible but saturates toward 1,
+`W2` is the third face: unbounded *and* in real units — it neither saturates nor needs a
+convention, it just says how far the mass had to travel. Purely
 enrichment: it labels the finding, never gates it (a field without a stdev is still flagged, just
-without a `d`/`H`/PSI; a single significant field carries a `p` but no `q`, since with one test the
+without a `d`/`H`/PSI/`W2`; a single significant field carries a `p` but no `q`, since with one test the
 correction is a no-op).
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't

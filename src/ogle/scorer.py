@@ -468,6 +468,79 @@ def _psi_band(psi: float) -> str:
     return "significant"
 
 
+def _gaussian_w2(
+    base_mean: float,
+    cur_mean: float,
+    base_stdev: Optional[float],
+    cur_stdev: Optional[float],
+    zero_floor: float,
+) -> Optional[float]:
+    """2-Wasserstein (earth-mover) distance between the two samples modeled as Gaussians — the
+    one distribution-distance in the family that reads in the feature's *own units*.
+
+    Hellinger and PSI both answer "how far did the whole distribution move" as a *unitless*
+    number: Hellinger a bounded [0,1] separation, PSI an unbounded divergence on the log scale.
+    Powerful for ranking, but an operator still has to carry the metric's convention in their
+    head — a bare `H=0.42` or `PSI=1.8` means nothing without it. The 2-Wasserstein distance
+    answers the same joint-move question in the units the field is already printed in: it is the
+    minimum "cost" (mass x ground distance) to reshape the old distribution into the new one, and
+    for two Gaussians that optimal-transport cost collapses to a clean closed form:
+
+        W2 = sqrt( (m_c - m_b)^2 + (s_c - s_b)^2 )
+
+    The mean gap and the spread gap in quadrature — a plain Euclidean distance in the
+    (location, scale) plane. When the spread is unchanged it is exactly the mean move, so it sits
+    right next to the `100->140` already in the annotation and reads as "the distribution shifted
+    by 40 <units>"; when the spread also moves it grows past the bare mean gap by the scale leg.
+    A true metric (symmetric, zero iff the two Gaussians coincide), unsigned like its siblings —
+    it measures how far, not which way (direction lives on Cohen's d).
+
+    Where PSI keeps climbing without bound but on an abstract log scale, and Hellinger stays
+    legible but saturates toward 1, W2 is the third face: unbounded *and* in real units, so it
+    neither saturates nor needs a convention — it just says how far the mass had to travel.
+
+    Pure enrichment from the two moments alone (no sample size, no new signature data), so it
+    never gates a finding. Returns None under the *same* guard as Hellinger — both stdevs present
+    and the pooled spread non-degenerate — so the two true-metric readings appear together (the
+    constant-goes-variable case surfaces via stdev/range drift instead).
+    """
+    if base_stdev is None or cur_stdev is None:
+        return None
+    pooled = ((base_stdev ** 2 + cur_stdev ** 2) / 2.0) ** 0.5
+    if pooled < zero_floor:
+        return None
+    return ((cur_mean - base_mean) ** 2 + (cur_stdev - base_stdev) ** 2) ** 0.5
+
+
+def _w2_band(w2: float, base_stdev: float, cur_stdev: float) -> str:
+    """Classify a 2-Wasserstein distance into a plain-language magnitude band.
+
+    W2 is in the field's own units, so it has no universal cutoffs — "40" is huge for a rate in
+    [0,1] and a rounding error for a dollar amount. To band it we standardize by the pooled
+    spread (W2 / sqrt((s_b^2 + s_c^2)/2)): how many typical standard deviations of mass transport
+    the move represents, a dimensionless magnitude that carries across features. On the pure
+    mean-move axis that ratio reduces to |Cohen's d|, so the same Cohen-style cutoffs apply, but
+    the scale leg lets it exceed d when the spread moved too:
+
+        < 0.2    negligible
+        0.2..0.5 small
+        0.5..0.8 moderate
+        >= 0.8   large
+
+    A value on a boundary lands in the higher band. Pure labeling — it never gates the finding, it
+    only makes the units-carrying number legible next to its unitless siblings.
+    """
+    pooled = ((base_stdev ** 2 + cur_stdev ** 2) / 2.0) ** 0.5
+    ratio = w2 / pooled if pooled > 0 else 0.0
+    if ratio < 0.2:
+        return "negligible"
+    if ratio < 0.5:
+        return "small"
+    if ratio < 0.8:
+        return "moderate"
+    return "large"
+
+
 def _mean_shift_z(
     base_mean: float,
     cur_mean: float,
@@ -1011,6 +1084,25 @@ def score_mean(
             if psi is not None:
                 entry["psi"] = psi
                 entry["psi_band"] = _psi_band(psi)
+            # The in-units face of the same joint move: the 2-Wasserstein (earth-mover) distance,
+            # sqrt(dmean^2 + dstdev^2). Hellinger and PSI both read unitless (bounded separation /
+            # unbounded divergence); W2 reports how far the whole distribution shifted in the
+            # field's own units, so it sits directly comparable to the mean values in the line.
+            # Same guard as Hellinger, so the two true-metric readings ride together.
+            w2 = _gaussian_w2(
+                base_mean,
+                cur_mean,
+                baseline.field_stdevs.get(path),
+                current.field_stdevs.get(path),
+                cfg.stdev_zero_floor,
+            )
+            if w2 is not None:
+                entry["w2"] = w2
+                entry["w2_band"] = _w2_band(
+                    w2,
+                    baseline.field_stdevs[path],
+                    current.field_stdevs[path],
+                )
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -1074,6 +1166,9 @@ def score_mean(
         psi = worsened[p].get("psi")
         if psi is not None:
             base += f", PSI={psi:.2f} {worsened[p]['psi_band']}"
+        w2 = worsened[p].get("w2")
+        if w2 is not None:
+            base += f", W2={w2:g} {worsened[p]['w2_band']}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"

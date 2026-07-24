@@ -21,6 +21,8 @@ from ogle.scorer import (
     _hellinger_band,
     _gaussian_psi,
     _psi_band,
+    _gaussian_w2,
+    _w2_band,
     _mean_shift_ci,
     _mean_shift_z,
     _null_shift_z,
@@ -714,6 +716,100 @@ def test_mean_finding_omits_psi_without_stdev():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "psi" not in m.details["fields"]["amount"]
     assert "PSI=" not in m.message
+
+
+# ---- mean drift: 2-Wasserstein (earth-mover) distance, the in-units joint move -------
+
+def test_w2_is_zero_for_identical_distributions():
+    """Same mean and same spread -> no transport -> W2 = 0."""
+    assert _gaussian_w2(50.0, 50.0, 12.0, 12.0, 1e-9) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_w2_from_pure_mean_shift_equals_the_mean_gap():
+    """Spread unchanged: the scale leg is 0, so W2 collapses to the raw mean move (|140-100|=40)."""
+    assert _gaussian_w2(100.0, 140.0, 10.0, 10.0, 1e-9) == pytest.approx(40.0, abs=1e-9)
+
+
+def test_w2_catches_pure_scale_change_with_no_mean_move():
+    """Identical means, spread 1->2: W2 = |2-1| = 1.0 in units (Cohen's d would read 0)."""
+    assert _gaussian_w2(0.0, 0.0, 1.0, 2.0, 1e-9) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_w2_adds_location_and_scale_legs_in_quadrature():
+    """Both moments move: W2 = sqrt(dmean^2 + dstdev^2) = sqrt(40^2 + 5^2) = sqrt(1625)."""
+    w2 = _gaussian_w2(100.0, 140.0, 10.0, 15.0, 1e-9)
+    assert w2 == pytest.approx(1625.0 ** 0.5, abs=1e-9)
+    # ...and it exceeds the bare mean gap by the scale leg it also folds in.
+    assert w2 > 40.0
+
+
+def test_w2_is_symmetric_in_its_two_sides():
+    """A true metric: swapping baseline and current yields the same distance."""
+    fwd = _gaussian_w2(100.0, 150.0, 20.0, 35.0, 1e-9)
+    rev = _gaussian_w2(150.0, 100.0, 35.0, 20.0, 1e-9)
+    assert fwd == pytest.approx(rev)
+
+
+def test_w2_stays_in_units_where_hellinger_saturates():
+    """On a huge gap Hellinger pins to ~1 (loses ranking power) while W2 reads the real distance."""
+    h = _gaussian_hellinger(0.0, 1e6, 1.0, 500.0, 1e-9)
+    w2 = _gaussian_w2(0.0, 1e6, 1.0, 500.0, 1e-9)
+    assert h == pytest.approx(1.0, abs=1e-3)
+    assert w2 == pytest.approx((1e6 ** 2 + 499.0 ** 2) ** 0.5, abs=1e-3)  # ~1e6, still in units
+
+
+def test_w2_none_without_a_stdev_on_a_side():
+    """No spread on one side -> no Gaussian to model -> None (mirrors Hellinger / Cohen's d)."""
+    assert _gaussian_w2(100.0, 140.0, None, 10.0, 1e-9) is None
+    assert _gaussian_w2(100.0, 140.0, 10.0, None, 1e-9) is None
+
+
+def test_w2_shares_hellingers_guard_not_psis_stricter_one():
+    """W2 needs only the pooled spread non-degenerate (like Hellinger), so a one-sided variance
+    collapse still yields a distance -- where PSI (which divides by each variance) returns None."""
+    assert _gaussian_w2(100.0, 140.0, 0.0, 10.0, 1e-9) is not None
+    assert _gaussian_hellinger(100.0, 140.0, 0.0, 10.0, 1e-9) is not None
+    assert _gaussian_psi(100.0, 140.0, 0.0, 10.0, 1e-9) is None
+    # ...and both ~constant -> pooled spread degenerate -> None.
+    assert _gaussian_w2(100.0, 140.0, 0.0, 0.0, 1e-9) is None
+
+
+@pytest.mark.parametrize(
+    "w2, base_sd, cur_sd, band",
+    [
+        (0.0, 10.0, 10.0, "negligible"),
+        (1.9, 10.0, 10.0, "negligible"),  # ratio 0.19 < 0.2
+        (2.0, 10.0, 10.0, "small"),       # ratio 0.20 -> higher band on the boundary
+        (4.9, 10.0, 10.0, "small"),
+        (5.0, 10.0, 10.0, "moderate"),    # ratio 0.50 boundary
+        (7.9, 10.0, 10.0, "moderate"),
+        (8.0, 10.0, 10.0, "large"),       # ratio 0.80 boundary
+        (40.0, 10.0, 10.0, "large"),
+    ],
+)
+def test_w2_bands_standardize_by_pooled_spread(w2, base_sd, cur_sd, band):
+    """Cohen-style cutoffs on W2 / pooled-sigma, boundary-inclusive on the upper band."""
+    assert _w2_band(w2, base_sd, cur_sd) == band
+
+
+def test_mean_finding_carries_w2_when_stdevs_present():
+    """A flagged mean move with known spread is annotated with W2 (in units) + its band."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})  # W2=40, ratio 4.0
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["w2"] == pytest.approx(40.0, abs=1e-9)
+    assert entry["w2_band"] == "large"
+    assert "W2=40 large" in m.message
+
+
+def test_mean_finding_omits_w2_without_stdev():
+    """No stdev -> no Gaussian -> the move is still flagged, just no W2."""
+    base = _sig(field_means={"amount": 100.0})
+    cur = _sig(field_means={"amount": 140.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "w2" not in m.details["fields"]["amount"]
+    assert "W2=" not in m.message
 
 
 # ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------
