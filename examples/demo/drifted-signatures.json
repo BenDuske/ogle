@@ -1,5 +1,5 @@
 {
-  "_comment": "Ogle offline demo — DRIFTED signatures. Same graph as healthy-signatures.json. Two serving-path failures, deliberately different in character: (1) dbt.orders breaks LOUDLY — SCHEMA (order_total DOUBLE -> STRING), VOLUME (row count collapsed 1.25M -> 40K), QUALITY (order_total null 0.001 -> 0.42); (2) dbt.churn_features drifts SILENTLY — same schema, same 312K rows, same null rates, but its value distributions moved out from under the model: DISTRIBUTION (customer_id uniqueness 100% -> 55%, a fan-out join now duplicating keys), MEAN (monthly_charges 64.8 -> 88.2, +36% covariate shift), STDEV (tenure_days spread 420 -> 90, collapsed), RANGE (num_support_calls max 12 -> 45, a handful of overflow rows the mean/stdev never feel). customers is unchanged, so the alert stays scoped to the real blast radius. Together the two tables exercise 7 of Ogle's 8 drift dimensions in one keyless run; the 8th (freshness) is opt-in/clock-driven — out of scope for a static fixture, so `ogle demo` showcases it separately (## 3) with an injected clock, making the demo as a whole cover all 8.",
+  "_comment": "Ogle offline demo — DRIFTED signatures. Same graph as healthy-signatures.json. Two serving-path failures, deliberately different in character: (1) dbt.orders breaks LOUDLY — SCHEMA (order_total DOUBLE -> STRING), VOLUME (row count collapsed 1.25M -> 40K), QUALITY (order_total null 0.001 -> 0.42); (2) dbt.churn_features drifts SILENTLY — same schema, same 312K rows, same null rates, but its value distributions moved out from under the model: DISTRIBUTION (customer_id uniqueness 100% -> 55%, a fan-out join now duplicating keys), MEAN (monthly_charges 64.8 -> 88.2, +36% covariate shift — its sampled quantiles also left-skew from roughly symmetric to piled-up near the plan ceiling, a shape shift the two-moment Gaussian summary idealizes but the empirical 1-Wasserstein reads straight off the quantile function), STDEV (tenure_days spread 420 -> 90, collapsed), RANGE (num_support_calls max 12 -> 45, a handful of overflow rows the mean/stdev never feel). customers is unchanged, so the alert stays scoped to the real blast radius. Together the two tables exercise 7 of Ogle's 8 drift dimensions in one keyless run; the 8th (freshness) is opt-in/clock-driven — out of scope for a static fixture, so `ogle demo` showcases it separately (## 3) with an injected clock, making the demo as a whole cover all 8.",
   "signatures": [
     {
       "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)",
@@ -28,7 +28,8 @@
       "field_means": {"tenure_days": 545.0, "monthly_charges": 88.2, "num_support_calls": 1.9},
       "field_stdevs": {"tenure_days": 90.0, "monthly_charges": 33.0, "num_support_calls": 1.6},
       "field_mins": {"tenure_days": 1, "monthly_charges": 18.5, "num_support_calls": 0},
-      "field_maxes": {"tenure_days": 3000, "monthly_charges": 118.0, "num_support_calls": 45}
+      "field_maxes": {"tenure_days": 3000, "monthly_charges": 118.0, "num_support_calls": 45},
+      "field_quantiles": {"monthly_charges": [[0.05, 30.0], [0.25, 72.0], [0.5, 92.0], [0.75, 106.0], [0.95, 116.0]]}
     },
     {
       "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.customers,PROD)",

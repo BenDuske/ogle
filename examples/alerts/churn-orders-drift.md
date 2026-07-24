@@ -19,7 +19,7 @@ drifts silently in its value distributions (distribution/mean/stdev/range) — 7
 - 🔴 **distribution** — distinct-value fraction dropped on customer_id (100%->55%) [serving]
 - 🔴 **stdev** — numeric spread shifted on tenure_days (stdev 420->90, -79%, p=0, 95% CI [0.214x, 0.215x]) [serving]
 - 🔴 **range** — numeric range breached on num_support_calls ([0, 12]->[0, 45], +275% of span, 22.0σ past) [serving]
-- 🟠 **mean** — numeric mean shifted on monthly_charges (64.8->88.2, +36%, d=+0.7 medium, P(new>old)=70%, H=0.26 small, PSI=0.57 significant, W2=23.5915 moderate, p=0, 95% CI [+23.2435, +23.5565]) [serving]
+- 🟠 **mean** — numeric mean shifted on monthly_charges (64.8->88.2, +36%, d=+0.7 medium, P(new>old)=70%, H=0.26 small, PSI=0.57 significant, W2=23.5915 moderate, W1emp=21.3889 moderate, p=0, 95% CI [+23.2435, +23.5565]) [serving]
 
 **What to check**
 - check the upstream transform that renamed/dropped the column, and any feature reading it before the next training run
