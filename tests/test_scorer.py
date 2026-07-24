@@ -25,8 +25,10 @@ from ogle.scorer import (
     _w2_band,
     _empirical_w1,
     _empirical_ks,
+    _empirical_js,
     _cdf_at,
     _ks_band,
+    _js_band,
     _quantile_at,
     _mean_shift_ci,
     _mean_shift_z,
@@ -960,6 +962,97 @@ def test_ks_band_cutoffs():
     assert _ks_band(0.5) == "large"
 
 
+# ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
+
+def test_empirical_js_is_zero_for_identical_quantiles():
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _empirical_js(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_js_is_one_for_disjoint_supports():
+    """Two sides sharing the probability band but no value overlap -> maximal divergence 1."""
+    b = [(0.25, 0.0), (0.75, 1.0)]
+    c = [(0.25, 10.0), (0.75, 11.0)]
+    assert _empirical_js(b, c) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_empirical_js_partial_overlap_known_value():
+    """Half the mass overlaps, half is displaced by one bin -> a hand-computed JS of 0.5 bits."""
+    b = [(0.25, 0.0), (0.75, 2.0)]
+    c = [(0.25, 1.0), (0.75, 3.0)]
+    assert _empirical_js(b, c) == pytest.approx(0.5, abs=1e-9)
+
+
+def test_empirical_js_symmetric_in_its_two_sides():
+    b = [(0.25, 10.0), (0.75, 30.0)]
+    c = [(0.25, 12.0), (0.75, 41.0)]
+    assert _empirical_js(b, c) == pytest.approx(_empirical_js(c, b), abs=1e-12)
+
+
+def test_empirical_js_stays_bounded_unit_interval():
+    """However far apart the two sides sit, JS never leaves [0, 1] (the log-base-2 ceiling)."""
+    b = [(0.1, 0.0), (0.5, 1.0), (0.9, 2.0)]
+    c = [(0.1, 100.0), (0.5, 101.0), (0.9, 102.0)]
+    js = _empirical_js(b, c)
+    assert 0.0 <= js <= 1.0
+    assert js == pytest.approx(1.0, abs=1e-12)  # fully displaced -> the ceiling, not past it
+
+
+def test_empirical_js_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_js(None, q) is None
+    assert _empirical_js(q, None) is None
+    assert _empirical_js((), q) is None
+
+
+def test_empirical_js_none_when_no_shared_probability_band():
+    """Non-overlapping sampled levels -> no fabricated divergence, mirroring W1/KS."""
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_js(b, c) is None
+
+
+def test_js_band_cutoffs():
+    assert _js_band(0.05) == "negligible"
+    assert _js_band(0.1) == "small"
+    assert _js_band(0.25) == "moderate"
+    assert _js_band(0.5) == "large"
+
+
+def test_mean_finding_carries_empirical_js_beside_ks():
+    """A flagged mean move with quantiles is annotated with JS + its band, alongside KS."""
+    q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.5, 140.0), (0.75, 152.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 12.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert 0.0 <= entry["js"] <= 1.0
+    assert entry["js_band"] == _js_band(entry["js"])
+    assert f"JS={entry['js']:.2f} {entry['js_band']}" in m.message
+
+
+def test_mean_finding_carries_empirical_js_without_stdev():
+    """JS rides on quantiles alone -> it fires (with its band) even when no stdev backs a W2."""
+    q_base = {"amount": [(0.25, 90.0), (0.75, 110.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.75, 150.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert "js_band" in entry  # unitless -> always banded, unlike W1
+    assert "JS=" in m.message
+    assert "w2" not in entry  # no stdev -> no Gaussian W2, but the empirical JS still fires
+
+
+def test_mean_finding_omits_empirical_js_without_quantiles():
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "js" not in m.details["fields"]["amount"]
+    assert "JS=" not in m.message
+
+
 def test_mean_finding_carries_empirical_ks_beside_w1():
     """A flagged mean move whose fields carry quantiles is annotated with KS + its band."""
     q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
@@ -1520,14 +1613,27 @@ def test_stdev_empirical_w1_always_banded_here():
     assert "w1_emp" in entry and "w1_emp_band" in entry  # band never missing on this path
 
 
+def test_stdev_finding_carries_empirical_js():
+    """The spread path closes the empirical family too: JS + its band ride beside W1/KS."""
+    q_base = {"reading": [(0.25, 9.0), (0.5, 10.0), (0.75, 11.0)]}
+    q_cur = {"reading": [(0.25, 4.0), (0.5, 10.0), (0.75, 16.0)]}  # symmetric widening
+    base = _sig(field_stdevs={"reading": 2.0}, field_quantiles=q_base)
+    cur = _sig(field_stdevs={"reading": 8.0}, field_quantiles=q_cur)  # +300% > 25%
+    s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
+    entry = s.details["fields"]["reading"]
+    assert 0.0 <= entry["js"] <= 1.0
+    assert entry["js_band"] == _js_band(entry["js"])
+    assert f"JS={entry['js']:.2f} {entry['js_band']}" in s.message
+
+
 def test_stdev_finding_omits_empirical_distances_without_quantiles():
     """No quantiles on a side -> the spread move still flags, just no W1/KS enrichment."""
     base = _sig(field_stdevs={"amount": 10.0})
     cur = _sig(field_stdevs={"amount": 20.0})
     s = [f for f in score_dataset(base, cur) if f.kind is DriftKind.STDEV][0]
     entry = s.details["fields"]["amount"]
-    assert "w1_emp" not in entry and "ks" not in entry
-    assert "W1emp=" not in s.message and "KS=" not in s.message
+    assert "w1_emp" not in entry and "ks" not in entry and "js" not in entry
+    assert "W1emp=" not in s.message and "KS=" not in s.message and "JS=" not in s.message
 
 
 def test_stdev_empirical_ks_omitted_when_no_shared_probability_band():

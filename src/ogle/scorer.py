@@ -706,6 +706,97 @@ def _ks_band(d: float) -> str:
     return "large"
 
 
+def _empirical_js(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Jensen-Shannon divergence between two empirical quantile distributions.
+
+    The third member of the *empirical* distance family after W1 and KS, and the empirical twin
+    of the Gaussian PSI: where `_gaussian_psi` models each side as a Gaussian and can run to
+    infinity, JS reads the raw quantile CDFs, is symmetric by construction, and is bounded in
+    [0, 1] (measured in bits, log base 2). It is what an *empirical* KL cannot be — nonparametric,
+    so it sees the skew and multimodal shape shifts a two-moment Gaussian summary idealizes away,
+    yet it never diverges when one side puts zero mass where the other has some, because the shared
+    mixture reference keeps every term finite:
+
+        JS = 1/2 * KL(P || M) + 1/2 * KL(Q || M),   M = 1/2 (P + Q)
+
+    where P, Q are the two sides' probability masses over a shared partition of the value axis. The
+    partition is the union of both sides' sampled quantile values (the same knot set KS reads its
+    supremum over); each bin's mass is the CDF rise across it (`_cdf_at`), and each side is
+    renormalized to sum to 1 over the binned range so the two are proper distributions on the same
+    support. A bin where one side has no mass contributes only through the mixture, so a clean
+    population split pushes JS toward its ceiling without ever making it blow up — the whole reason
+    JS is the safe symmetric divergence to report where PSI would run away.
+
+    Guarded exactly like W1/KS: it needs a shared probability band both sides sampled (`lo < hi`),
+    at least one bin between two distinct values, and non-degenerate total mass on each side;
+    otherwise None, so it rides alongside the Gaussian PSI (which still fires from the moments)
+    rather than replacing it. Pure enrichment, never gates a finding; unsigned like its siblings —
+    it measures how divergent, not which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    p_mass: List[float] = []
+    q_mass: List[float] = []
+    for x0, x1 in zip(xs, xs[1:]):
+        p_mass.append(_cdf_at(base_q, x1) - _cdf_at(base_q, x0))
+        q_mass.append(_cdf_at(cur_q, x1) - _cdf_at(cur_q, x0))
+    p_tot = sum(p_mass)
+    q_tot = sum(q_mass)
+    if p_tot <= 0 or q_tot <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    js = 0.0
+    for pm, qm in zip(p_mass, q_mass):
+        p = pm / p_tot
+        q = qm / q_tot
+        m = (p + q) / 2.0
+        if m <= 0:
+            continue  # both bins empty — contributes nothing
+        if p > 0:
+            js += 0.5 * p * math.log2(p / m)
+        if q > 0:
+            js += 0.5 * q * math.log2(q / m)
+    # Bounded in [0, 1]; clamp the tiny negative/over-unit drift a float sum can leave behind.
+    if js < 0.0:
+        return 0.0
+    if js > 1.0:
+        return 1.0
+    return js
+
+
+def _js_band(js: float) -> str:
+    """Classify a Jensen-Shannon divergence into a plain-language band.
+
+    JS is a bounded [0, 1] divergence with no Cohen-style canon, so — like `_ks_band` and
+    `_hellinger_band` — we map it onto round cutoffs the narrative can say aloud next to the
+    number:
+
+        JS < 0.1    negligible   (the two distributions are nearly the same shape)
+        0.1..0.25   small
+        0.25..0.5   moderate
+        JS >= 0.5   large        (the populations are more different than alike — a decisive,
+                                  shape-aware divergence, multimodal splits included)
+
+    A value on a boundary lands in the higher band. Pure labeling — it never gates the finding.
+    """
+    if js < 0.1:
+        return "negligible"
+    if js < 0.25:
+        return "small"
+    if js < 0.5:
+        return "moderate"
+    return "large"
+
+
 def _mean_shift_z(
     base_mean: float,
     cur_mean: float,
@@ -1298,6 +1389,19 @@ def score_mean(
             if ks is not None:
                 entry["ks"] = ks
                 entry["ks_band"] = _ks_band(ks)
+            # The bounded, symmetric empirical *divergence* to close the family: Jensen-Shannon
+            # off the same quantile CDFs. It is to the empirical W1/KS what the Gaussian PSI is to
+            # H/W2 — a divergence rather than a distance — but nonparametric and, unlike PSI,
+            # bounded [0,1] and finite even when the two populations barely overlap. Rides on the
+            # quantiles alone (no stdev guard) and is already unitless, so like KS it always carries
+            # its band.
+            js = _empirical_js(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if js is not None:
+                entry["js"] = js
+                entry["js_band"] = _js_band(js)
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -1373,6 +1477,9 @@ def score_mean(
         ks = worsened[p].get("ks")
         if ks is not None:
             base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
+        js = worsened[p].get("js")
+        if js is not None:
+            base += f", JS={js:.2f} {worsened[p]['js_band']}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"
@@ -1478,6 +1585,16 @@ def score_stdev(
             if ks is not None:
                 entry["ks"] = ks
                 entry["ks_band"] = _ks_band(ks)
+            # Jensen-Shannon closes the empirical family on the spread path too — the bounded,
+            # symmetric divergence off the same quantile CDFs, catching a variance move that is
+            # really a bimodal split the same way it does on the mean path.
+            js = _empirical_js(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if js is not None:
+                entry["js"] = js
+                entry["js_band"] = _js_band(js)
             worsened[path] = entry
 
     if not worsened:
@@ -1514,6 +1631,9 @@ def score_stdev(
         ks = worsened[p].get("ks")
         if ks is not None:
             base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
+        js = worsened[p].get("js")
+        if js is not None:
+            base += f", JS={js:.2f} {worsened[p]['js_band']}"
         lo = worsened[p].get("ci_low")
         if lo is not None:
             base += f", 95% CI [{lo:.3g}x, {worsened[p]['ci_high']:.3g}x]"

@@ -125,8 +125,15 @@ moments. Pure enrichment, unsigned like its siblings — direction stays on Cohe
 first member of the **empirical** distance family, the twin that catches multimodal/skew drift a
 Gaussian summary cannot represent. Its sibling **KS** now ships beside it — the two-sample
 Kolmogorov-Smirnov statistic (`sup|F_cur − F_base|`, a bounded [0,1] separation read off the same
-quantile CDFs, always banded since it's unitless); the roadmap's remaining empirical members are
-empirical Jensen-Shannon and histogram-PSI from raw sample bins.
+quantile CDFs, always banded since it's unitless). The third member, **empirical Jensen-Shannon**,
+now closes the family — the bounded, symmetric *divergence* to the empirical W1/KS *distances*, and
+the nonparametric twin of the Gaussian PSI: `JS = ½·KL(P‖M) + ½·KL(Q‖M)` with `M = ½(P+Q)`, where
+`P`/`Q` are the two sides' probability masses over the union of their quantile-value knots (each bin
+the CDF rise across it, each side renormalized to a proper distribution). Unlike PSI it is bounded
+`[0,1]` (bits, log₂) and stays finite even when the two populations barely overlap — the mixture
+reference `M` keeps every term finite where an empirical KL would blow up — so it always carries its
+band. The one roadmap member still open is histogram-PSI from raw sample bins (needs bin data the
+quantile summary doesn't carry).
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
 see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a
