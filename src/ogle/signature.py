@@ -37,6 +37,7 @@ Source aspects (when wired to live DataHub in W2):
   * `field_stdevs`           <- DatasetProfile.fieldProfiles[].{fieldPath,stdev}
   * `field_mins`             <- DatasetProfile.fieldProfiles[].{fieldPath,min}
   * `field_maxes`            <- DatasetProfile.fieldProfiles[].{fieldPath,max}
+  * `field_quantiles`        <- DatasetProfile.fieldProfiles[].quantiles[].{quantile,value}
 """
 
 from __future__ import annotations
@@ -123,6 +124,18 @@ class DatasetSignature:
     # never guessed.
     field_mins: Dict[str, float] = field(default_factory=dict)
     field_maxes: Dict[str, float] = field(default_factory=dict)
+    # Per-field empirical quantiles, from DataHub's profile (`fieldProfiles[].quantiles[]` =
+    # {quantile, value}). Optional exactly like the moments above; only numeric columns DataHub
+    # sampled deeply carry them. Each value is a tuple of (p, v) pairs — p a probability level in
+    # [0,1], v the field value at that quantile — kept sorted by p, strictly increasing in p and
+    # non-decreasing in v (a quantile function cannot run backwards). This is the ONLY per-field
+    # carrier of the distribution's *shape*: mean+stdev fix a Gaussian, but two very different
+    # shapes (bimodal vs unimodal, skewed vs symmetric) can share both moments. The empirical
+    # distribution-distance scorers read these raw bins to page on the shape shifts a Gaussian
+    # summary can't represent. Scoring degrades gracefully: a field lacking a usable (>= 2-point)
+    # quantile set on either side is simply not scored empirically — the Gaussian distribution-
+    # distances still fire from the moments, never guessed.
+    field_quantiles: Dict[str, Tuple[Tuple[float, float], ...]] = field(default_factory=dict)
     # Free-form provenance (e.g. the profile timestamp). Never part of the schema hash.
     computed_at: Optional[str] = None
 
@@ -154,6 +167,11 @@ class DatasetSignature:
             "field_stdevs": dict(self.field_stdevs),
             "field_mins": dict(self.field_mins),
             "field_maxes": dict(self.field_maxes),
+            # Quantiles serialize as a list of [p, v] pairs per field (JSON has no tuples).
+            "field_quantiles": {
+                path: [[p, v] for p, v in pairs]
+                for path, pairs in self.field_quantiles.items()
+            },
             "computed_at": self.computed_at,
             "schema_hash": self.schema_hash,  # denormalized for quick baseline diffing
         }
@@ -173,6 +191,10 @@ class DatasetSignature:
             field_stdevs=dict(data.get("field_stdevs", {})),
             field_mins=dict(data.get("field_mins", {})),
             field_maxes=dict(data.get("field_maxes", {})),
+            field_quantiles={
+                path: tuple((float(p), float(v)) for p, v in pairs)
+                for path, pairs in data.get("field_quantiles", {}).items()
+            },
             computed_at=data.get("computed_at"),
         )
 
@@ -187,6 +209,7 @@ def build_signature(
     field_stdevs: Optional[Dict[str, float]] = None,
     field_mins: Optional[Dict[str, float]] = None,
     field_maxes: Optional[Dict[str, float]] = None,
+    field_quantiles: Optional[Dict[str, Sequence[Tuple[float, float]]]] = None,
     computed_at: Optional[str] = None,
 ) -> DatasetSignature:
     """Convenience builder from plain tuples (what a DataHub aspect walk yields).
@@ -250,6 +273,13 @@ def build_signature(
             raise ValueError(
                 f"min for {path!r} ({mins[path]!r}) must be <= max ({maxes[path]!r})"
             )
+    # Quantiles describe an empirical distribution's shape, so they carry stricter structure than
+    # a lone moment. A field's set must be a real quantile function: every p in [0,1], every p and
+    # v finite, p strictly increasing (no duplicate levels), and v non-decreasing (a quantile
+    # function cannot run backwards — Q(0.75) < Q(0.25) is nonsense that would flip the earth-mover
+    # integral negative). Fewer than two points can't span a probability band, so it is dropped
+    # rather than half-recorded. Reject a malformed set up front rather than emit garbage.
+    quantiles = _clean_quantiles(field_quantiles)
     if row_count is not None and row_count < 0:
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
@@ -263,5 +293,52 @@ def build_signature(
         field_stdevs=stdevs,
         field_mins=mins,
         field_maxes=maxes,
+        field_quantiles=quantiles,
         computed_at=computed_at,
     )
+
+
+def _clean_quantiles(
+    field_quantiles: Optional[Dict[str, Sequence[Tuple[float, float]]]],
+) -> Dict[str, Tuple[Tuple[float, float], ...]]:
+    """Validate and normalize per-field quantile sets into sorted (p, v) tuples.
+
+    A quantile set must be a genuine quantile function: >= 2 points, every p in [0,1], every p
+    and v finite, p strictly increasing, and v non-decreasing. A set of fewer than two points is
+    dropped (it can't span a probability band); any structural violation raises rather than
+    emitting a distribution that would poison the empirical earth-mover integral downstream.
+    Input pairs may arrive in any order — they are sorted by p before the monotonicity checks.
+    """
+    out: Dict[str, Tuple[Tuple[float, float], ...]] = {}
+    for path, pairs in (field_quantiles or {}).items():
+        cleaned: List[Tuple[float, float]] = []
+        for pair in pairs:
+            p, v = float(pair[0]), float(pair[1])
+            for label, val in (("quantile level", p), ("quantile value", v)):
+                if val != val or val in (float("inf"), float("-inf")):
+                    raise ValueError(
+                        f"{label} for {path!r} must be a finite number, got {val!r}"
+                    )
+            if not 0.0 <= p <= 1.0:
+                raise ValueError(
+                    f"quantile level for {path!r} must be in [0,1], got {p!r}"
+                )
+            cleaned.append((p, v))
+        if len(cleaned) < 2:
+            # Not enough structure to describe a distribution — degrade to "no quantiles" rather
+            # than record a lone point the empirical scorer can't use.
+            continue
+        cleaned.sort(key=lambda pv: pv[0])
+        for (p0, v0), (p1, v1) in zip(cleaned, cleaned[1:]):
+            if p1 <= p0:
+                raise ValueError(
+                    f"quantile levels for {path!r} must be strictly increasing, "
+                    f"got {p0!r} then {p1!r}"
+                )
+            if v1 < v0:
+                raise ValueError(
+                    f"quantile values for {path!r} must be non-decreasing (a quantile "
+                    f"function cannot run backwards), got {v0!r} then {v1!r}"
+                )
+        out[path] = tuple(cleaned)
+    return out

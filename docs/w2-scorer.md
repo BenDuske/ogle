@@ -102,6 +102,30 @@ enrichment: it labels the finding, never gates it (a field without a stdev is st
 without a `d`/`H`/PSI/`W2`; a single significant field carries a `p` but no `q`, since with one test the
 correction is a no-op).
 
+Every distance above (`H`/PSI/`W2`) models each side as a **Gaussian** from the mean+stdev already
+in the signature, so all three are blind to a shape shift that leaves both moments unchanged — a
+symmetric column going skewed, or a unimodal one splitting bimodal, has the same mean and stdev yet
+a very different distribution. The **empirical 1-Wasserstein** (`W1emp=20 moderate`) is the
+*nonparametric twin* that sees it: when DataHub's profile carries per-field **quantiles**
+(`field_quantiles`, the raw `fieldProfiles[].quantiles[]` = `{quantile, value}` pairs), Ogle reads
+the two sides' quantile functions directly and measures the actual mass transport between them. For
+one-dimensional distributions the optimal-transport cost has a clean quantile form —
+`W1 = ∫₀¹ |Q_cur(p) − Q_base(p)| dp` — computed by trapezoid over the union of both sides'
+probability levels, each quantile function interpolated piecewise-linearly between its knots and
+flat-extrapolated past the deepest sampled quantile (never inventing tail mass). DataHub rarely
+samples the full `[0,1]` (typically `0.05..0.95`), so the integral runs over the **shared**
+probability band both sides cover and is normalized by its width: the mean quantile gap per unit
+probability, an honest in-units number (like `W2`) that neither fabricates tails nor rewards a
+wider-sampled side. It fires only when **both** sides carry a usable (≥ 2-point, strictly
+increasing in `p`, non-decreasing in `v`) quantile set — independent of the stdev guard — and is
+banded by the same pooled-sigma standardization as `W2` when both stdevs are present; otherwise it
+rides unbanded. Returns nothing (rather than guessing) when either side lacks quantiles or the two
+share no probability band, so it sits *alongside* the Gaussian distances, which still fire from the
+moments. Pure enrichment, unsigned like its siblings — direction stays on Cohen's `d`. This is the
+first member of the **empirical** distance family the roadmap names next (empirical-JS,
+histogram-PSI, nonparametric KS), the twin that catches multimodal/skew drift a Gaussian summary
+cannot represent.
+
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
 see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a
 **ratio** quantity, its right large-sample test lives in log space: `ln(s)` is approximately

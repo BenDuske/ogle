@@ -280,3 +280,73 @@ def test_from_dict_without_mins_maxes_is_backward_compatible():
     restored = DatasetSignature.from_dict(legacy)
     assert restored.field_mins == {}
     assert restored.field_maxes == {}
+
+
+def test_quantiles_round_trip():
+    """Quantile sets round-trip through to_dict/from_dict as sorted (p, v) tuples."""
+    sig = build_signature(
+        "urn:li:dataset:x",
+        [("amount", "double")],
+        row_count=1000,
+        # deliberately unsorted on input — build_signature must sort by level
+        field_quantiles={"amount": [(0.75, 30.0), (0.25, 10.0), (0.5, 20.0)]},
+        computed_at="2026-07-24T00:00:00Z",
+    )
+    assert sig.field_quantiles == {"amount": ((0.25, 10.0), (0.5, 20.0), (0.75, 30.0))}
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+    assert restored.field_quantiles == {"amount": ((0.25, 10.0), (0.5, 20.0), (0.75, 30.0))}
+
+
+def test_quantiles_do_not_affect_schema_hash():
+    """The schema hash is over (path, type) only — quantiles must never perturb it."""
+    plain = build_signature("urn:x", [("a", "int")])
+    withq = build_signature(
+        "urn:x", [("a", "int")], field_quantiles={"a": [(0.5, 1.0), (0.9, 2.0)]}
+    )
+    assert plain.schema_hash == withq.schema_hash
+
+
+def test_quantiles_default_empty():
+    sig = build_signature("urn:x", [("id", "int")])
+    assert sig.field_quantiles == {}
+
+
+def test_quantiles_thin_set_dropped():
+    """A field with fewer than two points can't describe a distribution — it is dropped."""
+    sig = build_signature("urn:x", field_quantiles={"a": [(0.5, 1.0)]})
+    assert sig.field_quantiles == {}
+
+
+def test_quantiles_level_out_of_range_rejected():
+    with pytest.raises(ValueError, match=r"quantile level for 'f'.*\[0,1\]"):
+        build_signature("urn:x", field_quantiles={"f": [(0.5, 1.0), (1.5, 2.0)]})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_quantiles_non_finite_value_rejected(bad):
+    with pytest.raises(ValueError, match="quantile value.*finite"):
+        build_signature("urn:x", field_quantiles={"f": [(0.25, 1.0), (0.75, bad)]})
+
+
+def test_quantiles_duplicate_level_rejected():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        build_signature("urn:x", field_quantiles={"f": [(0.5, 1.0), (0.5, 2.0)]})
+
+
+def test_quantiles_backwards_value_rejected():
+    """A quantile function cannot run backwards: Q(0.75) < Q(0.25) is nonsense."""
+    with pytest.raises(ValueError, match="non-decreasing"):
+        build_signature("urn:x", field_quantiles={"f": [(0.25, 5.0), (0.75, 1.0)]})
+
+
+def test_from_dict_without_quantiles_is_backward_compatible():
+    """A baseline persisted before empirical quantiles existed must still load (empty map)."""
+    legacy = {
+        "urn": "urn:x",
+        "schema_fields": [["id", "int"]],
+        "row_count": 5,
+        "field_means": {"id": 3.0},
+    }
+    restored = DatasetSignature.from_dict(legacy)
+    assert restored.field_quantiles == {}

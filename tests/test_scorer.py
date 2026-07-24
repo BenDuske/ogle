@@ -23,6 +23,8 @@ from ogle.scorer import (
     _psi_band,
     _gaussian_w2,
     _w2_band,
+    _empirical_w1,
+    _quantile_at,
     _mean_shift_ci,
     _mean_shift_z,
     _null_shift_z,
@@ -810,6 +812,93 @@ def test_mean_finding_omits_w2_without_stdev():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "w2" not in m.details["fields"]["amount"]
     assert "W2=" not in m.message
+
+
+# ---- empirical 1-Wasserstein (the nonparametric twin of the Gaussian W2) --------------
+
+def test_quantile_at_interpolates_and_clamps():
+    """Piecewise-linear between knots; flat-extrapolated (clamped) outside the sampled range."""
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _quantile_at(q, 0.375) == pytest.approx(15.0)  # midway 0.25..0.5
+    assert _quantile_at(q, 0.0) == pytest.approx(10.0)     # clamp to first
+    assert _quantile_at(q, 1.0) == pytest.approx(30.0)     # clamp to last
+
+
+def test_empirical_w1_is_zero_for_identical_quantiles():
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _empirical_w1(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_w1_equals_the_gap_for_a_pure_location_shift():
+    """Every quantile up +5 -> the mean quantile gap is exactly 5, in the field's units."""
+    b = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    c = [(0.25, 15.0), (0.5, 25.0), (0.75, 35.0)]
+    assert _empirical_w1(b, c) == pytest.approx(5.0, abs=1e-12)
+
+
+def test_empirical_w1_catches_shape_shift_the_moments_miss():
+    """Same min/max AND (near-)same mean, only the interior median moves — a pure shape shift a
+    range/moment rule is blind to but the empirical quantile earth-mover sees."""
+    b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]  # symmetric
+    c = [(0.1, 0.0), (0.5, 1.0), (0.9, 10.0)]  # left-skewed, identical endpoints
+    # gap peaks at 4 at p=0.5, tapers to 0 at 0.1 and 0.9 -> trapezoid area 1.6 over width 0.8
+    assert _empirical_w1(b, c) == pytest.approx(2.0, abs=1e-9)
+
+
+def test_empirical_w1_symmetric_in_its_two_sides():
+    b = [(0.25, 10.0), (0.75, 30.0)]
+    c = [(0.25, 12.0), (0.75, 41.0)]
+    assert _empirical_w1(b, c) == pytest.approx(_empirical_w1(c, b), abs=1e-12)
+
+
+def test_empirical_w1_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_w1(None, q) is None
+    assert _empirical_w1(q, None) is None
+    assert _empirical_w1((), q) is None
+
+
+def test_empirical_w1_none_when_no_shared_probability_band():
+    """Two sides whose sampled levels don't overlap can't be compared like-for-like."""
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_w1(b, c) is None
+
+
+def test_mean_finding_carries_empirical_w1_beside_w2():
+    """A flagged mean move whose fields carry quantiles is annotated with W1emp + its band."""
+    q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.5, 140.0), (0.75, 152.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 12.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["w1_emp"] > 0
+    assert entry["w1_emp_band"] == "large"
+    assert "W1emp=" in m.message
+
+
+def test_mean_finding_carries_empirical_w1_even_without_stdev_but_no_band():
+    """W1 rides on quantiles alone — it fires without a stdev, just with no (spread-based) band."""
+    q_base = {"amount": [(0.25, 90.0), (0.75, 110.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.75, 150.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["w1_emp"] == pytest.approx(40.0, abs=1e-9)
+    assert "w1_emp_band" not in entry
+    assert "W1emp=40" in m.message
+    assert "w2" not in entry  # no stdev -> no Gaussian W2, but the empirical twin still fires
+
+
+def test_mean_finding_omits_empirical_w1_without_quantiles():
+    """No quantiles on a side -> the move is still flagged, just no empirical W1."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "w1_emp" not in m.details["fields"]["amount"]
+    assert "W1emp=" not in m.message
 
 
 # ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------

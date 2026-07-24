@@ -58,6 +58,12 @@ class FakeSchema:
 
 
 @dataclass
+class FakeQuantile:
+    quantile: Optional[str]  # DataHub reports the level as a numeric string ("0.25")
+    value: Optional[str]     # ...and the value at that level as a numeric string too
+
+
+@dataclass
 class FakeFieldProfile:
     fieldPath: str
     nullProportion: Optional[float]
@@ -66,6 +72,7 @@ class FakeFieldProfile:
     stdev: Optional[str] = None  # DataHub reports stdev as a numeric string too
     min: Optional[str] = None    # DataHub reports min/max as numeric strings too
     max: Optional[str] = None
+    quantiles: Optional[List["FakeQuantile"]] = None
 
 
 @dataclass
@@ -310,6 +317,68 @@ def test_build_signature_skips_non_finite_and_junk_means():
     )
     sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
     assert set(sig.field_means) == {"ok"}
+
+
+def test_build_signature_folds_quantiles():
+    """`quantiles` ({quantile, value} numeric strings) land sorted in field_quantiles."""
+    profile = FakeProfile(
+        rowCount=1000,
+        fieldProfiles=[
+            FakeFieldProfile(
+                "amount",
+                0.0,
+                quantiles=[
+                    FakeQuantile("0.75", "30"),
+                    FakeQuantile("0.25", "10"),
+                    FakeQuantile("0.5", "20"),
+                ],
+            ),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_quantiles == {
+        "amount": ((0.25, 10.0), (0.5, 20.0), (0.75, 30.0))
+    }
+
+
+def test_build_signature_quantiles_absent_yields_empty():
+    """Text/categorical columns (no quantiles) and older profiles degrade to an empty map."""
+    profile = FakeProfile(rowCount=10, fieldProfiles=[FakeFieldProfile("region", 0.0)])
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert sig.field_quantiles == {}
+
+
+def test_build_signature_skips_junk_quantile_points_and_thin_sets():
+    """A junk (unparseable / out-of-range level) point is dropped; a set left with < 2 usable
+    points is dropped entirely rather than half-recorded."""
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            # one junk value + one out-of-range level -> only one clean point survives -> dropped
+            FakeFieldProfile(
+                "thin",
+                0.0,
+                quantiles=[
+                    FakeQuantile("0.5", "nope"),
+                    FakeQuantile("1.5", "3"),
+                    FakeQuantile("0.9", "9"),
+                ],
+            ),
+            # two clean points survive a junk third -> kept
+            FakeFieldProfile(
+                "kept",
+                0.0,
+                quantiles=[
+                    FakeQuantile("0.25", "1"),
+                    FakeQuantile("0.75", "3"),
+                    FakeQuantile(None, "5"),
+                ],
+            ),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_quantiles) == {"kept"}
+    assert sig.field_quantiles["kept"] == ((0.25, 1.0), (0.75, 3.0))
 
 
 def test_build_signature_folds_stdevs():

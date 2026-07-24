@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .signature import DatasetSignature, parse_iso_epoch
 
@@ -539,6 +539,76 @@ def _w2_band(w2: float, base_stdev: float, cur_stdev: float) -> str:
     if ratio < 0.8:
         return "moderate"
     return "large"
+
+
+def _quantile_at(pairs: Sequence[Tuple[float, float]], p: float) -> float:
+    """Value of the empirical quantile function at level `p`, piecewise-linear between knots.
+
+    `pairs` is a sorted (p, v) quantile set (>= 2 points, guaranteed by `_clean_quantiles`).
+    Between two known levels the quantile function is interpolated linearly; a `p` outside the
+    known range is clamped to the nearest endpoint (flat extrapolation — never invent tail mass
+    past the deepest quantile DataHub sampled). Pure and total.
+    """
+    if p <= pairs[0][0]:
+        return pairs[0][1]
+    if p >= pairs[-1][0]:
+        return pairs[-1][1]
+    for (p0, v0), (p1, v1) in zip(pairs, pairs[1:]):
+        if p <= p1:
+            span = p1 - p0
+            if span <= 0:  # defensive; _clean_quantiles forbids it
+                return v0
+            return v0 + (v1 - v0) * (p - p0) / span
+    return pairs[-1][1]
+
+
+def _empirical_w1(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Empirical 1-Wasserstein (earth-mover) distance between two quantile functions.
+
+    This is the *nonparametric* twin of the Gaussian W2: where `_gaussian_w2` models each side
+    as a Gaussian from mean+stdev and folds the location+scale move into a closed form, this
+    reads the raw quantiles DataHub sampled and measures the actual mass transport between the
+    two empirical distributions — so it sees the skew and multimodal shape shifts a two-moment
+    Gaussian summary is blind to (two distributions can share a mean and stdev yet have wildly
+    different quantile functions).
+
+    For one-dimensional distributions the optimal-transport cost has a clean quantile form: the
+    1-Wasserstein distance is the integral of the gap between the two quantile functions,
+
+        W1 = integral over p in [0,1] of |Q_cur(p) - Q_base(p)| dp
+
+    In the field's own units, like W2 — "the average distance the mass had to travel". Computed
+    by trapezoid over the union of the two sides' probability levels, each quantile function
+    interpolated piecewise-linearly (`_quantile_at`). DataHub rarely samples the full [0,1]
+    (typically 0.05..0.95), so the integral runs over the *shared* probability band [lo, hi]
+    both sides cover and is normalized by its width — the mean quantile gap per unit probability,
+    an honest in-units number that neither fabricates tail mass past the deepest sampled quantile
+    nor rewards a wider-sampled side. Returns None when either side lacks a usable quantile set
+    or the two share no probability band, so it rides *alongside* the Gaussian distances (which
+    still fire from the moments) rather than replacing them.
+
+    Pure enrichment — never gates a finding. Unsigned like its siblings (it measures how far,
+    not which way; direction lives on Cohen's d).
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    grid = sorted(
+        {p for p, _ in base_q if lo <= p <= hi}
+        | {p for p, _ in cur_q if lo <= p <= hi}
+        | {lo, hi}
+    )
+    gaps = [abs(_quantile_at(cur_q, p) - _quantile_at(base_q, p)) for p in grid]
+    area = 0.0
+    for i in range(len(grid) - 1):
+        area += (grid[i + 1] - grid[i]) * (gaps[i] + gaps[i + 1]) / 2.0
+    return area / (hi - lo)
 
 
 def _mean_shift_z(
@@ -1103,6 +1173,23 @@ def score_mean(
                     baseline.field_stdevs[path],
                     current.field_stdevs[path],
                 )
+            # The EMPIRICAL twin of that W2: the 1-Wasserstein between the two sides' raw quantile
+            # functions. W2/H/PSI all model each side as a Gaussian from mean+stdev, so they are
+            # blind to skew and multimodal shape shifts that leave both moments unchanged; W1 reads
+            # DataHub's sampled quantiles directly and sees the actual mass transport. In the
+            # field's own units like W2, so it sits directly beside it. Fires only when BOTH sides
+            # carry a usable quantile set (independent of the stdev guard above), and is banded by
+            # the pooled spread exactly like W2 when both stdevs are present.
+            w1 = _empirical_w1(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if w1 is not None:
+                entry["w1_emp"] = w1
+                bs = baseline.field_stdevs.get(path)
+                cs = current.field_stdevs.get(path)
+                if bs is not None and cs is not None:
+                    entry["w1_emp_band"] = _w2_band(w1, bs, cs)
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -1169,6 +1256,12 @@ def score_mean(
         w2 = worsened[p].get("w2")
         if w2 is not None:
             base += f", W2={w2:g} {worsened[p]['w2_band']}"
+        w1 = worsened[p].get("w1_emp")
+        if w1 is not None:
+            base += f", W1emp={w1:g}"
+            w1band = worsened[p].get("w1_emp_band")
+            if w1band is not None:
+                base += f" {w1band}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"

@@ -107,7 +107,8 @@ def build_signature_from_aspects(
       * `schema_metadata.fields[]` -> each has `.fieldPath` and `.nativeDataType`
       * `dataset_profile.rowCount` (Optional[int])
       * `dataset_profile.fieldProfiles[]` -> each has `.fieldPath`, `.nullProportion`,
-        `.uniqueProportion`, and (numeric columns only) `.mean`, `.stdev`, `.min`, `.max`
+        `.uniqueProportion`, and (numeric columns only) `.mean`, `.stdev`, `.min`, `.max`,
+        `.quantiles[]` ({quantile, value})
 
     Missing sub-fields inside the aspect are treated as missing data (skipped), not zero.
     """
@@ -130,6 +131,7 @@ def build_signature_from_aspects(
     stdevs: Dict[str, float] = {}
     mins: Dict[str, float] = {}
     maxes: Dict[str, float] = {}
+    quantiles: Dict[str, list] = {}
     if dataset_profile is not None:
         rc = getattr(dataset_profile, "rowCount", None)
         if isinstance(rc, int) and rc >= 0:
@@ -161,6 +163,21 @@ def build_signature_from_aspects(
             if min_val is not None and max_val is not None and min_val <= max_val:
                 mins[str(path)] = min_val
                 maxes[str(path)] = max_val
+            # `quantiles` = the empirical distribution's shape: a list of {quantile, value}. Each
+            # is a numeric string like {"quantile": "0.25", "value": "12.3"}. Coerce each pair
+            # with `_coerce_mean` (drop NaN/inf) and the level with `_coerce_fraction` (a
+            # probability, so gated to [0,1]); a pair survives only when BOTH parse. The set is
+            # handed to `build_signature` raw and unsorted — `_clean_quantiles` there enforces the
+            # >= 2-point / strictly-increasing-p / non-decreasing-v quantile-function contract and
+            # drops a set too thin to use, so a junk quantile never reaches the empirical scorer.
+            qpairs: list = []
+            for q in getattr(fp, "quantiles", None) or ():
+                level = _coerce_fraction(getattr(q, "quantile", None))
+                value = _coerce_mean(getattr(q, "value", None))
+                if level is not None and value is not None:
+                    qpairs.append((level, value))
+            if qpairs:
+                quantiles[str(path)] = qpairs
 
     return build_signature(
         urn=urn,
@@ -172,6 +189,7 @@ def build_signature_from_aspects(
         field_stdevs=stdevs,
         field_mins=mins,
         field_maxes=maxes,
+        field_quantiles=quantiles,
         computed_at=computed_at,
     )
 
