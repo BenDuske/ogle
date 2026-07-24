@@ -708,6 +708,83 @@ def _empirical_ks(
     return max(abs(_cdf_at(cur_q, x) - _cdf_at(base_q, x)) for x in xs)
 
 
+def _empirical_cvm(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Cramér-von Mises separation between two empirical quantile functions.
+
+    The L2 companion to KS's L-infinity. `_empirical_ks` reads the CDF gap at its single point of
+    maximum divergence — the sup norm — and by construction cannot tell a lone spike apart from a
+    broad, consistent separation of the same height: both pin KS to the same number. The classic
+    Cramér-von Mises criterion reads the *whole* gap instead, integrating its square across the
+    pooled distribution,
+
+        omega^2 = integral of (F_cur(x) - F_base(x))^2 dH(x),   H = 1/2 (F_base + F_cur)
+
+    the pooled mixture measure — so many small gaps that agree in sign accumulate (a systematic
+    drift KS's max reads as small), while a single narrow spike, weighted by the little mixture
+    mass beneath it, contributes almost nothing. Where KS answers "how far apart at the worst
+    point", CvM answers "how separated on average, over the mass that is actually there."
+
+    To keep the two directly comparable this returns the ROOT of that integral, renormalized by the
+    shared band's mixture mass — a mixture-weighted RMS of the CDF gap, on the same [0, 1]
+    probability scale as KS and reading in the same units. RMS never exceeds the sup it averages,
+    so `_empirical_cvm <= _empirical_ks` always holds: KS is the worst point, CvM the typical one.
+    A big location shift with tiny spread keeps both high (the gap is wide *everywhere* the mass
+    sits); a narrow spike on an otherwise-tracking pair pulls CvM well below KS — exactly the
+    lone-vs-broad distinction the sup norm cannot make.
+
+    Computed like KS/JS over the union of both sides' knot values: on each bin the two CDFs
+    (`_cdf_at`) are piecewise-linear, so the gap is linear and its exact mean-square over the bin
+    is (a^2 + a*b + b^2)/3 for endpoint gaps a, b; each bin is weighted by its pooled mixture mass
+    (the average of the two sides' CDF rise across it) and the total is divided by that mass so the
+    result is a proper weighted average — bounded [0, 1], honestly capped by the shared band the
+    same way KS is. Guarded identically: needs a shared probability band both sides sampled
+    (`lo < hi`), at least one bin between two distinct values, and non-degenerate pooled mass;
+    otherwise None. Pure enrichment, never gates a finding; unsigned like its siblings — it
+    measures how separated, not which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_sq = 0.0
+    total_mass = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        a = _cdf_at(cur_q, x0) - _cdf_at(base_q, x0)
+        b = _cdf_at(cur_q, x1) - _cdf_at(base_q, x1)
+        base_rise = _cdf_at(base_q, x1) - _cdf_at(base_q, x0)
+        cur_rise = _cdf_at(cur_q, x1) - _cdf_at(cur_q, x0)
+        hm = (base_rise + cur_rise) / 2.0  # pooled mixture mass on this bin
+        if hm <= 0:
+            continue  # no mass here contributes nothing to the integral
+        weighted_sq += hm * (a * a + a * b + b * b) / 3.0
+        total_mass += hm
+    if total_mass <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    omega = math.sqrt(max(0.0, weighted_sq / total_mass))
+    # A mixture-weighted RMS of a [0,1]-bounded gap; clamp float drift back into the unit interval.
+    return min(1.0, omega)
+
+
+def _cvm_band(d: float) -> str:
+    """Classify a Cramér-von Mises RMS gap into the same separation bands as KS.
+
+    CvM is returned as a root-mean-square of the CDF gap, so it lives on the exact [0, 1]
+    probability scale KS does and reads in the same units (a fraction of the distribution). It gets
+    the identical cutoffs (`_ks_band`) on purpose — the two are the typical-point and worst-point
+    views of one separation, and a shared band lets the narrative say them side by side without a
+    second mental scale. A value on a boundary lands in the higher band. Pure labeling.
+    """
+    return _ks_band(d)
+
+
 def _ks_band(d: float) -> str:
     """Classify a Kolmogorov-Smirnov statistic into a plain-language separation band.
 
@@ -1763,6 +1840,13 @@ def score_shape(
         if ks is not None:
             entry["ks"] = ks
             entry["ks_band"] = _ks_band(ks)
+        # CvM is KS's L2 twin: the mixture-weighted RMS CDF gap (typical separation) beside KS's
+        # sup (worst-point separation). Reported together they distinguish a broad consistent shift
+        # (CvM near KS) from a lone spike (CvM far below KS) — same [0,1] scale, so same band.
+        cvm = _empirical_cvm(base_q, cur_q)
+        if cvm is not None:
+            entry["cvm"] = cvm
+            entry["cvm_band"] = _cvm_band(cvm)
         w1 = _empirical_w1(base_q, cur_q)
         if w1 is not None:
             entry["w1_emp"] = w1
@@ -1788,6 +1872,9 @@ def score_shape(
         ks = worsened[p].get("ks")
         if ks is not None:
             base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
+        cvm = worsened[p].get("cvm")
+        if cvm is not None:
+            base += f", CvM={cvm:.2f} {worsened[p]['cvm_band']}"
         w1 = worsened[p].get("w1_emp")
         if w1 is not None:
             base += f", W1emp={w1:g}"

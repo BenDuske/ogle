@@ -35,15 +35,19 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    A numeric-moment finding also carries a **whole-distribution distance** readout beside the
    per-moment stats — Gaussian Hellinger (bounded [0,1] separation), Jeffreys/PSI (unbounded
    divergence), and the 2-Wasserstein (the move in the feature's own units) fold a feature's
-   location *and* scale shift into one number, and where a signature ships sample quantiles two
-   **empirical** distances ride alongside to catch skew/multimodal shifts the Gaussian summaries
-   idealize away: a 1-Wasserstein (the mass move in the feature's own units) and a two-sample
-   Kolmogorov-Smirnov statistic (`sup|ΔCDF|`, a bounded [0,1] separation), both read
-   nonparametrically off the raw quantile functions. The empirical pair also rides the **spread**
-   finding — a symmetric variance move (a sensor stuck, a source gone noisy) leaves the *mean*
-   untouched, so the mean rule and its Gaussian trio never fire there, yet the quantile functions
-   still pull apart and W1/KS read the separation the ratio stats alone can't picture. These label
-   severity for the operator; the eight dimensions above are what gate a page.
+   location *and* scale shift into one number, and where a signature ships sample quantiles a set
+   of **empirical** distances ride alongside to catch skew/multimodal shifts the Gaussian summaries
+   idealize away, all read nonparametrically off the raw quantile functions: a 1-Wasserstein (the
+   mass move in the feature's own units), a two-sample Kolmogorov-Smirnov statistic (`sup|ΔCDF|`,
+   the worst-point separation), its L2 twin the Cramér-von Mises RMS gap (the *typical* separation
+   over the mass that is actually there — near KS for a broad consistent shift, far below it for a
+   lone spike), and a bounded Jensen-Shannon divergence. This empirical family also rides the
+   **spread** finding — a symmetric variance move (a sensor stuck, a source gone noisy) leaves the
+   *mean* untouched, so the mean rule and its Gaussian trio never fire there, yet the quantile
+   functions still pull apart and the empirical readings picture the separation the ratio stats
+   alone can't — and gates the standalone **shape** finding, the moment-invariant residual a move
+   leaves when the mean *and* spread both held. These label severity for the operator; the eight
+   dimensions above are what gate a page.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.

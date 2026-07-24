@@ -26,8 +26,10 @@ from ogle.scorer import (
     _empirical_w1,
     _empirical_ks,
     _empirical_js,
+    _empirical_cvm,
     _cdf_at,
     _ks_band,
+    _cvm_band,
     _js_band,
     _quantile_at,
     _mean_shift_ci,
@@ -962,6 +964,76 @@ def test_ks_band_cutoffs():
     assert _ks_band(0.1) == "small"
     assert _ks_band(0.25) == "moderate"
     assert _ks_band(0.5) == "large"
+
+
+# ---- empirical Cramér-von Mises (the L2 twin of KS's L-infinity) --------------------
+
+
+def test_empirical_cvm_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_cvm(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_cvm_never_exceeds_ks_the_sup_it_averages():
+    """The core invariant: an RMS gap can never exceed the sup gap KS reads. Holds on any pair."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+    ]:
+        cvm = _empirical_cvm(b, c)
+        ks = _empirical_ks(b, c)
+        assert cvm is not None and ks is not None
+        assert cvm <= ks + 1e-12
+
+
+def test_empirical_cvm_positive_when_the_distributions_separate():
+    b = [(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)]
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]  # interior shape pulls apart
+    assert _empirical_cvm(b, c) > 0.0
+
+
+def test_empirical_cvm_ranks_a_broad_shift_above_a_narrow_spike_relative_to_ks():
+    """CvM's reason to exist: for the SAME KS height, a broad consistent gap scores nearer KS than
+    a narrow one. Compare each pair's CvM/KS ratio — the broad separation keeps more of its sup."""
+    broad_b = [(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)]
+    broad_c = [(0.05, 30.0), (0.5, 80.0), (0.95, 130.0)]  # whole CDF shifted — gap wide everywhere
+    narrow_b = [(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)]
+    narrow_c = [(0.05, 0.0), (0.49, 50.0), (0.51, 62.0), (0.95, 100.0)]  # a local step, tracks else
+    broad_ratio = _empirical_cvm(broad_b, broad_c) / _empirical_ks(broad_b, broad_c)
+    narrow_ratio = _empirical_cvm(narrow_b, narrow_c) / _empirical_ks(narrow_b, narrow_c)
+    assert broad_ratio > narrow_ratio
+
+
+def test_empirical_cvm_symmetric_in_its_two_sides():
+    b = [(0.1, 0.0), (0.5, 40.0), (0.9, 80.0)]
+    c = [(0.1, 10.0), (0.5, 30.0), (0.9, 95.0)]
+    assert _empirical_cvm(b, c) == pytest.approx(_empirical_cvm(c, b), abs=1e-12)
+
+
+def test_empirical_cvm_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    cvm = _empirical_cvm(b, c)
+    assert cvm is not None and 0.0 <= cvm <= 1.0
+
+
+def test_empirical_cvm_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_cvm(None, q) is None
+    assert _empirical_cvm(q, None) is None
+    assert _empirical_cvm((), q) is None
+
+
+def test_empirical_cvm_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_cvm(b, c) is None
+
+
+def test_cvm_band_shares_the_ks_cutoffs():
+    for d in (0.05, 0.1, 0.25, 0.5, 0.73):
+        assert _cvm_band(d) == _ks_band(d)
 
 
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
@@ -2090,13 +2162,17 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["js"] == pytest.approx(_empirical_js(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["js"] >= ScoreConfig.shape_js_threshold
     assert entry["js_band"] == _js_band(entry["js"])
-    # KS + in-units W1 ride along as corroboration.
+    # KS + CvM + in-units W1 ride along as corroboration.
     assert entry["ks"] == pytest.approx(_empirical_ks(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["ks_band"] == _ks_band(entry["ks"])
+    assert entry["cvm"] == pytest.approx(_empirical_cvm(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["cvm_band"] == _cvm_band(entry["cvm"])
+    assert entry["cvm"] <= entry["ks"] + 1e-12  # RMS gap never exceeds the sup KS reads
     assert entry["w1_emp"] == pytest.approx(_empirical_w1(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["w1_emp_band"] == "large"  # both stdevs present -> banded
     assert "distribution shape shifted (mean and spread held)" in shape.message
     assert f"JS={entry['js']:.2f}" in shape.message
+    assert f"CvM={entry['cvm']:.2f}" in shape.message
 
 
 def test_shape_silent_when_shape_barely_moved():
