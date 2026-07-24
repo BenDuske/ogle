@@ -19,6 +19,7 @@ import pytest
 
 from ogle.walker import (
     IN_SERVICE,
+    DataHubBackend,
     WalkResult,
     build_signature_from_aspects,
     dataset_urns_for_model,
@@ -746,3 +747,140 @@ def test_owners_flow_into_the_narrative_who_to_page_line():
     # The owner reaches the incident and the rendered "who to page" line.
     assert report.incident.owners.get(DS_CUSTOMERS) == ["jane.doe"]
     assert "jane.doe" in report.narrative
+
+
+# =======================================================================================
+# DataHubBackend — live-adapter wiring.
+#
+# The `acryl-datahub` SDK is NOT installed at test time, so we stub
+# `datahub.metadata.schema_classes` in sys.modules and inject a fake `DataHubGraph`. This
+# pins the aspect-type -> accessor contract, the DatasetProfile *timeseries* special-case
+# (get_latest_timeseries_value, NOT get_aspect), and the serving-filter in
+# discover_deployed_models — none of which had any coverage, and all of which break
+# silently against a real DataHub if the mapping drifts.
+# =======================================================================================
+
+
+@pytest.fixture
+def stub_datahub_sdk(monkeypatch):
+    import sys
+    import types
+
+    schema = types.ModuleType("datahub.metadata.schema_classes")
+
+    # Distinct sentinel classes so a test can assert *which* aspect type was requested.
+    class DatasetProfileClass: ...
+
+    class MLFeaturePropertiesClass: ...
+
+    class MLModelDeploymentPropertiesClass: ...
+
+    class MLModelPropertiesClass: ...
+
+    class OwnershipClass: ...
+
+    class SchemaMetadataClass: ...
+
+    for name, cls in {
+        "DatasetProfileClass": DatasetProfileClass,
+        "MLFeaturePropertiesClass": MLFeaturePropertiesClass,
+        "MLModelDeploymentPropertiesClass": MLModelDeploymentPropertiesClass,
+        "MLModelPropertiesClass": MLModelPropertiesClass,
+        "OwnershipClass": OwnershipClass,
+        "SchemaMetadataClass": SchemaMetadataClass,
+    }.items():
+        setattr(schema, name, cls)
+
+    # Parent packages must resolve too, or `from datahub.metadata.schema_classes import ...`
+    # fails before it reaches the stub.
+    monkeypatch.setitem(sys.modules, "datahub", types.ModuleType("datahub"))
+    monkeypatch.setitem(sys.modules, "datahub.metadata", types.ModuleType("datahub.metadata"))
+    monkeypatch.setitem(sys.modules, "datahub.metadata.schema_classes", schema)
+    return schema
+
+
+class RecordingGraph:
+    """Fake `DataHubGraph`. Records every aspect call as (method, urn, aspect_type)."""
+
+    def __init__(self, *, aspect_fn=None, aspect_return=None, timeseries_return=None, urns=None):
+        self.calls = []
+        self.filter_arg = None
+        self._aspect_fn = aspect_fn
+        self._aspect_return = aspect_return
+        self._timeseries_return = timeseries_return
+        self._urns = list(urns or [])
+
+    def get_aspect(self, entity_urn, aspect_type):
+        self.calls.append(("get_aspect", entity_urn, aspect_type))
+        if self._aspect_fn is not None:
+            return self._aspect_fn(entity_urn, aspect_type)
+        return self._aspect_return
+
+    def get_latest_timeseries_value(self, entity_urn, aspect_type, filter_criteria_map):
+        self.calls.append(("get_latest_timeseries_value", entity_urn, aspect_type))
+        self.filter_arg = filter_criteria_map
+        return self._timeseries_return
+
+    def get_urns_by_filter(self, entity_types):
+        self.filter_arg = entity_types
+        return list(self._urns)
+
+
+def test_datahubbackend_maps_snapshot_aspects_to_get_aspect(stub_datahub_sdk):
+    """Each non-timeseries accessor calls get_aspect with the matching sentinel class."""
+    schema = stub_datahub_sdk
+    sentinel = object()
+    graph = RecordingGraph(aspect_return=sentinel)
+    backend = DataHubBackend(graph=graph)
+
+    urn = "urn:li:mlModel:(x,y,PROD)"
+    cases = [
+        (backend.get_model_props, schema.MLModelPropertiesClass),
+        (backend.get_feature_props, schema.MLFeaturePropertiesClass),
+        (backend.get_deployment_props, schema.MLModelDeploymentPropertiesClass),
+        (backend.get_schema_metadata, schema.SchemaMetadataClass),
+        (backend.get_ownership, schema.OwnershipClass),
+    ]
+    for accessor, expected_cls in cases:
+        graph.calls.clear()
+        assert accessor(urn) is sentinel
+        assert graph.calls == [("get_aspect", urn, expected_cls)]
+
+
+def test_datahubbackend_dataset_profile_uses_timeseries_not_get_aspect(stub_datahub_sdk):
+    """DatasetProfile is a timeseries aspect: the SDK refuses get_aspect for it."""
+    schema = stub_datahub_sdk
+    snapshot = object()
+    graph = RecordingGraph(timeseries_return=snapshot)
+    backend = DataHubBackend(graph=graph)
+
+    urn = "urn:li:dataset:(dbt,x.orders,PROD)"
+    assert backend.get_dataset_profile(urn) is snapshot
+    assert graph.calls == [("get_latest_timeseries_value", urn, schema.DatasetProfileClass)]
+    # Empty filter map = "latest snapshot as-is"; the SDK crashes on None.
+    assert graph.filter_arg == {}
+    # And it must NOT fall back to the snapshot-aspect path.
+    assert not any(c[0] == "get_aspect" for c in graph.calls)
+
+
+def test_datahubbackend_discover_returns_only_serving_models(stub_datahub_sdk):
+    """discover_deployed_models enumerates mlModels then keeps IN_SERVICE ones."""
+    import types as _t
+
+    schema = stub_datahub_sdk
+    serving = "urn:li:mlModel:(mlflow,serving,PROD)"
+    idle = "urn:li:mlModel:(mlflow,idle,PROD)"
+
+    def aspect_fn(urn, aspect_type):
+        if aspect_type is schema.MLModelPropertiesClass:
+            deps = ["urn:li:mlModelDeployment:(sm,serving_ep,PROD)"] if urn == serving else []
+            return _t.SimpleNamespace(deployments=deps)
+        if aspect_type is schema.MLModelDeploymentPropertiesClass:
+            return _t.SimpleNamespace(status=IN_SERVICE)
+        return None
+
+    graph = RecordingGraph(aspect_fn=aspect_fn, urns=[serving, idle])
+    backend = DataHubBackend(graph=graph)
+
+    assert backend.discover_deployed_models() == [serving]
+    assert graph.filter_arg == ["mlModel"]  # enumerated the right entity type
