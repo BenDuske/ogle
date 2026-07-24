@@ -24,6 +24,9 @@ from ogle.scorer import (
     _gaussian_w2,
     _w2_band,
     _empirical_w1,
+    _empirical_ks,
+    _cdf_at,
+    _ks_band,
     _quantile_at,
     _mean_shift_ci,
     _mean_shift_z,
@@ -899,6 +902,98 @@ def test_mean_finding_omits_empirical_w1_without_quantiles():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "w1_emp" not in m.details["fields"]["amount"]
     assert "W1emp=" not in m.message
+
+
+# ---- distribution distance: empirical two-sample Kolmogorov-Smirnov -----------------
+
+def test_cdf_at_inverts_the_quantile_function():
+    """Reads the value axis: piecewise-linear between knots, clamped to p_lo/p_hi outside range."""
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _cdf_at(q, 15.0) == pytest.approx(0.375)  # midway 10..20 -> midway 0.25..0.5
+    assert _cdf_at(q, 5.0) == pytest.approx(0.25)     # below smallest value -> clamp to p_lo
+    assert _cdf_at(q, 40.0) == pytest.approx(0.75)    # above largest value -> clamp to p_hi
+
+
+def test_empirical_ks_is_zero_for_identical_quantiles():
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _empirical_ks(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_ks_equals_the_cdf_gap_for_a_pure_location_shift():
+    """Every value up +5 on a slope of 0.25/10 -> the CDFs separate by exactly 0.125."""
+    b = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    c = [(0.25, 15.0), (0.5, 25.0), (0.75, 35.0)]
+    assert _empirical_ks(b, c) == pytest.approx(0.125, abs=1e-9)
+
+
+def test_empirical_ks_catches_shape_shift_the_moments_miss():
+    """Same endpoints, only the interior median slides -> KS peaks at the shifted knot."""
+    b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]  # symmetric
+    c = [(0.1, 0.0), (0.5, 1.0), (0.9, 10.0)]  # left-skewed, identical endpoints
+    assert _empirical_ks(b, c) == pytest.approx(0.32, abs=1e-9)
+
+
+def test_empirical_ks_symmetric_in_its_two_sides():
+    b = [(0.25, 10.0), (0.75, 30.0)]
+    c = [(0.25, 12.0), (0.75, 41.0)]
+    assert _empirical_ks(b, c) == pytest.approx(_empirical_ks(c, b), abs=1e-12)
+
+
+def test_empirical_ks_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_ks(None, q) is None
+    assert _empirical_ks(q, None) is None
+    assert _empirical_ks((), q) is None
+
+
+def test_empirical_ks_none_when_no_shared_probability_band():
+    """Non-overlapping sampled levels tell us nothing comparable -> no fabricated separation."""
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_ks(b, c) is None
+
+
+def test_ks_band_cutoffs():
+    assert _ks_band(0.05) == "negligible"
+    assert _ks_band(0.1) == "small"
+    assert _ks_band(0.25) == "moderate"
+    assert _ks_band(0.5) == "large"
+
+
+def test_mean_finding_carries_empirical_ks_beside_w1():
+    """A flagged mean move whose fields carry quantiles is annotated with KS + its band."""
+    q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.5, 140.0), (0.75, 152.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 12.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["ks"] == pytest.approx(0.5, abs=1e-9)
+    assert entry["ks_band"] == "large"
+    assert "KS=0.50 large" in m.message
+
+
+def test_mean_finding_carries_empirical_ks_without_stdev():
+    """KS rides on quantiles alone -> it fires (with its band) even when no stdev backs a W2."""
+    q_base = {"amount": [(0.25, 90.0), (0.75, 110.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.75, 150.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["ks"] > 0
+    assert "ks_band" in entry  # unitless -> always banded, unlike W1
+    assert "KS=" in m.message
+    assert "w2" not in entry  # no stdev -> no Gaussian W2, but the empirical KS still fires
+
+
+def test_mean_finding_omits_empirical_ks_without_quantiles():
+    """No quantiles on a side -> the move is still flagged, just no empirical KS."""
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "ks" not in m.details["fields"]["amount"]
+    assert "KS=" not in m.message
 
 
 # ---- mean drift: Welch two-sample z-test (significance vs sampling noise) -----------

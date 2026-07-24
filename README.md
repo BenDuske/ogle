@@ -35,10 +35,12 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    A numeric-moment finding also carries a **whole-distribution distance** readout beside the
    per-moment stats — Gaussian Hellinger (bounded [0,1] separation), Jeffreys/PSI (unbounded
    divergence), and the 2-Wasserstein (the move in the feature's own units) fold a feature's
-   location *and* scale shift into one number, and where a signature ships sample quantiles an
-   **empirical 1-Wasserstein** rides alongside to catch skew/multimodal shifts the Gaussian
-   summaries idealize away. These label severity for the operator; the eight dimensions above are
-   what gate a page.
+   location *and* scale shift into one number, and where a signature ships sample quantiles two
+   **empirical** distances ride alongside to catch skew/multimodal shifts the Gaussian summaries
+   idealize away: a 1-Wasserstein (the mass move in the feature's own units) and a two-sample
+   Kolmogorov-Smirnov statistic (`sup|ΔCDF|`, a bounded [0,1] separation), both read
+   nonparametrically off the raw quantile functions. These label severity for the operator; the
+   eight dimensions above are what gate a page.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,
    when, who owns it, which downstream models are exposed, and the direct link to inspect.

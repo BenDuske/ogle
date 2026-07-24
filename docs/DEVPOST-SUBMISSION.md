@@ -87,12 +87,14 @@ The eight moment-and-metric drift dimensions now ship alongside a
 2-Wasserstein — that folds a feature's location *and* scale move into one
 whole-distribution number instead of reading each moment alone. Those model each
 side as a Gaussian from the mean+stdev already in the signature, and the **empirical**
-twin has already begun: an empirical 1-Wasserstein rides beside the Gaussian W2,
-computed nonparametrically from the two sides' raw quantile functions in the
-feature's own units — so when a signature carries sample quantiles, a multimodal or
-skew shift that both sides' Gaussian summaries idealize away still surfaces. The
-remaining empirical frontier is the rest of that family — nonparametric two-sample
-tests (KS / empirical JS / histogram-PSI) from raw sample bins. After that:
+twin now rides beside them: an empirical 1-Wasserstein and a two-sample
+Kolmogorov-Smirnov statistic, both computed nonparametrically from the two sides' raw
+quantile functions — W1 in the feature's own units (how far the mass moved), KS as a
+bounded [0,1] separation (how cleanly the two populations pull apart) — so when a
+signature carries sample quantiles, a multimodal or skew shift that both sides'
+Gaussian summaries idealize away still surfaces. The remaining empirical frontier is
+the rest of that family — empirical Jensen-Shannon and histogram-PSI from raw sample
+bins. After that:
 agent-to-agent Ogle deployments that share incident memory across teams, and
 publishing Ogle's
 DataHub Skill wrapper back upstream as an OSS contribution.

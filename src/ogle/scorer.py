@@ -611,6 +611,101 @@ def _empirical_w1(
     return area / (hi - lo)
 
 
+def _cdf_at(pairs: Sequence[Tuple[float, float]], x: float) -> float:
+    """Value of the empirical CDF at `x` — the probability-level inverse of `_quantile_at`.
+
+    `pairs` is the same sorted (p, v) quantile set the quantile-function helper reads; here we
+    invert it, reading the value axis to answer "what fraction of the distribution sits at or
+    below `x`". Because the quantile function is monotone non-decreasing, its knots' values are
+    non-decreasing too, so a piecewise-linear interpolation on the (v, p) segments gives the CDF.
+
+    Outside the sampled value range the CDF is clamped to that side's nearest sampled level
+    (`p_lo` below the smallest sampled value, `p_hi` above the largest) — the same flat
+    extrapolation `_quantile_at` uses, and for the same reason: DataHub rarely samples the tails,
+    so we never assert 0 or 1 mass past the deepest quantile it actually measured. A flat segment
+    in the quantile function (v0 == v1, a vertical jump in the CDF) resolves to the upper level,
+    keeping the CDF right-continuous. Pure and total.
+    """
+    if x <= pairs[0][1]:
+        return pairs[0][0]
+    if x >= pairs[-1][1]:
+        return pairs[-1][0]
+    for (p0, v0), (p1, v1) in zip(pairs, pairs[1:]):
+        if x <= v1:
+            span = v1 - v0
+            if span <= 0:  # vertical CDF jump; report the upper (right-continuous) level
+                return p1
+            return p0 + (p1 - p0) * (x - v0) / span
+    return pairs[-1][0]
+
+
+def _empirical_ks(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Kolmogorov-Smirnov statistic between two empirical quantile functions.
+
+    The next member of the *empirical* distance family after W1 (`_empirical_w1`): where the
+    Wasserstein twin reads how *far* the mass moved (an in-units integral of the quantile gap),
+    KS reads how *separated* the two distributions are at their point of maximum divergence — the
+    largest vertical gap between the two CDFs,
+
+        D = sup over x of |F_cur(x) - F_base(x)|
+
+    the classic nonparametric two-sample statistic. It is bounded [0, 1], unitless, and — like
+    Hellinger — needs no stdev: it rides on the raw quantiles alone, so a field carrying sampled
+    quantiles but a degenerate spread still gets a whole-distribution separation number. Because
+    it is nonparametric it also sees the skew/multimodal shifts the Gaussian H/PSI/W2 idealize
+    away; W1 answers "how far did it move", KS answers "how cleanly do the two populations pull
+    apart" — a big location shift with tiny spread pins KS near its ceiling, while a broad
+    overlapping smear keeps it low even at the same W1.
+
+    Computed by inverting each quantile function to a CDF (`_cdf_at`) and taking the max gap over
+    the union of both sides' knot values — for two piecewise-linear CDFs the supremum is attained
+    at a breakpoint, so the finite knot set is exact, not a sample. Guarded exactly like W1: it
+    needs a shared probability band both sides sampled (`lo < hi`), because two sides whose levels
+    don't overlap tell us nothing comparable — reading a separation off non-overlapping tails
+    would fabricate a difference DataHub never measured. Each side's CDF still clamps to its own
+    sampled band, so the statistic is honestly capped by that band's width (a 0.05..0.95 sample
+    can show at most 0.9) rather than pretending to see the untracked tails.
+
+    Returns None when either side lacks a usable quantile set or the two share no probability
+    band. Pure enrichment, never gates a finding; unsigned like its siblings (it measures how
+    separated, not which way — direction lives on Cohen's d).
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    return max(abs(_cdf_at(cur_q, x) - _cdf_at(base_q, x)) for x in xs)
+
+
+def _ks_band(d: float) -> str:
+    """Classify a Kolmogorov-Smirnov statistic into a plain-language separation band.
+
+    KS is a bounded [0, 1] separation with no Cohen-style canon, so — like `_hellinger_band` — we
+    map it onto round cutoffs the narrative can say aloud next to the number:
+
+        D < 0.1    negligible   (CDFs track each other everywhere — no clean population split)
+        0.1..0.25  small
+        0.25..0.5  moderate
+        D >= 0.5   large        (the two populations pull at least half apart at some value — a
+                                 decisive nonparametric separation, shape shifts included)
+
+    A value on a boundary lands in the higher band. Pure labeling — it never gates the finding.
+    """
+    if d < 0.1:
+        return "negligible"
+    if d < 0.25:
+        return "small"
+    if d < 0.5:
+        return "moderate"
+    return "large"
+
+
 def _mean_shift_z(
     base_mean: float,
     cur_mean: float,
@@ -1190,6 +1285,19 @@ def score_mean(
                 cs = current.field_stdevs.get(path)
                 if bs is not None and cs is not None:
                     entry["w1_emp_band"] = _w2_band(w1, bs, cs)
+            # The other empirical face: the two-sample Kolmogorov-Smirnov separation between the
+            # two sides' raw quantile CDFs. W1 (above) reads how far the mass moved in the field's
+            # units; KS reads how cleanly the two populations pull apart at their point of maximum
+            # divergence — a bounded [0,1] separation that, being nonparametric, sees the skew and
+            # multimodal shifts the Gaussian H/PSI/W2 idealize away. Rides on the quantiles alone
+            # (no stdev guard) and is already unitless, so unlike W1 it always carries its band.
+            ks = _empirical_ks(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if ks is not None:
+                entry["ks"] = ks
+                entry["ks_band"] = _ks_band(ks)
             # Significance: does the move survive the sample size, or is it noise? Effective
             # per-field n = rows that actually carry a value (row_count net of the null
             # fraction) — a field 40% null on 10k rows only backs the mean with 6k samples.
@@ -1262,6 +1370,9 @@ def score_mean(
             w1band = worsened[p].get("w1_emp_band")
             if w1band is not None:
                 base += f" {w1band}"
+        ks = worsened[p].get("ks")
+        if ks is not None:
+            base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
         pval = worsened[p].get("p_value")
         if pval is not None:
             base += f", p={pval:.1g}"

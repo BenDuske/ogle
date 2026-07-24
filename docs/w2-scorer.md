@@ -122,9 +122,11 @@ banded by the same pooled-sigma standardization as `W2` when both stdevs are pre
 rides unbanded. Returns nothing (rather than guessing) when either side lacks quantiles or the two
 share no probability band, so it sits *alongside* the Gaussian distances, which still fire from the
 moments. Pure enrichment, unsigned like its siblings — direction stays on Cohen's `d`. This is the
-first member of the **empirical** distance family the roadmap names next (empirical-JS,
-histogram-PSI, nonparametric KS), the twin that catches multimodal/skew drift a Gaussian summary
-cannot represent.
+first member of the **empirical** distance family, the twin that catches multimodal/skew drift a
+Gaussian summary cannot represent. Its sibling **KS** now ships beside it — the two-sample
+Kolmogorov-Smirnov statistic (`sup|F_cur − F_base|`, a bounded [0,1] separation read off the same
+quantile CDFs, always banded since it's unitless); the roadmap's remaining empirical members are
+empirical Jensen-Shannon and histogram-PSI from raw sample bins.
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
 see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a
