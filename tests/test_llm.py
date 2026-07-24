@@ -103,3 +103,84 @@ def test_narrate_falls_back_when_transport_raises(monkeypatch):
     out = narrate(findings, llm=llm.build_narrator("ollama"))
     # narrate swallows the error and returns the deterministic report.
     assert out == render_markdown(build_incident(findings))
+
+
+# ---- anthropic cloud fallback --------------------------------------------------------
+def test_build_narrator_accepts_anthropic_specs():
+    assert callable(llm.build_narrator("anthropic"))
+    assert callable(llm.build_narrator("anthropic:claude-opus-4-8"))
+    assert callable(llm.build_narrator("anthropic:claude-haiku-4-5@https://box"))
+
+
+def test_anthropic_narrator_posts_messages_and_returns_text(monkeypatch):
+    captured = _capture_urlopen(
+        monkeypatch,
+        {"content": [{"type": "text", "text": "  customers volume fell 40%.  "}]},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    n = llm.build_narrator("anthropic:claude-opus-4-8@https://box")
+    out = n("PROMPT-TEXT")
+
+    assert out == "customers volume fell 40%."             # trimmed
+    assert captured["url"] == "https://box/v1/messages"
+    assert captured["method"] == "POST"
+    assert captured["body"]["model"] == "claude-opus-4-8"
+    assert captured["body"]["max_tokens"] == llm.ANTHROPIC_MAX_TOKENS
+    assert captured["body"]["messages"] == [{"role": "user", "content": "PROMPT-TEXT"}]
+
+
+def test_anthropic_narrator_sends_auth_and_version_headers(monkeypatch):
+    _capture_urlopen(monkeypatch, {"content": [{"type": "text", "text": "ok"}]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-abc")
+    captured_req = {}
+
+    real_request = llm.urllib.request.Request
+
+    def spy_request(url, data=None, headers=None, method=None):
+        captured_req["headers"] = {k.lower(): v for k, v in (headers or {}).items()}
+        return real_request(url, data=data, headers=headers or {}, method=method)
+
+    monkeypatch.setattr(llm.urllib.request, "Request", spy_request)
+    llm.build_narrator("anthropic")("P")
+
+    assert captured_req["headers"]["x-api-key"] == "sk-test-abc"
+    assert captured_req["headers"]["anthropic-version"] == llm.ANTHROPIC_VERSION
+
+
+def test_anthropic_narrator_default_model_is_cheap(monkeypatch):
+    captured = _capture_urlopen(monkeypatch, {"content": [{"type": "text", "text": "x"}]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    llm.build_narrator("anthropic")("P")
+    assert captured["body"]["model"] == llm.DEFAULT_ANTHROPIC_MODEL
+
+
+def test_anthropic_narrator_concatenates_text_blocks(monkeypatch):
+    _capture_urlopen(
+        monkeypatch,
+        {"content": [
+            {"type": "text", "text": "Schema drift on customers. "},
+            {"type": "text", "text": "Page the owner."},
+        ]},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = llm.build_narrator("anthropic")("P")
+    assert out == "Schema drift on customers. Page the owner."
+
+
+def test_anthropic_narrator_raises_without_key(monkeypatch):
+    # No transport call should even happen — the missing key raises first.
+    def unexpected(req, timeout=None):
+        raise AssertionError("urlopen should not be reached without a key")
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", unexpected)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        llm.build_narrator("anthropic")("P")
+
+
+def test_narrate_falls_back_when_anthropic_key_missing(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    findings = [_finding()]
+    out = narrate(findings, llm=llm.build_narrator("anthropic"))
+    # A missing key raises inside the callable → deterministic report, alert still sent.
+    assert out == render_markdown(build_incident(findings))

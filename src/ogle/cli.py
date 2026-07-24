@@ -3164,9 +3164,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "After the report, add an LLM-phrased incident summary grounded in the "
             "computed facts. Optional SPEC picks the model (default: 'ollama' = local "
-            "qwen3:latest); also 'ollama:<model>' or '<...>@http://host:11434'. Falls "
-            "back to the deterministic report if the model is unreachable. Ignored with "
-            "--json."
+            "qwen3:latest); also 'ollama:<model>', 'anthropic' / 'anthropic:<model>' "
+            "(cloud fallback, needs $ANTHROPIC_API_KEY), or '<...>@<host>'. Falls back "
+            "to the deterministic report if the model is unreachable. Ignored with --json."
         ),
     )
     check.set_defaults(func=cmd_check)
@@ -3184,7 +3184,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Also show the LLM root-cause summary (feature #2) after the alert. Optional "
             "SPEC picks the model (default: 'ollama' = local qwen3:latest); also "
-            "'ollama:<model>' or '<...>@http://host:11434'. Falls back to the deterministic "
+            "'ollama:<model>', 'anthropic' / 'anthropic:<model>' (cloud fallback, needs "
+            "$ANTHROPIC_API_KEY), or '<...>@<host>'. Falls back to the deterministic "
             "summary if the model is unreachable, so the demo stays keyless."
         ),
     )
