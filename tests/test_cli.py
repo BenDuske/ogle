@@ -450,6 +450,37 @@ def test_demo_never_writes_to_cwd(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_captured_example_alert_matches_live_render():
+    """`examples/alerts/churn-orders-drift.md` must stay byte-faithful to real output.
+
+    That file is advertised as "Real captured output" and is what the README quickstart points
+    a judge at, so it can't be allowed to silently rot behind the scorer (it did once: the
+    per-finding p-values, CIs, sigma and d/H/PSI/W2 annotations landed in the render but not in
+    the committed capture). Reproduce the exact section-2 path `ogle demo` runs — seed the
+    healthy fixture, then check the drifted one through `run_drift_check` — and assert the
+    rendered block equals the committed example verbatim (minus its HTML-comment header). Any
+    future change to a finding's wording now fails here until the capture is regenerated.
+    """
+    import re
+    from pathlib import Path
+
+    from ogle.cli import _DEMO_DIR, render_report
+    from ogle.pipeline import run_drift_check
+
+    store = BaselineStore.load(_DEMO_DIR / "__demo_never_written__.json")
+    h_sigs, h_serving = load_signatures_file(_DEMO_DIR / "healthy-signatures.json")
+    d_sigs, d_serving = load_signatures_file(_DEMO_DIR / "drifted-signatures.json")
+    run_drift_check(store, h_sigs, serving_urns=h_serving, update_baselines=True)
+    drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
+    live_block = render_report(drift, as_json=False).strip()
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "alerts" / "churn-orders-drift.md"
+    text = example.read_text(encoding="utf-8").replace("\r\n", "\n")
+    captured_block = re.sub(r"(?s)^<!--.*?-->\n", "", text).strip()
+
+    assert captured_block == live_block
+
+
 def test_parser_registers_demo():
     args = build_parser().parse_args(["demo"])
     assert args.func.__name__ == "cmd_demo"
