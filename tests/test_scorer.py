@@ -37,8 +37,10 @@ from ogle.scorer import (
     _spread_shift_ci,
     _spread_shift_z,
     _two_sided_p,
+    _rel_moved,
     build_score_config,
     score_dataset,
+    score_shape,
 )
 from ogle.signature import build_signature
 
@@ -2047,3 +2049,140 @@ def test_quality_single_field_has_no_qvalue():
     q = [f for f in score_dataset(base, cur) if f.kind is DriftKind.QUALITY][0]
     assert "q_value" not in q.details["fields"]["email"]
     assert "q=" not in q.message
+
+
+# ---------------------------------------------------------------------------------------
+# score_shape — moment-invariant distribution-shape drift (the empirical family as a
+# first-class detector, not just enrichment on a mean/stdev finding).
+# ---------------------------------------------------------------------------------------
+
+# Symmetric baseline vs a strongly left-skewed current with IDENTICAL endpoints: the shape
+# moved, the moments (deliberately pinned equal on both sides below) did not.
+_SHAPE_BASE_Q = [(0.1, 0.0), (0.25, 25.0), (0.5, 50.0), (0.75, 75.0), (0.9, 100.0)]
+_SHAPE_CUR_Q = [(0.1, 0.0), (0.25, 5.0), (0.5, 10.0), (0.75, 20.0), (0.9, 100.0)]
+
+
+def test_rel_moved_matches_the_moment_rules_trigger():
+    """The shared predicate score_shape uses to ask 'did the mean/spread already move?'."""
+    assert _rel_moved(100.0, 130.0, 0.25, 1e-9) is True   # +30% >= 25% band
+    assert _rel_moved(100.0, 120.0, 0.25, 1e-9) is False  # +20% < 25% band
+    assert _rel_moved(None, 120.0, 0.25, 1e-9) is False   # missing side -> not moved
+    assert _rel_moved(120.0, None, 0.25, 1e-9) is False
+    assert _rel_moved(1e-12, 5.0, 0.25, 1e-9) is False    # baseline below zero-floor -> undefined
+
+
+def test_shape_fires_on_moment_invariant_divergence():
+    """Same mean, same stdev, only the interior shape moves -> a SHAPE finding no other rule raises."""
+    base = _sig(
+        field_means={"amount": 50.0},
+        field_stdevs={"amount": 30.0},
+        field_quantiles={"amount": _SHAPE_BASE_Q},
+    )
+    cur = _sig(
+        field_means={"amount": 50.0},   # identical -> mean rule silent
+        field_stdevs={"amount": 30.0},  # identical -> stdev rule silent
+        field_quantiles={"amount": _SHAPE_CUR_Q},
+    )
+    findings = score_dataset(base, cur)
+    assert {f.kind for f in findings} == {DriftKind.SHAPE}
+    shape = findings[0]
+    entry = shape.details["fields"]["amount"]
+    assert entry["js"] == pytest.approx(_empirical_js(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["js"] >= ScoreConfig.shape_js_threshold
+    assert entry["js_band"] == _js_band(entry["js"])
+    # KS + in-units W1 ride along as corroboration.
+    assert entry["ks"] == pytest.approx(_empirical_ks(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["ks_band"] == _ks_band(entry["ks"])
+    assert entry["w1_emp"] == pytest.approx(_empirical_w1(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["w1_emp_band"] == "large"  # both stdevs present -> banded
+    assert "distribution shape shifted (mean and spread held)" in shape.message
+    assert f"JS={entry['js']:.2f}" in shape.message
+
+
+def test_shape_silent_when_shape_barely_moved():
+    """A tiny shape wiggle under the JS band produces no finding at all — quiet on noise."""
+    mild_cur = [(0.1, 0.0), (0.25, 20.0), (0.5, 45.0), (0.75, 72.0), (0.9, 100.0)]
+    assert _empirical_js(_SHAPE_BASE_Q, mild_cur) < ScoreConfig.shape_js_threshold
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": mild_cur})
+    assert [f for f in score_dataset(base, cur) if f.kind is DriftKind.SHAPE] == []
+
+
+def test_shape_suppressed_when_mean_already_moved():
+    """A field whose mean moved carries its JS on the MEAN finding, NOT a duplicate SHAPE one."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 90.0},   # +80% -> mean rule fires
+               field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    kinds = {f.kind for f in score_dataset(base, cur)}
+    assert DriftKind.MEAN in kinds
+    assert DriftKind.SHAPE not in kinds  # reported once, on the moment finding
+
+
+def test_shape_suppressed_when_stdev_already_moved():
+    """Same for a spread move — the STDEV finding owns the divergence; no double SHAPE report."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0},
+               field_stdevs={"amount": 60.0},   # +100% -> stdev rule fires
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    kinds = {f.kind for f in score_dataset(base, cur)}
+    assert DriftKind.STDEV in kinds
+    assert DriftKind.SHAPE not in kinds
+
+
+def test_shape_none_without_quantiles():
+    """No quantile set on a side -> nothing to compare; SHAPE never guesses from the moments."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0})
+    assert score_shape(base, cur, ScoreConfig()) is None
+
+
+def test_shape_w1_unbanded_when_a_stdev_is_absent():
+    """W1 rides on quantiles alone; without a spread on both sides it carries the raw move, no band."""
+    base = _sig(field_means={"amount": 50.0}, field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_quantiles={"amount": _SHAPE_CUR_Q})
+    shape = score_shape(base, cur, ScoreConfig())
+    assert shape is not None
+    entry = shape.details["fields"]["amount"]
+    assert "w1_emp" in entry            # the raw earth-mover move still reports
+    assert "w1_emp_band" not in entry   # no stdev -> no pooled-spread band
+    assert entry["js"] >= ScoreConfig.shape_js_threshold  # JS still gates it
+
+
+def test_shape_escalates_on_a_serving_path():
+    """Shape drift on a dataset feeding a deployed model bumps one severity step + [serving] tag."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    plain = score_dataset(base, cur, serving=False)[0]
+    escalated = score_dataset(base, cur, serving=True)[0]
+    assert escalated.severity.rank == min(2, plain.severity.rank + 1)
+    assert escalated.message.endswith("[serving]")
+    assert escalated.details["serving"] is True
+
+
+def test_shape_threshold_is_tunable():
+    """A stricter JS band silences a shape move that the default would flag."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    js = _empirical_js(_SHAPE_BASE_Q, _SHAPE_CUR_Q)
+    strict = build_score_config(shape_threshold=min(1.0, js + 0.1))
+    assert score_shape(base, cur, strict) is None
+    loose = build_score_config(shape_threshold=max(1e-6, js - 0.1))
+    assert score_shape(base, cur, loose) is not None
+
+
+def test_build_score_config_rejects_out_of_range_shape_threshold():
+    with pytest.raises(ValueError, match="shape threshold"):
+        build_score_config(shape_threshold=0.0)
+    with pytest.raises(ValueError, match="shape threshold"):
+        build_score_config(shape_threshold=1.5)
+    # A valid band round-trips onto the config.
+    assert build_score_config(shape_threshold=0.2).shape_js_threshold == 0.2

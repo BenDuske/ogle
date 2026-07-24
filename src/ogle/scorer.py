@@ -31,6 +31,7 @@ class DriftKind(str, Enum):
     MEAN = "mean"
     STDEV = "stdev"
     RANGE = "range"
+    SHAPE = "shape"
 
 
 class Severity(str, Enum):
@@ -110,6 +111,16 @@ class ScoreConfig:
     # against it is undefined (division by ~0), so the field is not scored for range drift here
     # rather than paging on noise. Mirrors `mean_zero_floor` / `stdev_zero_floor`.
     range_zero_floor: float = 1e-9
+    # Jensen-Shannon divergence (bits, `_empirical_js` over the two sides' quantile CDFs) that
+    # counts as SHAPE drift — a whole-distribution shape move the moment rules are blind to. This
+    # is the one band the empirical family gates a finding on rather than merely decorating one:
+    # `score_shape` fires ONLY on fields whose mean AND spread both held inside their own bands
+    # (`mean_rel_threshold`/`stdev_rel_threshold`), so it is the moment-invariant residual — a
+    # unimodal→bimodal split, a skew flip, a uniform→peaked collapse. Default 0.1 = the `_js_band`
+    # "negligible" ceiling: anything past negligible shape divergence, when the moments did NOT
+    # move, is worth surfacing. Bounded like the null/unique bands: JS lives in [0, 1], so a
+    # threshold outside (0, 1] could never trip.
+    shape_js_threshold: float = 0.1
     # Data-freshness SLA in seconds. When set, a dataset whose profile timestamp
     # (`computed_at`) is older than this relative to the walk's `now` flags freshness drift —
     # the classic silent-stall failure (ETL stopped, rows unchanged so volume looks fine, but
@@ -127,6 +138,7 @@ def build_score_config(
     mean_threshold: Optional[float] = None,
     stdev_threshold: Optional[float] = None,
     range_threshold: Optional[float] = None,
+    shape_threshold: Optional[float] = None,
     freshness_max_age_seconds: Optional[float] = None,
     escalate_when_serving: Optional[bool] = None,
 ) -> ScoreConfig:
@@ -158,6 +170,9 @@ def build_score_config(
     )
     rng = (
         ScoreConfig.range_rel_threshold if range_threshold is None else range_threshold
+    )
+    shape = (
+        ScoreConfig.shape_js_threshold if shape_threshold is None else shape_threshold
     )
     esc = (
         ScoreConfig.escalate_when_serving
@@ -198,6 +213,15 @@ def build_score_config(
         raise ValueError(
             f"range threshold must be > 0 (got {rng}); it is a relative bounds-breach band."
         )
+    # JS is a bounded divergence in [0, 1] (`_empirical_js`), so its band is shaped like the
+    # null/unique bands, not the open-ended mean/stdev/range ones: a threshold at or below 0 flags
+    # every comparable field and divides by ~0 in `_severity_from_ratio`; one above 1 can never
+    # trip (JS never exceeds 1). Reject both up front.
+    if not (0 < shape <= 1):
+        raise ValueError(
+            f"shape threshold must be in (0, 1] (got {shape}); it is a Jensen-Shannon "
+            "divergence in bits."
+        )
     # None keeps the freshness dimension OFF (the default). A supplied SLA must be a positive
     # duration — a zero/negative age would flag every timestamped dataset as stale, and
     # `_severity_from_ratio` divides by it. Reject up front, same as the other bands.
@@ -217,6 +241,7 @@ def build_score_config(
         mean_rel_threshold=float(mean),
         stdev_rel_threshold=float(stdev),
         range_rel_threshold=float(rng),
+        shape_js_threshold=float(shape),
         freshness_max_age_seconds=None if fresh is None else float(fresh),
         escalate_when_serving=esc,
     )
@@ -1648,6 +1673,141 @@ def score_stdev(
     )
 
 
+def _rel_moved(
+    base: Optional[float], cur: Optional[float], threshold: float, zero_floor: float
+) -> bool:
+    """Did a scalar move at least `threshold` (relative), under the moment rules' own guard?
+
+    The exact trigger `score_mean` and `score_stdev` fire on, factored out so `score_shape` can
+    ask "did the mean/spread already move?" with the *same* rule those functions apply — never a
+    divergent copy. A missing side or a baseline below `zero_floor` (a relative shift against ~0 is
+    undefined) reads as "did not move," mirroring how the moment rules skip such a field rather
+    than guessing. Kept a standalone predicate on purpose: `score_mean`/`score_stdev` also need
+    the surviving `rel_shift` value inline for their entries, so they compute it directly; this is
+    the boolean-only view `score_shape` needs to decide whether a field's divergence is already
+    told by a moment finding.
+    """
+    if base is None or cur is None:
+        return False
+    if abs(base) < zero_floor:
+        return False
+    return abs(cur - base) / abs(base) >= threshold
+
+
+def score_shape(
+    baseline: DatasetSignature, current: DatasetSignature, cfg: ScoreConfig
+) -> Optional[DriftFinding]:
+    """Moment-invariant distribution-shape drift — the blind spot every other rule shares.
+
+    A numeric feature can hold its schema, row count, null rate, cardinality, min/max envelope,
+    *mean AND standard deviation* while the SHAPE of its distribution moves out from under a
+    deployed model: a unimodal feature that splits in two (a second population merged in), a
+    symmetric column that skews (one tail fattened while the other thinned, so the mean barely
+    budges), a spread that redistributes from the center to the tails without changing the
+    variance. Location drift is `score_mean`'s job; scale drift is `score_stdev`'s; both read the
+    first two moments and are *by construction* blind to a shape move that leaves those moments
+    fixed. Schema/volume/quality/distribution/range all stay green too. The one thing that moves
+    is the shape of the empirical quantile function — exactly what the Jensen-Shannon divergence
+    (`_empirical_js`, bounded [0, 1], nonparametric, symmetric) reads off the two sides' CDFs.
+
+    This is the one place the empirical distance family *gates* a finding rather than decorating
+    a moment finding that already fired. To stay strictly additive — never double-reporting drift
+    the mean/stdev rules already surface — a field is scored here ONLY when both its mean and its
+    spread held inside their own bands (`_rel_moved` against `mean_rel_threshold` /
+    `stdev_rel_threshold`, the identical trigger those rules use). So `score_shape` is precisely
+    the moment-invariant residual: the divergence the moments could not have told you. A field
+    whose mean or spread already moved carries its JS as enrichment on that finding (see
+    `score_mean`/`score_stdev`) and is left out here.
+
+    Guards, in order, per field: needs a quantile set on both sides (numeric, profiled); needs
+    JS to be computable (a shared probability band both sides sampled — else `_empirical_js`
+    returns None and the field is skipped, never guessed); needs the moments to have held; and
+    needs JS >= `cfg.shape_js_threshold`. KS and (when the field carries a spread) the in-units
+    W1 ride along as corroborating enrichment — the same readings the moment rules attach — so an
+    operator sees the shape move measured three ways. Severity scales with how far past the JS
+    band the worst field sits, like every other rule.
+    """
+    worsened: Dict[str, Dict[str, float]] = {}
+    for path, cur_q in current.field_quantiles.items():
+        base_q = baseline.field_quantiles.get(path)
+        if not base_q or not cur_q:
+            continue
+        js = _empirical_js(base_q, cur_q)
+        if js is None:
+            continue
+        # Strictly the residual: skip the field if either moment rule would already fire on it,
+        # so its divergence is reported once (there) rather than twice.
+        if _rel_moved(
+            baseline.field_means.get(path),
+            current.field_means.get(path),
+            cfg.mean_rel_threshold,
+            cfg.mean_zero_floor,
+        ):
+            continue
+        if _rel_moved(
+            baseline.field_stdevs.get(path),
+            current.field_stdevs.get(path),
+            cfg.stdev_rel_threshold,
+            cfg.stdev_zero_floor,
+        ):
+            continue
+        if js < cfg.shape_js_threshold:
+            continue
+        entry: Dict[str, float] = {"js": js, "js_band": _js_band(js)}
+        # Corroborate the bounded JS with the other two empirical readings. KS is the max CDF gap
+        # (bounded, nonparametric — a clean two-population split reads high here even when the
+        # variance held). W1 reads the move in the field's own units; its band needs a spread on
+        # both sides, so a field whose stdev is absent carries the raw W1 without a band rather
+        # than nothing (mirrors how `_w2_band` is skipped when a spread is missing).
+        ks = _empirical_ks(base_q, cur_q)
+        if ks is not None:
+            entry["ks"] = ks
+            entry["ks_band"] = _ks_band(ks)
+        w1 = _empirical_w1(base_q, cur_q)
+        if w1 is not None:
+            entry["w1_emp"] = w1
+            bstd = baseline.field_stdevs.get(path)
+            cstd = current.field_stdevs.get(path)
+            if (
+                bstd is not None
+                and cstd is not None
+                and abs(bstd) >= cfg.stdev_zero_floor
+            ):
+                entry["w1_emp_band"] = _w2_band(w1, bstd, cstd)
+        worsened[path] = entry
+
+    if not worsened:
+        return None
+
+    max_js = max(v["js"] for v in worsened.values())
+    severity = _severity_from_ratio(max_js, cfg.shape_js_threshold)
+    fields = sorted(worsened, key=lambda p: worsened[p]["js"], reverse=True)
+
+    def _annotate(p: str) -> str:
+        base = f"{p} (JS={worsened[p]['js']:.2f} {worsened[p]['js_band']}"
+        ks = worsened[p].get("ks")
+        if ks is not None:
+            base += f", KS={ks:.2f} {worsened[p]['ks_band']}"
+        w1 = worsened[p].get("w1_emp")
+        if w1 is not None:
+            base += f", W1emp={w1:g}"
+            w1band = worsened[p].get("w1_emp_band")
+            if w1band is not None:
+                base += f" {w1band}"
+        return base + ")"
+
+    return DriftFinding(
+        urn=current.urn,
+        kind=DriftKind.SHAPE,
+        severity=severity,
+        message=(
+            "distribution shape shifted (mean and spread held) on "
+            + ", ".join(_annotate(p) for p in fields)
+        ),
+        details={"fields": worsened},
+    )
+
+
 def _breach_sigma(
     base_min: float,
     base_max: float,
@@ -1835,6 +1995,7 @@ def score_dataset(
         score_distribution(baseline, current, cfg),
         score_mean(baseline, current, cfg),
         score_stdev(baseline, current, cfg),
+        score_shape(baseline, current, cfg),
         score_range(baseline, current, cfg),
         score_freshness(current, cfg, now),
     ):

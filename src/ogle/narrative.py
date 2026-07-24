@@ -67,6 +67,12 @@ _ACTIONS: Dict[DriftKind, str] = {
         "regime — values escaping the historical min/max envelope while the mean and spread "
         "hold are out-of-bounds features that can silently break a model's input assumptions"
     ),
+    DriftKind.SHAPE: (
+        "check the source for a merged second population, a segment/filter change, or a skew a "
+        "genuine regime shift introduced — a distribution whose shape moved while its mean and "
+        "spread held is drift the moment summaries can't see, so a model reading only averages "
+        "trains on a population that no longer matches the one it will score"
+    ),
 }
 
 _SEV_MARK: Dict[Severity, str] = {
