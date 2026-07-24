@@ -58,7 +58,7 @@ built to swap onto the salience-ranked
 store of facts, episodes, and preferences — so past false positives and real
 incidents sharpen future walks. The whole suite is keyless and
 Docker-free to test — every network call is monkeypatched — so `pytest -q` runs
-green with no DataHub and no API key (840+ tests at submission).
+green with no DataHub and no API key (1000+ tests at submission).
 
 ### Challenges we ran into
 - **Scoping drift to what matters.** A naïve diff flags every table that moves.
@@ -82,9 +82,14 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-With the eight moment-and-metric drift dimensions now shipping, the next scorer
-frontier is **true two-sample distribution tests** (KS / PSI / Jensen–Shannon)
-that page on shape change the per-feature moments miss; then agent-to-agent Ogle
+The eight moment-and-metric drift dimensions now ship alongside a first layer of
+**distribution-distance** signals — Gaussian Hellinger, Jeffreys/PSI, and the
+2-Wasserstein — that fold a feature's location *and* scale move into one
+whole-distribution number instead of reading each moment alone. Those model each
+side as a Gaussian from the mean+stdev already in the signature, so the next scorer
+frontier is the **empirical** twin: nonparametric two-sample tests (KS / empirical
+JS / histogram-PSI) computed from raw sample bins, which page on the multimodal and
+skew shifts a Gaussian summary can't represent. After that: agent-to-agent Ogle
 deployments that share incident memory across teams, and publishing Ogle's
 DataHub Skill wrapper back upstream as an OSS contribution.
 
