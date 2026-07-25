@@ -241,6 +241,21 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
     if tail:
         lines.append("")
         lines.append("_" + "; ".join(tail) + "._")
+    if report.unreachable_urns:
+        # A count alone isn't actionable — an operator can't chase "3 unreachable" without
+        # the names. List the affected datasets (with the fetch error) right in the default
+        # human view so nobody has to re-run with --json just to learn WHICH ones failed.
+        # Cap the listing so a wide outage doesn't bury the drift verdict; the full set always
+        # rides in the JSON twin.
+        cap = 10
+        shown = report.unreachable_urns[:cap]
+        lines.append("")
+        lines.append("Unreachable this run (couldn't fetch — not scored):")
+        for urn, msg in shown:
+            lines.append(f"  - {urn} — {msg}")
+        extra = len(report.unreachable_urns) - len(shown)
+        if extra > 0:
+            lines.append(f"  … and {extra} more (see --json for the full list).")
     return "\n".join(lines)
 
 

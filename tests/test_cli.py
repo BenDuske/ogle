@@ -521,6 +521,55 @@ def test_render_report_no_unreachable_tail_when_all_reachable():
     assert "unreachable" not in render_report(report, as_json=False)
 
 
+def test_render_report_lists_unreachable_datasets_by_name():
+    """The count isn't actionable alone — the default human view must NAME the datasets it
+    couldn't fetch (with the error) so an operator can chase them without switching to --json."""
+    from ogle.cli import render_report
+    from ogle.pipeline import DriftReport
+
+    report = DriftReport(
+        findings=[],
+        incident=None,
+        narrative="No drift detected.",
+        scored_urns=["urn:li:dataset:(a)"],
+        unreachable_urns=[
+            ("urn:li:dataset:(b)", "TimeoutError: read timed out"),
+            ("urn:li:dataset:(c)", "HTTPError: 503"),
+        ],
+    )
+    out = render_report(report, as_json=False)
+    # both URNs AND their fetch errors appear in the human report, one actionable line each
+    assert "urn:li:dataset:(b) — TimeoutError: read timed out" in out
+    assert "urn:li:dataset:(c) — HTTPError: 503" in out
+    # the count tail still leads; no truncation note when everything fits under the cap
+    assert "2 dataset(s) unreachable this run" in out
+    assert "more (see --json" not in out
+
+
+def test_render_report_caps_unreachable_listing_with_overflow_note():
+    """A wide outage must not bury the drift verdict — the listing caps at 10 and points to
+    --json for the rest; the count tail still reports the TRUE total."""
+    from ogle.cli import render_report
+    from ogle.pipeline import DriftReport
+
+    unreachable = [
+        (f"urn:li:dataset:(d{i})", "ConnectionResetError: connection reset")
+        for i in range(13)
+    ]
+    report = DriftReport(
+        findings=[], incident=None, narrative="No drift detected.",
+        scored_urns=["urn:li:dataset:(a)"], unreachable_urns=unreachable,
+    )
+    out = render_report(report, as_json=False)
+    assert "13 dataset(s) unreachable this run" in out  # count is the true total
+    assert out.count("ConnectionResetError") == 10       # only 10 lines listed
+    assert "… and 3 more (see --json for the full list)." in out
+    # the capped entries are exactly the first 10 (stable order)
+    assert "urn:li:dataset:(d0)" in out
+    assert "urn:li:dataset:(d9)" in out
+    assert "urn:li:dataset:(d10)" not in out
+
+
 def test_parser_registers_demo():
     args = build_parser().parse_args(["demo"])
     assert args.func.__name__ == "cmd_demo"
