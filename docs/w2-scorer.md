@@ -132,13 +132,20 @@ the nonparametric twin of the Gaussian PSI: `JS = ½·KL(P‖M) + ½·KL(Q‖M)`
 the CDF rise across it, each side renormalized to a proper distribution). Unlike PSI it is bounded
 `[0,1]` (bits, log₂) and stays finite even when the two populations barely overlap — the mixture
 reference `M` keeps every term finite where an empirical KL would blow up — so it always carries its
-band. Two more L∞/L2 members ride alongside these: **empirical Cramér-von Mises** (the
-mixture-weighted RMS CDF gap — the *typical* separation to KS's worst-point sup, `CvM ≤ KS`) and
-the **Kuiper** statistic (`V = D+ + D−`, the sum of the worst up- and down-gaps rather than KS's
-single larger one — invariant `V ≥ KS`, collapsing to KS when the CDFs never cross and rising above
-it on a distribution that *crosses*, e.g. both tails fattening while the center thins at fixed mean
-and spread). The one roadmap member still open is histogram-PSI from raw sample bins (needs bin data
-the quantile summary doesn't carry).
+band. Three more L∞/L2 members ride alongside these: **empirical Cramér-von Mises** (the
+mixture-weighted RMS CDF gap — the *typical* separation to KS's worst-point sup, `CvM ≤ KS`), its
+tail-weighted twin **empirical Anderson-Darling** (the same CvM mixture energy divided by the
+mixture variance `H(1-H)`, `A² = ∫(F_cur − F_base)²/(H(1−H)) dH` with `H = ½(F_base+F_cur)` — the
+weight is smallest, `= 4`, at the median and grows without bound toward either tail, so AD amplifies
+exactly the extreme-quantile discrepancies CvM's uniform weighting averages away: an outlier tail
+thickening or a floor slipping lights AD up while CvM and the sup-norm KS stay quiet; because that
+weight is `≥ 4` everywhere and every other factor is identical to CvM's, the invariant `AD ≥ 2·CvM`
+holds exactly, so AD reads on CvM's separation scale with its bands doubled — `0.2/0.5/1.0` — and,
+unlike its `[0,1]`-capped cousins, is unbounded above), and the **Kuiper** statistic (`V = D+ + D−`,
+the sum of the worst up- and down-gaps rather than KS's single larger one — invariant `V ≥ KS`,
+collapsing to KS when the CDFs never cross and rising above it on a distribution that *crosses*, e.g.
+both tails fattening while the center thins at fixed mean and spread). The one roadmap member still
+open is histogram-PSI from raw sample bins (needs bin data the quantile summary doesn't carry).
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
 see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a

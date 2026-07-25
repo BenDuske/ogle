@@ -28,10 +28,12 @@ from ogle.scorer import (
     _empirical_ks,
     _empirical_js,
     _empirical_cvm,
+    _empirical_ad,
     _empirical_kuiper,
     _cdf_at,
     _ks_band,
     _cvm_band,
+    _ad_band,
     _kuiper_band,
     _js_band,
     _quantile_at,
@@ -1209,6 +1211,88 @@ def test_empirical_kuiper_none_when_no_shared_probability_band():
 def test_kuiper_band_shares_the_ks_cutoffs():
     for d in (0.05, 0.1, 0.25, 0.5, 0.73):
         assert _kuiper_band(d) == _ks_band(d)
+
+
+# ---- empirical Anderson-Darling (tail-weighted L2 CDF separation, CvM's twin) --------
+
+# A shape whose separation lives in the TAILS: mass pushed symmetrically outward (same crossing
+# fixture Kuiper uses), so the CDF gaps sit where the mixture weight 1/(H(1-H)) runs well above 4.
+_AD_TAIL_BASE_Q = [(0.1, 40.0), (0.5, 50.0), (0.9, 60.0)]
+_AD_TAIL_CUR_Q = [(0.1, 10.0), (0.5, 50.0), (0.9, 90.0)]
+
+
+def test_empirical_ad_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_ad(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_ad_never_below_twice_cvm_its_tail_weight_guarantees():
+    """The defining invariant: the per-bin weight is >= 4 everywhere, so AD >= 2 * CvM exactly."""
+    pairs = [
+        ([(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)], [(0.1, 1.0), (0.5, 6.0), (0.9, 12.0)]),
+        (_AD_TAIL_BASE_Q, _AD_TAIL_CUR_Q),
+        ([(0.05, 0.0), (0.5, 1.0), (0.95, 2.0)], [(0.05, 0.0), (0.5, 3.0), (0.95, 4.0)]),
+        ([(0.1, 0.0), (0.9, 1.0)], [(0.1, 0.5), (0.9, 2.0)]),
+    ]
+    for b, c in pairs:
+        ad = _empirical_ad(b, c)
+        cvm = _empirical_cvm(b, c)
+        assert ad is not None and cvm is not None
+        assert ad >= 2.0 * cvm - 1e-9
+
+
+def test_empirical_ad_positive_when_the_distributions_separate():
+    b = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    c = [(0.1, 5.0), (0.5, 15.0), (0.9, 25.0)]
+    assert _empirical_ad(b, c) > 0.0
+
+
+def test_empirical_ad_amplifies_a_tail_move_past_the_median_floor():
+    """On a tail-concentrated shape the weight exceeds its median minimum of 4, so AD/CvM > 2 —
+    the tail sensitivity CvM's uniform weighting averages away."""
+    ad = _empirical_ad(_AD_TAIL_BASE_Q, _AD_TAIL_CUR_Q)
+    cvm = _empirical_cvm(_AD_TAIL_BASE_Q, _AD_TAIL_CUR_Q)
+    assert ad is not None and cvm is not None and cvm > 0.0
+    assert ad / cvm > 2.0 + 1e-6
+
+
+def test_empirical_ad_symmetric_in_its_two_sides():
+    assert _empirical_ad(_AD_TAIL_BASE_Q, _AD_TAIL_CUR_Q) == pytest.approx(
+        _empirical_ad(_AD_TAIL_CUR_Q, _AD_TAIL_BASE_Q), abs=1e-12
+    )
+
+
+def test_empirical_ad_unbounded_can_exceed_the_unit_interval():
+    """Unlike KS/CvM/Kuiper (capped at 1), AD's tail weight lets a strong separation run past 1.
+    Base mass sits in the upper band, current mass in the lower band over shared value knots, so the
+    CDF gap saturates its geometric bound across a wide sweep of levels — AD climbs above 1."""
+    b = [(0.02, 5.0), (0.5, 9.0), (0.98, 10.0)]
+    c = [(0.02, 0.0), (0.5, 1.0), (0.98, 5.0)]
+    ad = _empirical_ad(b, c)
+    assert ad is not None and ad > 1.0
+
+
+def test_empirical_ad_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_ad(None, q) is None
+    assert _empirical_ad(q, None) is None
+    assert _empirical_ad((), q) is None
+
+
+def test_empirical_ad_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_ad(b, c) is None
+
+
+def test_ad_band_doubles_the_cvm_cutoffs():
+    # AD's bands are CvM's (KS's) cutoffs scaled by two, the >=2x invariant made legible.
+    for d in (0.05, 0.1, 0.25, 0.5, 0.365):
+        assert _ad_band(2.0 * d) == _cvm_band(d)
+    assert _ad_band(0.19) == "negligible"
+    assert _ad_band(0.2) == "small"
+    assert _ad_band(0.5) == "moderate"
+    assert _ad_band(1.0) == "large"
 
 
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------

@@ -831,6 +831,109 @@ def _empirical_cvm(
     return min(1.0, omega)
 
 
+def _empirical_ad(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Anderson-Darling separation between two empirical quantile functions.
+
+    The tail-weighted twin of `_empirical_cvm`, and the third face of the CDF-gap family beside
+    KS's sup and CvM's uniform L2. CvM integrates the squared CDF gap against the pooled mixture
+    mass, weighting every point of the distribution the same — so a discrepancy out in a thin tail,
+    carrying little mixture mass, barely registers even though at the tail a small absolute gap is a
+    large *relative* move of the few observations there. The classic Anderson-Darling criterion
+    fixes exactly that blind spot by dividing the same integrand by the mixture variance H(1-H),
+
+        A^2 = integral of (F_cur(x) - F_base(x))^2 / (H(1-H)) dH,   H = 1/2 (F_base + F_cur)
+
+    the pooled mixture CDF. The weight 1/(H(1-H)) is smallest (= 4) at the median where H = 1/2 and
+    grows without bound toward either tail as H -> 0 or 1, so AD amplifies precisely the tail
+    discrepancies CvM averages away: a feature whose body tracks but whose extreme quantiles pull
+    apart — an outlier tail thickening, a floor/ceiling slipping — lights AD up while leaving CvM
+    (and often KS) quiet. Where CvM answers "how separated on average over the mass that is there",
+    AD answers "how separated once the tails are given the extra weight their few observations
+    deserve." It is to CvM what the Gaussian PSI is to Hellinger: the same shape read on a scale
+    that refuses to saturate, unbounded above rather than capped at 1.
+
+    Computed over the SAME shared-band bins and pooled masses CvM uses (`_cdf_at` gaps, exact
+    (a^2+ab+b^2)/3 mean-square per piecewise-linear bin, pooled mixture mass `hm` per bin, divided
+    by the total pooled mass) — the one addition is the per-bin tail weight 1/(H(1-H)) evaluated at
+    the bin's mixture level. Because that weight is >= 4 everywhere (H(1-H) <= 1/4 on [0,1]) and
+    every other factor is identical, term for term, to CvM's, the invariant
+
+        _empirical_ad >= 2 * _empirical_cvm   (>= _empirical_cvm)
+
+    holds exactly on every pair — AD is CvM's energy with each bin's contribution boosted by at
+    least four, equality approached only when all the moved mass sits at the median where the weight
+    bottoms out at 4. That >=2x tie is why AD takes CvM's bands scaled by two (`_ad_band`): it reads
+    on CvM's own separation scale, just amplified where the tails live. Guarded identically to CvM —
+    needs a shared probability band both sides sampled (`lo < hi`), at least one bin between two
+    distinct values, and non-degenerate pooled mass; otherwise None. Pure enrichment, never gates a
+    finding; unsigned like its siblings — it measures how separated in the tails, not which way;
+    direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_sq = 0.0
+    total_mass = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        fb0 = _cdf_at(base_q, x0)
+        fb1 = _cdf_at(base_q, x1)
+        fc0 = _cdf_at(cur_q, x0)
+        fc1 = _cdf_at(cur_q, x1)
+        a = fc0 - fb0
+        b = fc1 - fb1
+        hm = ((fb1 - fb0) + (fc1 - fc0)) / 2.0  # pooled mixture mass on this bin (== CvM's)
+        if hm <= 0:
+            continue  # no mass here contributes nothing to the integral
+        # Mixture level at the bin: the pooled CDF midpoint. hm > 0 forces it strictly inside
+        # (0, 1); clamp only to fence float drift off the poles. Because H(1-H) <= 1/4 for any
+        # H in [0, 1], the tail weight is always >= 4 — the exact reason AD >= 2 * CvM.
+        h_mid = ((fb0 + fc0) / 2.0 + (fb1 + fc1) / 2.0) / 2.0
+        h_mid = min(1.0 - 1e-12, max(1e-12, h_mid))
+        weight = 1.0 / (h_mid * (1.0 - h_mid))
+        weighted_sq += hm * weight * (a * a + a * b + b * b) / 3.0
+        total_mass += hm
+    if total_mass <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    # Root of the tail-weighted mixture energy, on CvM's scale (x the tail boost); unbounded above.
+    return math.sqrt(max(0.0, weighted_sq / total_mass))
+
+
+def _ad_band(d: float) -> str:
+    """Classify an Anderson-Darling separation into CvM's bands scaled by two.
+
+    AD is unbounded above (its tail weight refuses to saturate, so unlike KS/CvM/Kuiper it can run
+    past 1), so it has no natural [0, 1] canon of its own. But the invariant `_empirical_ad >= 2 *
+    _empirical_cvm` ties it directly to CvM's scale: AD is CvM's separation with every bin boosted
+    by at least four, so twice CvM's own cutoffs (`_ks_band`'s 0.1 / 0.25 / 0.5) are the honest
+    reading of "the same separation, tail-amplified":
+
+        AD < 0.2     negligible   (even tail-weighted, the CDFs barely part)
+        0.2 .. 0.5   small
+        0.5 .. 1.0   moderate
+        AD >= 1.0    large        (a decisive tail separation — the extreme quantiles pull apart
+                                   hard even where the body and the sup-norm KS stayed quiet)
+
+    A value on a boundary lands in the higher band. Pure labeling — it never gates the finding, it
+    only lets the narrative say AD's number beside CvM's on a scale the reader already holds.
+    """
+    if d < 0.2:
+        return "negligible"
+    if d < 0.5:
+        return "small"
+    if d < 1.0:
+        return "moderate"
+    return "large"
+
+
 def _cvm_band(d: float) -> str:
     """Classify a Cramér-von Mises RMS gap into the same separation bands as KS.
 
@@ -1997,6 +2100,14 @@ def score_shape(
         if cvm is not None:
             entry["cvm"] = cvm
             entry["cvm_band"] = _cvm_band(cvm)
+        # AD is CvM's tail-weighted twin: the same mixture-energy divided by H(1-H), so the extreme
+        # quantiles count for far more than their little mass. It catches a tail thickening the
+        # body-weighted CvM (and the sup-norm KS) can miss, and by the >=2x invariant it reads on
+        # CvM's scale amplified — same story, one octave up (its band is CvM's cutoffs doubled).
+        ad = _empirical_ad(base_q, cur_q)
+        if ad is not None:
+            entry["ad"] = ad
+            entry["ad_band"] = _ad_band(ad)
         # Kuiper is KS's both-directions cousin: D+ + D-, the sum of the worst up- and down-gaps
         # rather than KS's single larger one. On a shape that crosses (center thins, both tails
         # fatten) the two half-gaps both count, so Kuiper rises above KS (invariant Kuiper >= KS)
@@ -2033,6 +2144,9 @@ def score_shape(
         cvm = worsened[p].get("cvm")
         if cvm is not None:
             base += f", CvM={cvm:.2f} {worsened[p]['cvm_band']}"
+        ad = worsened[p].get("ad")
+        if ad is not None:
+            base += f", AD={ad:.2f} {worsened[p]['ad_band']}"
         kuiper = worsened[p].get("kuiper")
         if kuiper is not None:
             base += f", V={kuiper:.2f} {worsened[p]['kuiper_band']}"
