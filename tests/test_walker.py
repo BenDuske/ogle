@@ -593,6 +593,60 @@ def test_walk_model_skips_datasets_without_aspects():
     assert {s.urn for s in result.signatures} == {DS_CUSTOMERS, DS_ORDERS}
 
 
+@dataclass
+class FlakyBackend(FakeBackend):
+    """A backend that raises on the schema fetch for a chosen URN — mirrors a live GMS that
+    5xx's or resets the socket on one dataset while the rest answer fine."""
+
+    raise_on: Optional[str] = None
+
+    def get_schema_metadata(self, urn):
+        if urn == self.raise_on:
+            raise RuntimeError("GMS 503 Service Unavailable")
+        return self.schemas.get(urn)
+
+
+def test_walk_model_records_errored_urn_and_continues():
+    """A dataset whose aspect fetch RAISES is recorded in errored_urns (not skipped_urns) and
+    the walk still fingerprints every other dataset — one flaky fetch can't blind the run."""
+    base = _task2_backend()
+    b = FlakyBackend(
+        model_props=base.model_props,
+        feature_props=base.feature_props,
+        deployment_props=base.deployment_props,
+        schemas=base.schemas,
+        profiles=base.profiles,
+        ownership=base.ownership,
+        raise_on=DS_ORDERS,
+    )
+    result = walk_model(b, MODEL_CHURN)
+    # The flaky dataset is in errored_urns with a helpful message, NOT skipped_urns.
+    errored_map = dict(result.errored_urns)
+    assert DS_ORDERS in errored_map
+    assert "RuntimeError" in errored_map[DS_ORDERS]
+    assert DS_ORDERS not in result.skipped_urns
+    # The healthy dataset still lands — the walk did not abort.
+    assert {s.urn for s in result.signatures} == {DS_CUSTOMERS}
+
+
+def test_walk_model_errored_urn_empty_on_clean_run():
+    """No fetch raises -> errored_urns stays empty (the diagnostic only fills on real failure)."""
+    result = walk_model(_task2_backend(), MODEL_CHURN)
+    assert result.errored_urns == []
+
+
+def test_walk_result_merge_unions_errored_urns_first_seen_message():
+    """Merging two walks unions errored_urns by URN, keeping the first-seen message."""
+    left = WalkResult(errored_urns=[(DS_ORDERS, "RuntimeError: first")])
+    right = WalkResult(
+        errored_urns=[(DS_ORDERS, "RuntimeError: second"), (DS_PRODUCTS, "IOError: x")]
+    )
+    merged = left.merge(right)
+    merged_map = dict(merged.errored_urns)
+    assert set(merged_map) == {DS_ORDERS, DS_PRODUCTS}
+    assert merged_map[DS_ORDERS] == "RuntimeError: first"  # first-seen wins, deterministic
+
+
 def test_walk_model_empty_result_when_model_absent():
     result = walk_model(FakeBackend(), MODEL_CHURN)
     assert result.signatures == []

@@ -356,6 +356,15 @@ class WalkResult:
     owners: Dict[str, List[str]] = field(default_factory=dict)
     # Diagnostics — populated for debugging live walks; ignored by the pipeline.
     skipped_urns: List[str] = field(default_factory=list)  # dataset URNs with no aspects
+    # Dataset URNs whose aspect fetch RAISED (transient GMS 5xx, socket reset, SDK bug) paired
+    # with a short "ExcType: message" string. Distinct from `skipped_urns` on purpose: skipped =
+    # "the dataset genuinely carries no schema/profile" (clean, expected), errored = "we could not
+    # reach it" (an outage signal an operator wants surfaced). One flaky fetch no longer aborts a
+    # whole scheduled multi-model walk — the dataset is recorded here and the walk continues, so a
+    # single unreachable table can't blind Ogle to drift on every other table in the run. Populated
+    # during traversal; available for a future pipeline/narrative "N datasets unreachable" line,
+    # mirroring how `dataset_to_models` was populated before writeback consumed it.
+    errored_urns: List[Tuple[str, str]] = field(default_factory=list)
     walked_models: List[str] = field(default_factory=list)
 
     def merge(self, other: "WalkResult") -> "WalkResult":
@@ -387,12 +396,24 @@ class WalkResult:
                     if n not in bucket:
                         bucket.append(n)
 
+        # Errored fetches union by URN, keeping the first-seen message for a URN that failed in
+        # both walks (deterministic); order is first-seen so the diagnostic reads stably.
+        merged_errored: List[Tuple[str, str]] = []
+        seen_err: Set[str] = set()
+        for src in (self.errored_urns, other.errored_urns):
+            for ds_urn, msg in src:
+                if ds_urn in seen_err:
+                    continue
+                seen_err.add(ds_urn)
+                merged_errored.append((ds_urn, msg))
+
         return WalkResult(
             signatures=list(by_urn.values()),
             serving_dataset_urns=self.serving_dataset_urns | other.serving_dataset_urns,
             dataset_to_models=merged_ds_to_models,
             owners=merged_owners,
             skipped_urns=sorted(set(self.skipped_urns) | set(other.skipped_urns)),
+            errored_urns=merged_errored,
             walked_models=sorted(set(self.walked_models) | set(other.walked_models)),
         )
 
@@ -418,15 +439,26 @@ def walk_model(
 
     signatures: List[DatasetSignature] = []
     skipped: List[str] = []
+    errored: List[Tuple[str, str]] = []
     owners: Dict[str, List[str]] = {}
     for urn in dataset_urns:
-        schema_md = backend.get_schema_metadata(urn)
-        profile = backend.get_dataset_profile(urn)
+        # Only the BACKEND fetches are guarded — a live server can 5xx, reset a socket, or trip
+        # an SDK bug on one dataset, and for a scheduled monitor that must not abort the whole
+        # walk (which would silence drift on every other table too). The pure signature build
+        # below stays OUTSIDE the guard on purpose: it is defensively duck-typed and cannot make
+        # network calls, so a raise there is a real Ogle bug that should surface loudly, not be
+        # swallowed as if the dataset were merely unreachable.
+        try:
+            schema_md = backend.get_schema_metadata(urn)
+            profile = backend.get_dataset_profile(urn)
+            owner_aspect = fetch_owners(urn) if callable(fetch_owners) else None
+        except Exception as exc:  # noqa: BLE001 — one flaky fetch must not blind a scheduled walk
+            errored.append((urn, f"{type(exc).__name__}: {exc}"))
+            continue
         sig = build_signature_from_aspects(urn, schema_md, profile, computed_at=computed_at)
-        if callable(fetch_owners):
-            names = extract_owner_names(fetch_owners(urn))
-            if names:
-                owners[urn] = names
+        names = extract_owner_names(owner_aspect)
+        if names:
+            owners[urn] = names
         if sig is None:
             skipped.append(urn)
             continue
@@ -441,6 +473,7 @@ def walk_model(
         dataset_to_models={ds: [model_urn] for ds in dataset_urns},
         owners=owners,
         skipped_urns=skipped,
+        errored_urns=errored,
         walked_models=[model_urn],
     )
 
