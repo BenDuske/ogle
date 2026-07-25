@@ -636,6 +636,64 @@ def _empirical_w1(
     return area / (hi - lo)
 
 
+def _empirical_w2(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Empirical 2-Wasserstein (quadratic transport) distance between two quantile functions.
+
+    The L2 companion to `_empirical_w1`, and the transport-side mirror of the CvM<=KS pair on the
+    CDF side. W1 integrates the *absolute* quantile gap — the average distance the mass had to
+    travel, weighting every unit of mass the same. W2 integrates its *square* and takes the root,
+
+        W2 = sqrt( integral over p in [0,1] of (Q_cur(p) - Q_base(p))^2 dp )
+
+    the same optimal-transport cost under quadratic ground cost. Because the gap is squared before
+    averaging, a move that is concentrated in a few far-displaced quantiles (an outlier tail
+    pushed way out, a small slice of mass transported a long way) weighs on W2 out of proportion
+    to the little probability it carries, while W1 — mass-democratic — reads that same move as a
+    modest average. W1 answers "how far did the typical unit of mass move"; W2 answers "how far
+    with the far-moved mass counted double", the transport analog of CvM's typical-vs-worst reading
+    of the CDF gap. Equal only when the gap is constant across the band (a pure uniform shift moves
+    every quantile the same distance, so its L1 and L2 means coincide); any spread in how far
+    different quantiles moved pulls W2 strictly above W1.
+
+    Returned in the field's own units, like W1 and the Gaussian W2, so it sits directly beside
+    them, and banded the same way (`_w2_band`) when both stdevs are present. Computed by the SAME
+    trapezoid quadrature W1 uses, over the same shared-band grid and normalized by the same band
+    width `hi - lo` — deliberately, so the two are exactly comparable: both reduce to a weighted
+    average over the identical set of endpoint gaps (each grid point carries half of each adjacent
+    segment's width), W1 the weighted mean of |gap| and W2 the weighted root-mean-square. The
+    power-mean inequality on that shared weighted set then makes the invariant
+
+        _empirical_w2 >= _empirical_w1
+
+    hold exactly on every pair — W2 is the RMS, W1 the mean of the same magnitudes — the units-side
+    twin of `_empirical_cvm <= _empirical_ks`. Guarded identically to W1: needs a shared
+    probability band both sides sampled (`lo < hi`); otherwise None. Pure enrichment, never gates a
+    finding; unsigned like its siblings — it measures how far, not which way; direction lives on
+    Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    grid = sorted(
+        {p for p, _ in base_q if lo <= p <= hi}
+        | {p for p, _ in cur_q if lo <= p <= hi}
+        | {lo, hi}
+    )
+    sq = [(_quantile_at(cur_q, p) - _quantile_at(base_q, p)) ** 2 for p in grid]
+    area = 0.0
+    for i in range(len(grid) - 1):
+        # Trapezoid on gap^2 over the same grid W1 trapezoids |gap| on, so both are weighted
+        # averages over one shared endpoint set — the exact power-mean pairing behind W2 >= W1.
+        area += (grid[i + 1] - grid[i]) * (sq[i] + sq[i + 1]) / 2.0
+    return math.sqrt(max(0.0, area / (hi - lo)))
+
+
 def _cdf_at(pairs: Sequence[Tuple[float, float]], x: float) -> float:
     """Value of the empirical CDF at `x` — the probability-level inverse of `_quantile_at`.
 
@@ -1548,6 +1606,22 @@ def score_mean(
                 cs = current.field_stdevs.get(path)
                 if bs is not None and cs is not None:
                     entry["w1_emp_band"] = _w2_band(w1, bs, cs)
+            # The L2 transport twin of that W1: the quadratic (2-)Wasserstein over the same
+            # quantile functions. W1 reads the average distance the mass moved; W2 squares the gap
+            # first, so a move concentrated in a few far-displaced quantiles weighs heavier than
+            # its little probability warrants — the transport-side typical-vs-worst reading, the
+            # units mirror of CvM-below-KS. Same trapezoid quadrature and band width as W1, so
+            # W2 >= W1 holds exactly; same units, so it takes the same pooled-spread band.
+            w2e = _empirical_w2(
+                baseline.field_quantiles.get(path),
+                current.field_quantiles.get(path),
+            )
+            if w2e is not None:
+                entry["w2_emp"] = w2e
+                bs = baseline.field_stdevs.get(path)
+                cs = current.field_stdevs.get(path)
+                if bs is not None and cs is not None:
+                    entry["w2_emp_band"] = _w2_band(w2e, bs, cs)
             # The other empirical face: the two-sample Kolmogorov-Smirnov separation between the
             # two sides' raw quantile CDFs. W1 (above) reads how far the mass moved in the field's
             # units; KS reads how cleanly the two populations pull apart at their point of maximum
@@ -1646,6 +1720,12 @@ def score_mean(
             w1band = worsened[p].get("w1_emp_band")
             if w1band is not None:
                 base += f" {w1band}"
+        w2e = worsened[p].get("w2_emp")
+        if w2e is not None:
+            base += f", W2emp={w2e:g}"
+            w2eband = worsened[p].get("w2_emp_band")
+            if w2eband is not None:
+                base += f" {w2eband}"
         ks = worsened[p].get("ks")
         if ks is not None:
             base += f", KS={ks:.2f} {worsened[p]['ks_band']}"

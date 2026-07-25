@@ -24,6 +24,7 @@ from ogle.scorer import (
     _gaussian_w2,
     _w2_band,
     _empirical_w1,
+    _empirical_w2,
     _empirical_ks,
     _empirical_js,
     _empirical_cvm,
@@ -910,6 +911,99 @@ def test_mean_finding_omits_empirical_w1_without_quantiles():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "w1_emp" not in m.details["fields"]["amount"]
     assert "W1emp=" not in m.message
+
+
+# ---- transport distance: empirical 2-Wasserstein (L2 twin of W1) --------------------
+
+def test_empirical_w2_is_zero_for_identical_quantiles():
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _empirical_w2(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_w2_equals_w1_for_a_pure_uniform_shift():
+    """Every quantile moves the same +5 -> the gap is constant, so its mean (W1) and RMS (W2)
+    coincide exactly at 5. Equality is the signature of a pure location move."""
+    b = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    c = [(0.25, 15.0), (0.5, 25.0), (0.75, 35.0)]
+    assert _empirical_w2(b, c) == pytest.approx(5.0, abs=1e-12)
+    assert _empirical_w2(b, c) == pytest.approx(_empirical_w1(b, c), abs=1e-12)
+
+
+def test_empirical_w2_exceeds_w1_when_the_transport_varies():
+    """Same endpoints, only the interior median slides -> the gap is 0 at the flanks and 4 at the
+    center, so squaring lifts the RMS above the mean: W2 = sqrt(8) ~ 2.83 vs W1 = 2.0."""
+    b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]
+    c = [(0.1, 0.0), (0.5, 1.0), (0.9, 10.0)]
+    assert _empirical_w2(b, c) == pytest.approx(math.sqrt(8.0), abs=1e-9)
+    assert _empirical_w2(b, c) > _empirical_w1(b, c)
+
+
+def test_empirical_w2_never_below_w1_the_mean_it_roots():
+    """The core invariant: an RMS gap can never fall below the mean gap W1 reads. Holds on any
+    pair — the transport-side mirror of CvM <= KS."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.49, 20.0), (0.95, 130.0)]),
+    ]:
+        w1 = _empirical_w1(b, c)
+        w2 = _empirical_w2(b, c)
+        assert w1 is not None and w2 is not None
+        assert w2 >= w1 - 1e-12
+
+
+def test_empirical_w2_symmetric_in_its_two_sides():
+    b = [(0.25, 10.0), (0.75, 30.0)]
+    c = [(0.25, 12.0), (0.75, 41.0)]
+    assert _empirical_w2(b, c) == pytest.approx(_empirical_w2(c, b), abs=1e-12)
+
+
+def test_empirical_w2_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_w2(None, q) is None
+    assert _empirical_w2(q, None) is None
+    assert _empirical_w2((), q) is None
+
+
+def test_empirical_w2_none_when_no_shared_probability_band():
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_w2(b, c) is None
+
+
+def test_mean_finding_carries_empirical_w2_beside_w1():
+    """A flagged mean move whose fields carry quantiles is annotated with W2emp + its band."""
+    q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.5, 140.0), (0.75, 152.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 12.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["w2_emp"] >= entry["w1_emp"]  # the invariant survives the whole pipeline
+    assert entry["w2_emp_band"] == "large"
+    assert "W2emp=" in m.message
+
+
+def test_mean_finding_carries_empirical_w2_even_without_stdev_but_no_band():
+    """W2 rides on quantiles alone — a constant +40 shift gives W2 = 40 exactly, no spread band."""
+    q_base = {"amount": [(0.25, 90.0), (0.75, 110.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.75, 150.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    entry = m.details["fields"]["amount"]
+    assert entry["w2_emp"] == pytest.approx(40.0, abs=1e-9)
+    assert "w2_emp_band" not in entry
+    assert "W2emp=40" in m.message
+
+
+def test_mean_finding_omits_empirical_w2_without_quantiles():
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0})
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 10.0})
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "w2_emp" not in m.details["fields"]["amount"]
+    assert "W2emp=" not in m.message
 
 
 # ---- distribution distance: empirical two-sample Kolmogorov-Smirnov -----------------
