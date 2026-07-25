@@ -32,6 +32,7 @@ from ogle.scorer import (
     _empirical_ad,
     _empirical_cramer,
     _empirical_watson,
+    _empirical_massl1,
     _empirical_kuiper,
     _cdf_at,
     _ks_band,
@@ -1529,6 +1530,105 @@ def test_watson_shares_the_cvm_bands():
         assert _cvm_band(d) == _ks_band(d)
 
 
+# ---- empirical mass-weighted L1 (CvM's L1 twin, the fourth {L1,L2}x{value,mass} corner) ----
+
+def test_empirical_massl1_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_massl1(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_massl1_never_exceeds_cvm_the_rms_it_underlies():
+    """The core invariant: the mean absolute gap is the Jensen floor of the RMS gap (E|g| <=
+    sqrt(E g^2)) under the same mixture measure, so M1 <= CvM on every pair — and hence M1 <= KS."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.5, 80.0), (0.95, 130.0)]),
+    ]:
+        massl1 = _empirical_massl1(b, c)
+        cvm = _empirical_cvm(b, c)
+        ks = _empirical_ks(b, c)
+        assert massl1 is not None and cvm is not None and ks is not None
+        assert massl1 <= cvm + 1e-12  # Jensen floor of the RMS
+        assert massl1 <= ks + 1e-12   # and so under the sup too
+
+
+def test_empirical_massl1_positive_when_the_distributions_separate():
+    b = [(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)]
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]  # interior shape pulls apart
+    assert _empirical_massl1(b, c) > 0.0
+
+
+def test_empirical_massl1_falls_below_cvm_when_a_few_large_gaps_carry_the_energy():
+    """M1's reason to exist: the bare absolute value counts every gap once where CvM's square taxes
+    the large ones extra, so a separation concentrated into a narrow high-gap span reads lower on the
+    L1 mean than on the L2 RMS — M1 strictly below CvM, the norm-axis echo of Cramér-below-CvM."""
+    # Gap is zero at the ends and peaks hard in the interior — the concentrated shape CvM's square
+    # amplifies above the L1 mean.
+    b = [(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)]
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]
+    massl1 = _empirical_massl1(b, c)
+    cvm = _empirical_cvm(b, c)
+    assert massl1 is not None and cvm is not None
+    assert massl1 < cvm  # the L2 penalty on the concentrated gap lifts CvM above the L1 mean
+
+
+def test_empirical_massl1_equals_cvm_on_a_constant_magnitude_gap():
+    """M1's equality case: when the CDF gap is constant in magnitude across the sampled band the mean
+    absolute value and the RMS coincide, so M1 == CvM. Here a single bin carries a flat 0.2 gap."""
+    b = [(0.1, 0.0), (0.7, 10.0)]
+    c = [(0.3, 0.0), (0.9, 10.0)]  # gap = 0.2 at both endpoints of the one shared bin
+    massl1 = _empirical_massl1(b, c)
+    cvm = _empirical_cvm(b, c)
+    assert massl1 is not None and cvm is not None
+    assert massl1 == pytest.approx(cvm, abs=1e-12)
+    assert massl1 == pytest.approx(0.2, abs=1e-12)
+
+
+def test_empirical_massl1_symmetric_in_its_two_sides():
+    b = [(0.1, 0.0), (0.5, 40.0), (0.9, 80.0)]
+    c = [(0.1, 10.0), (0.5, 30.0), (0.9, 95.0)]
+    assert _empirical_massl1(b, c) == pytest.approx(_empirical_massl1(c, b), abs=1e-12)
+
+
+def test_empirical_massl1_takes_the_two_triangle_area_on_an_interior_crossing():
+    """When a bin's gap changes sign strictly inside it (the CDFs cross between the knots) M1 must use
+    the exact two-triangle area (a^2 + b^2) / (2|a - b|), not the endpoint mean |a + b| / 2 — which
+    would cancel a symmetric crossing to zero and silently under-report the separation. One bin whose
+    gap runs +0.2 -> -0.2: the true mean magnitude is 0.1, the endpoint mean is 0."""
+    b = [(0.0, 0.0), (1.0, 10.0)]      # uniform 0..10
+    c = [(0.2, 0.0), (0.8, 10.0)]      # CDF 0.2 -> 0.8 across the same values: gap +0.2 at 0, -0.2 at 10
+    massl1 = _empirical_massl1(b, c)
+    assert massl1 == pytest.approx(0.1, abs=1e-12)
+
+
+def test_empirical_massl1_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    massl1 = _empirical_massl1(b, c)
+    assert massl1 is not None and 0.0 <= massl1 <= 1.0
+
+
+def test_empirical_massl1_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_massl1(None, q) is None
+    assert _empirical_massl1(q, None) is None
+    assert _empirical_massl1((), q) is None
+
+
+def test_empirical_massl1_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_massl1(b, c) is None
+
+
+def test_massl1_shares_the_cvm_bands():
+    # M1 is [0,1]-bounded and reads on CvM's separation scale, so score_shape bands it with CvM.
+    for d in (0.05, 0.1, 0.25, 0.5, 0.73):
+        assert _cvm_band(d) == _ks_band(d)
+
+
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
 
 def test_empirical_js_is_zero_for_identical_quantiles():
@@ -2665,6 +2765,10 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["watson"] == pytest.approx(_empirical_watson(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["watson_band"] == _cvm_band(entry["watson"])
     assert entry["watson"] <= entry["cvm"] + 1e-12  # centered energy never exceeds the raw CvM
+    # Mass-L1 rides beside CvM as its L1 twin; the M1 <= CvM Jensen floor survives the pipeline.
+    assert entry["massl1"] == pytest.approx(_empirical_massl1(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["massl1_band"] == _cvm_band(entry["massl1"])
+    assert entry["massl1"] <= entry["cvm"] + 1e-12  # the mean absolute gap never exceeds the RMS
     assert entry["kuiper"] == pytest.approx(_empirical_kuiper(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["kuiper_band"] == _kuiper_band(entry["kuiper"])
     assert entry["kuiper"] >= entry["ks"] - 1e-12  # V = D+ + D- is never below the sup KS reads
@@ -2757,6 +2861,22 @@ def test_shape_carries_watson_enrichment_end_to_end():
     assert "watson" in entry and "watson_band" in entry
     assert entry["watson"] <= entry["cvm"] + 1e-12   # the centered-energy ceiling holds inside the finding
     assert "U2=" in shape.message
+
+
+def test_shape_carries_massl1_enrichment_end_to_end():
+    """A SHAPE finding decorates the field with the mass-weighted L1 CDF gap beside CvM, and surfaces
+    it as `M1=` — the L1 floor of the same mixture separation CvM squares, M1 <= CvM <= KS."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    shape = score_shape(base, cur, ScoreConfig())
+    assert shape is not None
+    entry = shape.details["fields"]["amount"]
+    assert "massl1" in entry and "massl1_band" in entry
+    assert entry["massl1"] <= entry["cvm"] + 1e-12   # the Jensen floor holds inside the finding
+    assert entry["massl1"] <= entry["ks"] + 1e-12
+    assert "M1=" in shape.message
 
 
 def test_shape_w1_unbanded_when_a_stdev_is_absent():

@@ -1111,6 +1111,89 @@ def _empirical_watson(
     return min(1.0, watson)
 
 
+def _empirical_massl1(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample mass-weighted L1 CDF-gap separation between two empirical quantile functions.
+
+    CvM's L1 twin, and the fourth corner of the {L1, L2} x {value, mass} square the CDF-gap family
+    traces out. Every member reads the very same vertical gap `g(x) = F_cur(x) - F_base(x)`; they
+    differ only in the norm they take of it and the measure they take it under. Two axes, four
+    corners:
+
+        value axis (dx)   L1 -> W1 (`_empirical_w1`)     L2 -> Cramér (`_empirical_cramer`)
+        mass  axis (dH)   L1 -> THIS                     L2 -> CvM (`_empirical_cvm`)
+
+    W1 is the mean *absolute* gap over the value range, Cramér the RMS gap over the value range, CvM
+    the RMS gap over the pooled mixture mass — and the mass-weighted *mean absolute* gap was the one
+    face left unread. The classic form is the integral of the bare absolute gap against the pooled
+    mixture measure,
+
+        L1 = integral of |F_cur(x) - F_base(x)| dH(x),   H = 1/2 (F_base + F_cur)
+
+    renormalized by the shared band's mixture mass to a proper weighted average. Where CvM's square
+    penalizes a large deviation more than its width alone warrants (the L2 tax that lets one wide gap
+    dominate the typical reading), the bare absolute value counts every unit of separation once — so
+    a separation smeared into many modest gaps and one packed into a single large gap of the same
+    total read differently on CvM (which favors the packed one) yet can read alike on this L1 mean.
+    Beside CvM it localizes the mixture energy on the *norm* axis exactly as Cramér-vs-CvM does on the
+    *measure* axis: L1 near CvM says the mass-weighted gap is even in magnitude, L1 well below CvM
+    says a few large gaps carry the CvM energy the L1 mean flattens.
+
+    On the same [0, 1] probability scale as its siblings — a mixture-weighted mean of a [0, 1] gap. It
+    sits under a clean nested ceiling: a mean absolute gap never exceeds the sup (KS), and by Jensen
+    (E|g| <= sqrt(E g^2)) never exceeds the RMS (CvM), so
+
+        _empirical_massl1 <= _empirical_cvm <= _empirical_ks
+
+    holds exactly on every pair — the L1 mean is the floor of the same mixture separation CvM squares
+    and KS maxes, equality with CvM only when the gap is constant in magnitude across the sampled
+    mass. Because it reads on that shared [0, 1] scale it takes CvM's bands (`_cvm_band`). Computed
+    over the SAME shared-band bins and pooled masses CvM uses (`_cdf_at` gaps, pooled mixture mass
+    `hm` per bin, divided by the total pooled mass) — the one change is the per-bin integrand: the
+    exact mean *absolute* value of the piecewise-linear gap. On a bin the gap runs linearly from `a`
+    to `b`; when the two endpoints share a sign it never crosses zero so its mean magnitude is
+    |a + b| / 2, and when they differ in sign it crosses once and the mean magnitude is
+    (a^2 + b^2) / (2 |a - b|) — the exact area of the two triangles the crossing splits the bin into.
+    Guarded identically to CvM — needs a shared probability band both sides sampled (`lo < hi`), at
+    least one bin between two distinct values, and non-degenerate pooled mass; otherwise None. Pure
+    enrichment, never gates a finding; unsigned like its siblings — it measures how separated, not
+    which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_abs = 0.0
+    total_mass = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        a = _cdf_at(cur_q, x0) - _cdf_at(base_q, x0)
+        b = _cdf_at(cur_q, x1) - _cdf_at(base_q, x1)
+        base_rise = _cdf_at(base_q, x1) - _cdf_at(base_q, x0)
+        cur_rise = _cdf_at(cur_q, x1) - _cdf_at(cur_q, x0)
+        hm = (base_rise + cur_rise) / 2.0  # pooled mixture mass on this bin (== CvM's)
+        if hm <= 0:
+            continue  # no mass here contributes nothing to the integral
+        if a * b >= 0:
+            # No sign change on the bin: |linear gap| is monotone, exact mean is |a + b| / 2.
+            mean_abs = abs(a + b) / 2.0
+        else:
+            # Gap crosses zero once — the two triangles it splits the bin into, exact area.
+            mean_abs = (a * a + b * b) / (2.0 * abs(a - b))
+        weighted_abs += hm * mean_abs
+        total_mass += hm
+    if total_mass <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    # A mixture-weighted mean of a [0,1]-bounded absolute gap; clamp float drift into the unit interval.
+    return min(1.0, weighted_abs / total_mass)
+
+
 def _ad_band(d: float) -> str:
     """Classify an Anderson-Darling separation into CvM's bands scaled by two.
 
@@ -2334,6 +2417,15 @@ def score_shape(
         if cramer is not None:
             entry["cramer"] = cramer
             entry["cramer_band"] = _cvm_band(cramer)
+        # Mass-L1 is CvM's L1 twin: the same pooled-mixture gap read with the bare absolute value
+        # instead of the square, the fourth corner of the {L1,L2}x{value,mass} square beside W1
+        # (value-L1), Cramér (value-L2) and CvM (mass-L2). Read beside CvM it says whether the
+        # mixture energy is even in magnitude (M1 near CvM) or carried by a few large gaps the L1
+        # mean flattens (M1 well below CvM); bounded [0,1] under M1 <= CvM <= KS, so same band.
+        massl1 = _empirical_massl1(base_q, cur_q)
+        if massl1 is not None:
+            entry["massl1"] = massl1
+            entry["massl1_band"] = _cvm_band(massl1)
         # Kuiper is KS's both-directions cousin: D+ + D-, the sum of the worst up- and down-gaps
         # rather than KS's single larger one. On a shape that crosses (center thins, both tails
         # fatten) the two half-gaps both count, so Kuiper rises above KS (invariant Kuiper >= KS)
@@ -2418,6 +2510,9 @@ def score_shape(
         cramer = worsened[p].get("cramer")
         if cramer is not None:
             base += f", Cr={cramer:.2f} {worsened[p]['cramer_band']}"
+        massl1 = worsened[p].get("massl1")
+        if massl1 is not None:
+            base += f", M1={massl1:.2f} {worsened[p]['massl1_band']}"
         kuiper = worsened[p].get("kuiper")
         if kuiper is not None:
             base += f", V={kuiper:.2f} {worsened[p]['kuiper_band']}"
