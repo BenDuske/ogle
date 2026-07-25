@@ -322,4 +322,13 @@ def narrate(
         return render_markdown(incident)
     if not text or not text.strip():
         return render_markdown(incident)
-    return text.strip() + "\n"
+    body = text.strip()
+    # Keep the incident fingerprint footer on the polished path. It is the stable handle
+    # Aegis dedups on and an operator references by — the deterministic report always
+    # carries it (see render_markdown), so an LLM rewording must not silently drop it, or
+    # a scheduled run's polished alert becomes untraceable back to its open incident.
+    # Append only when the model didn't already echo it (the grounded prompt hands it the
+    # fingerprint inside FACTS, so a faithful model may keep it) — never double-print.
+    if incident.fingerprint not in body:
+        body += f"\n\n_incident {incident.fingerprint}_"
+    return body + "\n"

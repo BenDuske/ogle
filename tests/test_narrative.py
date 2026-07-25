@@ -195,6 +195,26 @@ def test_narrate_uses_llm_when_provided():
     assert "FACTS:" in calls["prompt"]  # got the grounded prompt
 
 
+def test_narrate_llm_path_preserves_fingerprint_footer():
+    # An LLM reword that omits the fingerprint must still carry it — the polished alert has
+    # to stay traceable back to its open incident for Aegis dedup and operator reference.
+    findings = [_finding(msg="schema changed: removed ['region']")]
+    inc = build_incident(findings)
+    out = narrate(findings, llm=lambda _: "Customers source lost the region column.")
+    assert inc.fingerprint in out
+    assert out.count(inc.fingerprint) == 1
+    assert out.endswith("\n")
+
+
+def test_narrate_llm_path_does_not_double_print_fingerprint():
+    # A faithful model that echoes the fingerprint (it is handed it in FACTS) must not get
+    # a second footer appended.
+    findings = [_finding(msg="schema changed: removed ['region']")]
+    inc = build_incident(findings)
+    out = narrate(findings, llm=lambda _: f"Region column dropped. _incident {inc.fingerprint}_")
+    assert out.count(inc.fingerprint) == 1
+
+
 def test_narrate_falls_back_when_llm_raises():
     def broken_llm(_):
         raise RuntimeError("model down")

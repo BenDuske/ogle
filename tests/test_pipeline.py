@@ -260,7 +260,11 @@ def test_llm_narrates_when_provided():
     report = run_drift_check(
         store, [_sig(row_count=0)], llm=lambda prompt: "LLM SUMMARY"
     )
-    assert report.narrative.strip() == "LLM SUMMARY"
+    # The LLM reword is used, and the incident fingerprint footer is preserved so the
+    # polished alert stays traceable back to its open incident (Aegis dedup / operator ref).
+    assert report.narrative.startswith("LLM SUMMARY")
+    assert report.incident is not None
+    assert report.incident.fingerprint in report.narrative
 
 
 def test_llm_failure_falls_back_to_deterministic():
