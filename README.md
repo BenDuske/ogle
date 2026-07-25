@@ -22,13 +22,15 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    lineage graph (model → features → source tables). For each hop it computes a
    lightweight signature (row-count delta, schema hash, null-fraction, distinct-value,
    numeric-mean, numeric-stdev and numeric min/max stats) and compares against the last known
-   state. Anomalies get scored across eight dimensions — schema, volume, quality, distribution
+   state. Anomalies get scored across nine dimensions — schema, volume, quality, distribution
    (cardinality collapse), mean (numeric covariate shift — a feature's values moved while
    schema/volume/nulls stay green), stdev (numeric spread/scale shift — a feature's variance
    collapsed or exploded while its *mean* held steady, e.g. a sensor stuck on one reading or gone
    noisy), range (numeric bounds breach — a field's observed min/max escaped its historical
    envelope, e.g. an overflow or unit bug on a subset of rows sends a few values out of range
-   while the *mean and spread* barely move), and freshness
+   while the *mean and spread* barely move), shape (distribution-shape drift — a feature's
+   histogram reshapes, e.g. unimodal splitting bimodal or a skew flip, while its *mean and stdev
+   both hold* — the residual the moment rules are blind to by construction), and freshness
    (a source whose profile timestamp has gone stale past its SLA — the silent stall the others
    miss because rows/schema look unchanged). Freshness is opt-in via `--freshness-max-age`
    (e.g. `24h`), since a nightly table and a streaming source have very different staleness SLAs.
@@ -87,7 +89,7 @@ ogle check --gms http://localhost:8080 --discover --store live.json
 Steps 3–4 prove Ogle seeds baselines then reports **no false drift** on a stable graph
 (both exit 0). To watch the alert path actually fire — two serving-path tables drifting at
 once, one loudly (schema/volume/quality) and one silently in its value distributions
-(distribution/mean/stdev/range), 7 of Ogle's 8 dimensions in a single alert — run the
+(distribution/mean/stdev/range), 7 of Ogle's 9 dimensions in a single alert — run the
 offline demo below; it's the same drift-check code path, fully reproducible without Docker,
 and its captured alert lives in
 [`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md).

@@ -30,10 +30,12 @@ Ogle walks your DataHub lineage graph on a schedule and catches silent
 training-data drift before it reaches production. Given a deployed model, it
 traverses upstream through the lineage graph (model → feature tables → source
 tables) and, at each hop, computes a lightweight **signature** it compares against
-the last known-good state across **eight drift dimensions** — schema, volume,
-quality (null-rate), categorical distribution, freshness (stale-feed SLA), and the
-per-feature numeric moments mean, stdev, and range — so covariate shift, a silent
-stall, and a broken load each surface as their own labeled signal. When an
+the last known-good state across **nine drift dimensions** — schema, volume,
+quality (null-rate), categorical distribution, freshness (stale-feed SLA), the
+per-feature numeric moments mean, stdev, and range, and distribution **shape**
+(a histogram reshaping while its mean *and* stdev both hold — the residual the
+moment rules miss) — so covariate shift, a silent stall, and a broken load each
+surface as their own labeled signal. When an
 above-threshold anomaly on a serving-path asset is
 detected, Ogle writes a root-cause **narrative** an on-call engineer can act on in
 30 seconds: what changed, when, who owns it, which downstream models are exposed,
