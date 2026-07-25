@@ -55,7 +55,7 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    *mean* untouched, so the mean rule and its Gaussian trio never fire there, yet the quantile
    functions still pull apart and the empirical readings picture the separation the ratio stats
    alone can't — and gates the standalone **shape** finding, the moment-invariant residual a move
-   leaves when the mean *and* spread both held. These label severity for the operator; the eight
+   leaves when the mean *and* spread both held. These label severity for the operator; the nine
    dimensions above are what gate a page.
 2. **Root-cause narrative.** When something flags, Ogle uses an LLM plus DataHub
    ownership/documentation context to write a short, actionable narrative: what changed,

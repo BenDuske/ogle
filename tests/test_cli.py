@@ -425,7 +425,7 @@ def test_demo_seeds_then_alerts_exit_one(capsys):
 
 
 def test_demo_shows_freshness_as_eighth_dimension(capsys):
-    """The always-on ## 3 section exercises freshness — the demo now covers all 8 dimensions.
+    """The always-on ## 3 section exercises freshness — the 8th drift dimension by ship order.
 
     Freshness is clock-driven, so the showcase injects a fixed stamp + clock: the age (90.0h)
     and SLA (24.0h) are deterministic, and it must fire ALONE (every other dimension green) to

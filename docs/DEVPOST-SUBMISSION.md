@@ -84,7 +84,7 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-The eight moment-and-metric drift dimensions ship alongside a **distribution-distance**
+The nine moment-and-metric drift dimensions ship alongside a **distribution-distance**
 layer that reads a whole-feature move as one number instead of one moment at a time. It
 has two halves. The *parametric* half models each side as a Gaussian from the mean+stdev
 already in the signature — Hellinger, Jeffreys/PSI, and the 2-Wasserstein — so a joint
