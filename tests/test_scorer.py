@@ -25,6 +25,7 @@ from ogle.scorer import (
     _w2_band,
     _empirical_w1,
     _empirical_w2,
+    _empirical_winf,
     _empirical_ks,
     _empirical_js,
     _empirical_cvm,
@@ -1006,6 +1007,79 @@ def test_mean_finding_omits_empirical_w2_without_quantiles():
     m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
     assert "w2_emp" not in m.details["fields"]["amount"]
     assert "W2emp=" not in m.message
+
+
+# ---- transport distance: empirical infinity-Wasserstein (L-inf sup twin of W1/W2) ----
+
+def test_empirical_winf_is_zero_for_identical_quantiles():
+    q = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    assert _empirical_winf(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_winf_equals_w1_and_w2_for_a_pure_uniform_shift():
+    """Every quantile moves the same +5 -> the gap is constant, so its sup, RMS and mean all
+    coincide at 5. Triple equality is the signature of a pure location move."""
+    b = [(0.25, 10.0), (0.5, 20.0), (0.75, 30.0)]
+    c = [(0.25, 15.0), (0.5, 25.0), (0.75, 35.0)]
+    assert _empirical_winf(b, c) == pytest.approx(5.0, abs=1e-12)
+    assert _empirical_winf(b, c) == pytest.approx(_empirical_w2(b, c), abs=1e-12)
+    assert _empirical_winf(b, c) == pytest.approx(_empirical_w1(b, c), abs=1e-12)
+
+
+def test_empirical_winf_reads_the_single_worst_quantile_move():
+    """Same endpoints, only the interior median slides 5->1 -> the max |gap| is 4 at p=0.5, which
+    W1 averages to 2 and W2 roots to sqrt(8)~2.83; the sup reads the full 4."""
+    b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]
+    c = [(0.1, 0.0), (0.5, 1.0), (0.9, 10.0)]
+    assert _empirical_winf(b, c) == pytest.approx(4.0, abs=1e-9)
+    assert _empirical_winf(b, c) > _empirical_w2(b, c) > _empirical_w1(b, c)
+
+
+def test_empirical_winf_never_below_w2_the_rms_it_caps():
+    """The core invariant: the sup gap can never fall below the RMS gap W2 reads (which itself
+    never falls below the mean W1) — the units-side mirror of KS >= CvM. Holds on any pair."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.49, 20.0), (0.95, 130.0)]),
+    ]:
+        w1 = _empirical_w1(b, c)
+        w2 = _empirical_w2(b, c)
+        winf = _empirical_winf(b, c)
+        assert w1 is not None and w2 is not None and winf is not None
+        assert winf >= w2 - 1e-12 >= w1 - 2e-12
+
+
+def test_empirical_winf_symmetric_in_its_two_sides():
+    b = [(0.25, 10.0), (0.75, 30.0)]
+    c = [(0.25, 12.0), (0.75, 41.0)]
+    assert _empirical_winf(b, c) == pytest.approx(_empirical_winf(c, b), abs=1e-12)
+
+
+def test_empirical_winf_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_winf(None, q) is None
+    assert _empirical_winf(q, None) is None
+    assert _empirical_winf((), q) is None
+
+
+def test_empirical_winf_none_when_no_shared_probability_band():
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_winf(b, c) is None
+
+
+def test_mean_finding_omits_empirical_winf_from_the_shape_only_wiring():
+    """Winf rides on the SHAPE finding (beside W1/W2), not the MEAN builder — a flagged mean move
+    carries W1emp/W2emp but not Winf, so the two builders' metric sets stay distinct."""
+    q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
+    q_cur = {"amount": [(0.25, 130.0), (0.5, 140.0), (0.75, 152.0)]}
+    base = _sig(field_means={"amount": 100.0}, field_stdevs={"amount": 10.0}, field_quantiles=q_base)
+    cur = _sig(field_means={"amount": 140.0}, field_stdevs={"amount": 12.0}, field_quantiles=q_cur)
+    m = [f for f in score_dataset(base, cur) if f.kind is DriftKind.MEAN][0]
+    assert "winf_emp" not in m.details["fields"]["amount"]
+    assert "Winf=" not in m.message
 
 
 # ---- distribution distance: empirical two-sample Kolmogorov-Smirnov -----------------
@@ -2436,11 +2510,16 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["w2_emp"] == pytest.approx(_empirical_w2(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["w2_emp_band"] == "large"  # both stdevs present -> banded
     assert entry["w2_emp"] >= entry["w1_emp"] - 1e-12  # RMS transport never below the L1 mean
+    # Winf closes the transport ladder: the single worst quantile displacement, never below the RMS.
+    assert entry["winf_emp"] == pytest.approx(_empirical_winf(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["winf_emp_band"] == "large"  # both stdevs present -> banded
+    assert entry["winf_emp"] >= entry["w2_emp"] - 1e-12  # sup transport never below the L2 RMS
     assert "distribution shape shifted (mean and spread held)" in shape.message
     assert f"JS={entry['js']:.2f}" in shape.message
     assert f"CvM={entry['cvm']:.2f}" in shape.message
     assert f"V={entry['kuiper']:.2f}" in shape.message
     assert f"W2emp={entry['w2_emp']:g}" in shape.message
+    assert f"Winf={entry['winf_emp']:g}" in shape.message
 
 
 def test_shape_silent_when_shape_barely_moved():

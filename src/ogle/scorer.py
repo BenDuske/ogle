@@ -694,6 +694,63 @@ def _empirical_w2(
     return math.sqrt(max(0.0, area / (hi - lo)))
 
 
+def _empirical_winf(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Empirical infinity-Wasserstein (max quantile displacement) between two quantile functions.
+
+    The L-infinity member of the transport family, closing the Lp ladder its L1 (`_empirical_w1`,
+    the mean gap) and L2 (`_empirical_w2`, the RMS gap) halves opened. Where W1 answers "how far
+    did the typical unit of mass move" and W2 "how far with the far-moved mass counted double",
+    W-infinity reads the single worst move — the largest distance *any* sampled quantile had to
+    travel between the two distributions,
+
+        Winf = sup over p in [lo, hi] of |Q_cur(p) - Q_base(p)|
+
+    the optimal-transport cost under an L-infinity ground cost, in the field's own units. It is the
+    transport-side twin of KS exactly as W1/W2 twin CvM: KS is the largest *vertical* gap between
+    the two CDFs (a probability, [0,1]), W-infinity the largest *horizontal* gap between the two
+    quantile functions (a distance, in units) — the same worst-point separation read across the
+    two axes of one picture. A move confined to one deep quantile (an outlier tail flung far out)
+    that W1 averages toward nothing and W2 only partly amplifies pins W-infinity to its full
+    displacement, so reading it beside W1 localizes a shape move: Winf far above W1 says the
+    transport is a thin slice flung a long way, Winf ≈ W1 says the whole quantile function slid as
+    one block.
+
+    Because each quantile function is piecewise-linear in p, the gap |Q_cur - Q_base| is
+    piecewise-linear too and attains its supremum at a knot, so the max over the union grid W1/W2
+    already trapezoid on is exact, not a sample. Evaluated over that identical shared-band grid, the
+    trapezoid mean (W1) and RMS (W2) can never exceed the grid's own maximum magnitude, so the
+    power-mean chain
+
+        _empirical_winf >= _empirical_w2 >= _empirical_w1
+
+    holds exactly on every pair — the units-side twin of `_empirical_ks >= _empirical_cvm`, with
+    W-infinity the sup, W2 the RMS and W1 the mean of one shared set of quantile gaps. Equal to W2
+    (and W1) only when the gap is constant across the band (a pure uniform shift moves every
+    quantile the same distance). Returned in field units and banded the same way (`_w2_band`) when
+    both stdevs are present, so it sits directly beside W1/W2. Guarded identically to W1: needs a
+    shared probability band both sides sampled (`lo < hi`); otherwise None. Pure enrichment, never
+    gates a finding; unsigned like its siblings — it measures how far the worst move went, not which
+    way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    grid = sorted(
+        {p for p, _ in base_q if lo <= p <= hi}
+        | {p for p, _ in cur_q if lo <= p <= hi}
+        | {lo, hi}
+    )
+    # Sup of a piecewise-linear gap is attained at a knot, so the max over the same union grid W1/W2
+    # integrate on is exact — and being that grid's max magnitude, it dominates their mean and RMS.
+    return max(abs(_quantile_at(cur_q, p) - _quantile_at(base_q, p)) for p in grid)
+
+
 def _cdf_at(pairs: Sequence[Tuple[float, float]], x: float) -> float:
     """Value of the empirical CDF at `x` — the probability-level inverse of `_quantile_at`.
 
@@ -2150,6 +2207,24 @@ def score_shape(
                 and abs(bstd) >= cfg.stdev_zero_floor
             ):
                 entry["w2_emp_band"] = _w2_band(w2e, bstd, cstd)
+        # W-infinity closes the transport ladder: W1 the mean move, W2 the RMS, Winf the single
+        # worst quantile displacement. On a moment-invariant shape move it is the units-side twin of
+        # KS — the largest horizontal gap between the quantile functions where KS reads the largest
+        # vertical gap between the CDFs — and read beside W1 it separates a thin slice flung far
+        # (Winf >> W1) from an even block slide (Winf ≈ W1). Same shared-band grid as W1/W2, so the
+        # power-mean chain Winf >= W2 >= W1 holds exactly; same pooled-spread band under the same
+        # stdev guard.
+        winf = _empirical_winf(base_q, cur_q)
+        if winf is not None:
+            entry["winf_emp"] = winf
+            bstd = baseline.field_stdevs.get(path)
+            cstd = current.field_stdevs.get(path)
+            if (
+                bstd is not None
+                and cstd is not None
+                and abs(bstd) >= cfg.stdev_zero_floor
+            ):
+                entry["winf_emp_band"] = _w2_band(winf, bstd, cstd)
         worsened[path] = entry
 
     if not worsened:
@@ -2185,6 +2260,12 @@ def score_shape(
             w2band = worsened[p].get("w2_emp_band")
             if w2band is not None:
                 base += f" {w2band}"
+        winf = worsened[p].get("winf_emp")
+        if winf is not None:
+            base += f", Winf={winf:g}"
+            winfband = worsened[p].get("winf_emp_band")
+            if winfband is not None:
+                base += f" {winfband}"
         return base + ")"
 
     return DriftFinding(
