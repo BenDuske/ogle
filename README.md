@@ -41,7 +41,10 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    mass move in the feature's own units), a two-sample Kolmogorov-Smirnov statistic (`sup|ΔCDF|`,
    the worst-point separation), its L2 twin the Cramér-von Mises RMS gap (the *typical* separation
    over the mass that is actually there — near KS for a broad consistent shift, far below it for a
-   lone spike), and a bounded Jensen-Shannon divergence. This empirical family also rides the
+   lone spike), the Kuiper statistic (`D+ + D-`, KS's both-directions cousin — it sums the worst
+   up- and down-gaps instead of KS's single larger one, so a distribution that *crosses*, e.g. both
+   tails fattening while the center thins at fixed mean and spread, rises above KS; `Kuiper ≥ KS`
+   always), and a bounded Jensen-Shannon divergence. This empirical family also rides the
    **spread** finding — a symmetric variance move (a sensor stuck, a source gone noisy) leaves the
    *mean* untouched, so the mean rule and its Gaussian trio never fire there, yet the quantile
    functions still pull apart and the empirical readings picture the separation the ratio stats

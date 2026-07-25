@@ -27,9 +27,11 @@ from ogle.scorer import (
     _empirical_ks,
     _empirical_js,
     _empirical_cvm,
+    _empirical_kuiper,
     _cdf_at,
     _ks_band,
     _cvm_band,
+    _kuiper_band,
     _js_band,
     _quantile_at,
     _mean_shift_ci,
@@ -1034,6 +1036,85 @@ def test_empirical_cvm_none_when_no_shared_probability_band():
 def test_cvm_band_shares_the_ks_cutoffs():
     for d in (0.05, 0.1, 0.25, 0.5, 0.73):
         assert _cvm_band(d) == _ks_band(d)
+
+
+# ---- empirical Kuiper statistic (KS's both-directions cousin) -----------------------
+
+# A shape that CROSSES: mean and median pinned at 50, both tails fatten while the center thins.
+# F_cur runs above F_base on the low flank and below it on the high flank — two real half-gaps.
+_KUIPER_BASE_Q = [(0.1, 40.0), (0.5, 50.0), (0.9, 60.0)]  # tight around the center
+_KUIPER_CUR_Q = [(0.1, 10.0), (0.5, 50.0), (0.9, 90.0)]   # mass pushed symmetrically to the tails
+
+
+def test_empirical_kuiper_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_kuiper(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_kuiper_never_below_ks_the_larger_of_its_two_half_gaps():
+    """The core invariant: V = D+ + D- can never be smaller than KS = max(D+, D-). Holds on any
+    pair, since both half-gaps are nonnegative."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        (_KUIPER_BASE_Q, _KUIPER_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+    ]:
+        kuiper = _empirical_kuiper(b, c)
+        ks = _empirical_ks(b, c)
+        assert kuiper is not None and ks is not None
+        assert kuiper >= ks - 1e-12
+
+
+def test_empirical_kuiper_strictly_exceeds_ks_on_a_crossing_shape():
+    """Kuiper's reason to exist: when the CDFs cross (both tails fatten, center thins) each
+    half-gap counts, so V picks up the excursion KS's single sup throws away."""
+    kuiper = _empirical_kuiper(_KUIPER_BASE_Q, _KUIPER_CUR_Q)
+    ks = _empirical_ks(_KUIPER_BASE_Q, _KUIPER_CUR_Q)
+    assert kuiper is not None and ks is not None
+    assert kuiper > ks + 1e-9
+
+
+def test_empirical_kuiper_equals_ks_when_the_cdfs_never_cross():
+    """A one-directional shift (current CDF strictly below baseline everywhere) leaves one half-gap
+    at zero, so V collapses exactly onto KS."""
+    b = [(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)]
+    c = [(0.1, 20.0), (0.5, 70.0), (0.9, 120.0)]  # whole distribution shifted up, no crossing
+    kuiper = _empirical_kuiper(b, c)
+    ks = _empirical_ks(b, c)
+    assert kuiper is not None and ks is not None
+    assert kuiper == pytest.approx(ks, abs=1e-12)
+
+
+def test_empirical_kuiper_symmetric_in_its_two_sides():
+    assert _empirical_kuiper(_KUIPER_BASE_Q, _KUIPER_CUR_Q) == pytest.approx(
+        _empirical_kuiper(_KUIPER_CUR_Q, _KUIPER_BASE_Q), abs=1e-12
+    )
+
+
+def test_empirical_kuiper_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    kuiper = _empirical_kuiper(b, c)
+    assert kuiper is not None and 0.0 <= kuiper <= 1.0
+
+
+def test_empirical_kuiper_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_kuiper(None, q) is None
+    assert _empirical_kuiper(q, None) is None
+    assert _empirical_kuiper((), q) is None
+
+
+def test_empirical_kuiper_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_kuiper(b, c) is None
+
+
+def test_kuiper_band_shares_the_ks_cutoffs():
+    for d in (0.05, 0.1, 0.25, 0.5, 0.73):
+        assert _kuiper_band(d) == _ks_band(d)
 
 
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
@@ -2168,11 +2249,15 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["cvm"] == pytest.approx(_empirical_cvm(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["cvm_band"] == _cvm_band(entry["cvm"])
     assert entry["cvm"] <= entry["ks"] + 1e-12  # RMS gap never exceeds the sup KS reads
+    assert entry["kuiper"] == pytest.approx(_empirical_kuiper(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["kuiper_band"] == _kuiper_band(entry["kuiper"])
+    assert entry["kuiper"] >= entry["ks"] - 1e-12  # V = D+ + D- is never below the sup KS reads
     assert entry["w1_emp"] == pytest.approx(_empirical_w1(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["w1_emp_band"] == "large"  # both stdevs present -> banded
     assert "distribution shape shifted (mean and spread held)" in shape.message
     assert f"JS={entry['js']:.2f}" in shape.message
     assert f"CvM={entry['cvm']:.2f}" in shape.message
+    assert f"V={entry['kuiper']:.2f}" in shape.message
 
 
 def test_shape_silent_when_shape_barely_moved():

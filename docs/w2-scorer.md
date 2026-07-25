@@ -132,8 +132,13 @@ the nonparametric twin of the Gaussian PSI: `JS = ½·KL(P‖M) + ½·KL(Q‖M)`
 the CDF rise across it, each side renormalized to a proper distribution). Unlike PSI it is bounded
 `[0,1]` (bits, log₂) and stays finite even when the two populations barely overlap — the mixture
 reference `M` keeps every term finite where an empirical KL would blow up — so it always carries its
-band. The one roadmap member still open is histogram-PSI from raw sample bins (needs bin data the
-quantile summary doesn't carry).
+band. Two more L∞/L2 members ride alongside these: **empirical Cramér-von Mises** (the
+mixture-weighted RMS CDF gap — the *typical* separation to KS's worst-point sup, `CvM ≤ KS`) and
+the **Kuiper** statistic (`V = D+ + D−`, the sum of the worst up- and down-gaps rather than KS's
+single larger one — invariant `V ≥ KS`, collapsing to KS when the CDFs never cross and rising above
+it on a distribution that *crosses*, e.g. both tails fattening while the center thins at fixed mean
+and spread). The one roadmap member still open is histogram-PSI from raw sample bins (needs bin data
+the quantile summary doesn't carry).
 
 **STDEV** (numeric spread/scale shift — the scale half of covariate drift the mean rule can't
 see) carries the *scale-side twin* of that whole significance suite. Because a stdev is a

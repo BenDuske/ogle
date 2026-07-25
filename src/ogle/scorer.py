@@ -875,6 +875,76 @@ def _empirical_js(
     return js
 
 
+def _empirical_kuiper(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Kuiper statistic between two empirical quantile functions.
+
+    KS's rotation-invariant cousin, and the member of the family that reads the CDF gap in *both*
+    directions at once. `_empirical_ks` collapses the two sides to a single unsigned number — the
+    largest vertical gap, whichever way it points — and by construction cannot tell whether the
+    current CDF runs above the baseline, below it, or crosses it. Kuiper keeps the two one-sided
+    excursions apart and adds them,
+
+        V = D+ + D-,   D+ = sup_x (F_cur(x) - F_base(x)),   D- = sup_x (F_base(x) - F_cur(x))
+
+    each clamped at zero (a gap that never turns positive contributes nothing on that side). Where
+    KS = max(D+, D-) reports only the larger excursion, V sums them, so it is uniquely sensitive to
+    a distribution that *crosses*: a feature whose center thins while both tails fatten (mass pushed
+    outward at fixed mean and spread) drives F_cur above F_base on one flank and below it on the
+    other — two real half-gaps that KS reports as just the larger one, while Kuiper reads the full
+    excursion V = D+ + D-. It is also the tail-fair reading: because it weights the extreme quantiles
+    like the body (it is a sup, not a mixture-weighted integral like CvM), a shift confined to a tail
+    registers at full height. Classically V is invariant to where you cut a cyclic axis; here, on a
+    shared value band, that shows up as the same both-directions symmetry.
+
+    Bounded [0, 1] on these clamped-band CDFs and reads on KS's own probability scale, so it takes
+    KS's bands. Because D+ and D- are each nonnegative and KS is their max, the invariant
+
+        _empirical_kuiper >= _empirical_ks
+
+    always holds — V is the sum, KS the larger of the same two half-gaps — and V collapses to KS
+    exactly when the CDFs never cross (one of D+, D- is zero). Computed like KS/CvM/JS over the union
+    of both sides' knot values: the piecewise-linear CDF gap attains each one-sided supremum at a
+    breakpoint, so the finite knot set is exact. Guarded identically to KS: needs a shared
+    probability band both sides sampled (`lo < hi`), else None. Pure enrichment, never gates a
+    finding; unsigned like its siblings — it measures how separated, counting both crossings, not
+    which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    d_plus = 0.0
+    d_minus = 0.0
+    for x in xs:
+        gap = _cdf_at(cur_q, x) - _cdf_at(base_q, x)
+        if gap > d_plus:
+            d_plus = gap
+        if -gap > d_minus:
+            d_minus = -gap
+    # Each half-gap is in [0, 1] and non-decreasing CDFs forbid both from nearing 1 at once, so the
+    # sum stays within the unit interval; clamp the float drift the same way KS's siblings do.
+    return min(1.0, d_plus + d_minus)
+
+
+def _kuiper_band(v: float) -> str:
+    """Classify a Kuiper statistic into the same separation bands as KS.
+
+    Kuiper is a sum of two [0, 1] one-sided CDF gaps that (on these clamped-band, non-decreasing
+    CDFs) stays within [0, 1], so it lives on the exact probability scale KS does and reads in the
+    same units. It gets the identical cutoffs (`_ks_band`) on purpose — KS and Kuiper are the
+    one-direction and both-directions views of the same worst-point separation, and a shared band
+    lets the narrative say them side by side without a second mental scale. A value on a boundary
+    lands in the higher band. Pure labeling.
+    """
+    return _ks_band(v)
+
+
 def _js_band(js: float) -> str:
     """Classify a Jensen-Shannon divergence into a plain-language band.
 
@@ -1847,6 +1917,14 @@ def score_shape(
         if cvm is not None:
             entry["cvm"] = cvm
             entry["cvm_band"] = _cvm_band(cvm)
+        # Kuiper is KS's both-directions cousin: D+ + D-, the sum of the worst up- and down-gaps
+        # rather than KS's single larger one. On a shape that crosses (center thins, both tails
+        # fatten) the two half-gaps both count, so Kuiper rises above KS (invariant Kuiper >= KS)
+        # exactly where a mean/spread-fixed move is most legible — same [0,1] scale, same band.
+        kuiper = _empirical_kuiper(base_q, cur_q)
+        if kuiper is not None:
+            entry["kuiper"] = kuiper
+            entry["kuiper_band"] = _kuiper_band(kuiper)
         w1 = _empirical_w1(base_q, cur_q)
         if w1 is not None:
             entry["w1_emp"] = w1
@@ -1875,6 +1953,9 @@ def score_shape(
         cvm = worsened[p].get("cvm")
         if cvm is not None:
             base += f", CvM={cvm:.2f} {worsened[p]['cvm_band']}"
+        kuiper = worsened[p].get("kuiper")
+        if kuiper is not None:
+            base += f", V={kuiper:.2f} {worsened[p]['kuiper_band']}"
         w1 = worsened[p].get("w1_emp")
         if w1 is not None:
             base += f", W1emp={w1:g}"
