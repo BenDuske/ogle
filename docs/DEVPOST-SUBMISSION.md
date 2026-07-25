@@ -82,23 +82,25 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-The eight moment-and-metric drift dimensions now ship alongside a
-**distribution-distance** layer — Gaussian Hellinger, Jeffreys/PSI, and the
-2-Wasserstein — that folds a feature's location *and* scale move into one
-whole-distribution number instead of reading each moment alone. Those model each
-side as a Gaussian from the mean+stdev already in the signature, and the **empirical**
-twin now rides beside them: an empirical 1-Wasserstein, a two-sample
-Kolmogorov-Smirnov statistic, and a bounded Jensen-Shannon divergence, all computed
-nonparametrically from the two sides' raw quantile functions — W1 in the feature's own
-units (how far the mass moved), KS as a bounded [0,1] separation (how cleanly the two
-populations pull apart), and JS as the bounded, symmetric shape *divergence* that stays
-finite where a Gaussian PSI runs away — so when a signature carries sample quantiles, a
-multimodal or skew shift that both sides' Gaussian summaries idealize away still
-surfaces. The remaining empirical frontier is histogram-PSI from raw sample bins. After
-that:
-agent-to-agent Ogle deployments that share incident memory across teams, and
-publishing Ogle's
-DataHub Skill wrapper back upstream as an OSS contribution.
+The eight moment-and-metric drift dimensions ship alongside a **distribution-distance**
+layer that reads a whole-feature move as one number instead of one moment at a time. It
+has two halves. The *parametric* half models each side as a Gaussian from the mean+stdev
+already in the signature — Hellinger, Jeffreys/PSI, and the 2-Wasserstein — so a joint
+location-and-scale shift folds into a single reading. The *empirical* half then rides
+beside it, computed nonparametrically from the two sides' raw quantile functions when a
+signature carries sample quantiles, so a multimodal or skew move the Gaussian summaries
+idealize away still surfaces: a bounded Jensen-Shannon divergence gates the finding, and
+a full CDF-and-transport distance family corroborates it several orthogonal ways at
+once — the CDF gap read as its worst point (Kolmogorov-Smirnov), its both-directions sum
+(Kuiper), and its typical magnitude under every {L1,L2}×{value-axis,mass} measure
+(Cramér-von Mises, Cramér/energy, mass-L1, plus the mean-removed Watson U² and Cr0 shape
+twins), and the same move in the feature's own units as the transport ladder W1 (mean
+displacement) ≤ W2 (RMS) ≤ W∞ (worst quantile), the horizontal dual of KS. The remaining
+empirical frontier is histogram-PSI from raw sample bins. After that: swapping the
+`BaselineStore` onto the salience-ranked Aegis MemoryAgent so past false positives and
+real incidents sharpen future walks, agent-to-agent Ogle deployments that share incident
+memory across teams, and publishing Ogle's DataHub Skill wrapper back upstream as an OSS
+contribution.
 
 ---
 
