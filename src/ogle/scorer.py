@@ -1036,6 +1036,81 @@ def _empirical_cramer(
     return min(1.0, cramer)
 
 
+def _empirical_watson(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Watson U^2 separation between two empirical quantile functions.
+
+    CvM's *mean-removed* twin, and the one member of the CDF-gap family that reads the shape of the
+    gap net of its average level — which is exactly what a shape finding wants. CvM, AD and Cramér
+    all take the same vertical gap `g(x) = F_cur(x) - F_base(x)` and integrate its square; none of
+    them cares whether that gap is a consistent one-sided offset (F_cur sits wholly above F_base — a
+    pure stochastic-order / location tilt) or a balanced excursion that crosses zero (the CDFs cross,
+    a spread- or tail-shape move with no net level). The classic Watson U^2 statistic subtracts the
+    mixture-mass-weighted *mean* gap before squaring,
+
+        U^2 = integral of (g(x) - gbar)^2 dH,   gbar = integral of g(x) dH,   H = 1/2 (F_base + F_cur)
+
+    the pooled mixture measure — so a gap that is the same sign everywhere (a level offset) is largely
+    absorbed into `gbar` and contributes little to U^2, while a crossing gap (mean near zero, so
+    `gbar` ~ 0) passes through nearly intact. Where CvM answers "how separated on average", U^2
+    answers "how separated once the average separation is removed" — the pure *variation* of the CDF
+    gap, the part a plain location shift cannot manufacture. On a shape finding (mean and spread held
+    by the guards upstream) U^2 near CvM certifies the move really is shape — the gap crosses, no net
+    level to strip; U^2 well below CvM says most of the CvM energy was a residual one-sided level
+    offset the moment rules did not catch, and little genuine shape structure survives it.
+
+    To sit on the same [0, 1] scale as its siblings this returns the ROOT of that integral. Because
+    subtracting the square of the mean can only shrink the mean-square (Jensen: E[g^2] >= E[g]^2),
+
+        _empirical_watson <= _empirical_cvm
+
+    holds exactly on every pair — U^2 is CvM's energy with the level component removed, equality only
+    when the mean gap is zero (a gap that already integrates to nothing, a clean crossing). It rides
+    under the same CvM <= KS ceiling and reads in the same probability units, so it shares CvM's bands
+    (`_cvm_band`). Computed over the SAME shared-band bins and pooled masses CvM uses (`_cdf_at` gaps,
+    each piecewise-linear bin's exact mean gap (a+b)/2 and exact mean-square (a^2+ab+b^2)/3, both
+    weighted by the pooled mixture mass `hm` and divided by the total): the mean-square is CvM's own
+    integrand and the mean is accumulated alongside it in the same pass, so U^2 = sqrt(meansq -
+    meangap^2). Guarded identically to CvM — needs a shared probability band both sides sampled
+    (`lo < hi`), at least one bin between two distinct values, and non-degenerate pooled mass;
+    otherwise None. Pure enrichment, never gates a finding; unsigned like its siblings — it measures
+    how separated in shape, not which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_sq = 0.0
+    weighted_mean = 0.0
+    total_mass = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        a = _cdf_at(cur_q, x0) - _cdf_at(base_q, x0)
+        b = _cdf_at(cur_q, x1) - _cdf_at(base_q, x1)
+        base_rise = _cdf_at(base_q, x1) - _cdf_at(base_q, x0)
+        cur_rise = _cdf_at(cur_q, x1) - _cdf_at(cur_q, x0)
+        hm = (base_rise + cur_rise) / 2.0  # pooled mixture mass on this bin
+        if hm <= 0:
+            continue  # no mass here contributes nothing to the integral
+        weighted_sq += hm * (a * a + a * b + b * b) / 3.0  # CvM's own per-bin energy
+        weighted_mean += hm * (a + b) / 2.0  # signed mean gap on the linear bin
+        total_mass += hm
+    if total_mass <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    mean_sq = weighted_sq / total_mass
+    mean_gap = weighted_mean / total_mass
+    # Variance of the CDF gap under the mixture measure — the mean-removed energy. Jensen keeps this
+    # non-negative; clamp float drift so watson <= cvm holds and stays inside the unit interval.
+    watson = math.sqrt(max(0.0, mean_sq - mean_gap * mean_gap))
+    return min(1.0, watson)
+
+
 def _ad_band(d: float) -> str:
     """Classify an Anderson-Darling separation into CvM's bands scaled by two.
 
@@ -2232,6 +2307,15 @@ def score_shape(
         if cvm is not None:
             entry["cvm"] = cvm
             entry["cvm_band"] = _cvm_band(cvm)
+        # Watson U^2 is CvM's mean-removed twin: the same mixture energy after the average CDF gap is
+        # subtracted, so a consistent one-sided level offset (a residual location tilt) is stripped and
+        # only the gap's variation — the actual shape of the discrepancy — is left. On a shape finding
+        # U^2 near CvM certifies a genuine crossing (no net level to remove) while U^2 far below CvM
+        # says most of the CvM energy was a level offset; bounded [0,1] under U^2 <= CvM, so same band.
+        watson = _empirical_watson(base_q, cur_q)
+        if watson is not None:
+            entry["watson"] = watson
+            entry["watson_band"] = _cvm_band(watson)
         # AD is CvM's tail-weighted twin: the same mixture-energy divided by H(1-H), so the extreme
         # quantiles count for far more than their little mass. It catches a tail thickening the
         # body-weighted CvM (and the sup-norm KS) can miss, and by the >=2x invariant it reads on
@@ -2325,6 +2409,9 @@ def score_shape(
         cvm = worsened[p].get("cvm")
         if cvm is not None:
             base += f", CvM={cvm:.2f} {worsened[p]['cvm_band']}"
+        watson = worsened[p].get("watson")
+        if watson is not None:
+            base += f", U2={watson:.2f} {worsened[p]['watson_band']}"
         ad = worsened[p].get("ad")
         if ad is not None:
             base += f", AD={ad:.2f} {worsened[p]['ad_band']}"

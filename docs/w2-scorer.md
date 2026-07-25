@@ -141,7 +141,13 @@ exactly the extreme-quantile discrepancies CvM's uniform weighting averages away
 thickening or a floor slipping lights AD up while CvM and the sup-norm KS stay quiet; because that
 weight is `≥ 4` everywhere and every other factor is identical to CvM's, the invariant `AD ≥ 2·CvM`
 holds exactly, so AD reads on CvM's separation scale with its bands doubled — `0.2/0.5/1.0` — and,
-unlike its `[0,1]`-capped cousins, is unbounded above), and the **Kuiper** statistic (`V = D+ + D−`,
+unlike its `[0,1]`-capped cousins, is unbounded above), its **mean-removed** twin **empirical Watson
+U²** (the same mixture energy after the average CDF gap is subtracted, `U² = ∫(g − ḡ)² dH` with
+`ḡ = ∫g dH` — so a consistent one-signed offset, a residual location tilt the moment rules didn't
+catch, is absorbed into `ḡ` and stripped, leaving only the gap's *variation*, the pure shape of the
+discrepancy; Jensen gives `U² ≤ CvM` exactly, equality only on a clean crossing where the mean gap
+is zero, so `U² ≈ CvM` certifies genuine shape while `U² ≪ CvM` unmasks a hidden level offset — it
+shares CvM's bands), and the **Kuiper** statistic (`V = D+ + D−`,
 the sum of the worst up- and down-gaps rather than KS's single larger one — invariant `V ≥ KS`,
 collapsing to KS when the CDFs never cross and rising above it on a distribution that *crosses*, e.g.
 both tails fattening while the center thins at fixed mean and spread). The one roadmap member still

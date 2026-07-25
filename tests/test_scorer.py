@@ -31,6 +31,7 @@ from ogle.scorer import (
     _empirical_cvm,
     _empirical_ad,
     _empirical_cramer,
+    _empirical_watson,
     _empirical_kuiper,
     _cdf_at,
     _ks_band,
@@ -1449,6 +1450,85 @@ def test_cramer_shares_the_cvm_bands():
         assert _cvm_band(d) == _ks_band(d)
 
 
+# ---- empirical Watson U^2 (CvM's mean-removed twin) ---------------------------------
+
+def test_empirical_watson_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_watson(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_watson_never_exceeds_cvm_the_energy_it_centers():
+    """The core invariant: subtracting the squared mean gap can only shrink the mean-square (Jensen),
+    so U^2 <= CvM on every pair, whatever the mass or range arrangement."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.5, 80.0), (0.95, 130.0)]),
+    ]:
+        watson = _empirical_watson(b, c)
+        cvm = _empirical_cvm(b, c)
+        assert watson is not None and cvm is not None
+        assert watson <= cvm + 1e-12
+
+
+def test_empirical_watson_equals_cvm_on_a_clean_crossing():
+    """U^2's equality case: a symmetric spread move about a fixed median produces a CDF gap that
+    crosses zero with a mixture-mean of exactly zero — nothing to strip, so U^2 == CvM."""
+    b = [(0.1, 4.0), (0.5, 10.0), (0.9, 16.0)]  # narrow, median 10
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]  # wide, same median 10
+    watson = _empirical_watson(b, c)
+    cvm = _empirical_cvm(b, c)
+    assert watson is not None and cvm is not None
+    assert watson == pytest.approx(cvm, abs=1e-12)
+
+
+def test_empirical_watson_strips_a_one_sided_level_offset():
+    """U^2's reason to exist: a pure location shift makes the CDF gap one-signed everywhere, so its
+    mean carries most of the energy and U^2 falls well below CvM — where a crossing move keeps
+    U^2 pinned to CvM. The ratio U^2/CvM is the discriminator, low for a shift, ~1 for a crossing."""
+    shift_b = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    shift_c = [(0.1, 5.0), (0.5, 15.0), (0.9, 25.0)]  # same shape, +5 — one-signed gap
+    cross_b = [(0.1, 4.0), (0.5, 10.0), (0.9, 16.0)]
+    cross_c = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]  # symmetric spread, crossing gap
+    shift_ratio = _empirical_watson(shift_b, shift_c) / _empirical_cvm(shift_b, shift_c)
+    cross_ratio = _empirical_watson(cross_b, cross_c) / _empirical_cvm(cross_b, cross_c)
+    assert shift_ratio < cross_ratio
+    assert shift_ratio < 0.5  # most of the shift's CvM energy was level, not shape
+
+
+def test_empirical_watson_symmetric_in_its_two_sides():
+    b = [(0.1, 0.0), (0.5, 40.0), (0.9, 80.0)]
+    c = [(0.1, 10.0), (0.5, 30.0), (0.9, 95.0)]
+    assert _empirical_watson(b, c) == pytest.approx(_empirical_watson(c, b), abs=1e-12)
+
+
+def test_empirical_watson_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    watson = _empirical_watson(b, c)
+    assert watson is not None and 0.0 <= watson <= 1.0
+
+
+def test_empirical_watson_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_watson(None, q) is None
+    assert _empirical_watson(q, None) is None
+    assert _empirical_watson((), q) is None
+
+
+def test_empirical_watson_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_watson(b, c) is None
+
+
+def test_watson_shares_the_cvm_bands():
+    # U^2 is [0,1]-bounded and reads on CvM's separation scale, so score_shape bands it with CvM.
+    for d in (0.05, 0.1, 0.25, 0.5, 0.73):
+        assert _cvm_band(d) == _ks_band(d)
+
+
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
 
 def test_empirical_js_is_zero_for_identical_quantiles():
@@ -2581,6 +2661,10 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["cvm"] == pytest.approx(_empirical_cvm(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["cvm_band"] == _cvm_band(entry["cvm"])
     assert entry["cvm"] <= entry["ks"] + 1e-12  # RMS gap never exceeds the sup KS reads
+    # Watson U^2 rides beside CvM as its mean-removed twin; the U^2 <= CvM invariant survives the pipeline.
+    assert entry["watson"] == pytest.approx(_empirical_watson(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["watson_band"] == _cvm_band(entry["watson"])
+    assert entry["watson"] <= entry["cvm"] + 1e-12  # centered energy never exceeds the raw CvM
     assert entry["kuiper"] == pytest.approx(_empirical_kuiper(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["kuiper_band"] == _kuiper_band(entry["kuiper"])
     assert entry["kuiper"] >= entry["ks"] - 1e-12  # V = D+ + D- is never below the sup KS reads
@@ -2597,6 +2681,7 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert "distribution shape shifted (mean and spread held)" in shape.message
     assert f"JS={entry['js']:.2f}" in shape.message
     assert f"CvM={entry['cvm']:.2f}" in shape.message
+    assert f"U2={entry['watson']:.2f}" in shape.message
     assert f"V={entry['kuiper']:.2f}" in shape.message
     assert f"W2emp={entry['w2_emp']:g}" in shape.message
     assert f"Winf={entry['winf_emp']:g}" in shape.message
@@ -2657,6 +2742,21 @@ def test_shape_carries_cramer_enrichment_end_to_end():
     assert "cramer" in entry and "cramer_band" in entry
     assert entry["cramer"] <= entry["ks"] + 1e-12   # the ceiling holds inside the finding too
     assert "Cr=" in shape.message
+
+
+def test_shape_carries_watson_enrichment_end_to_end():
+    """A SHAPE finding decorates the field with the mean-removed Watson U^2 beside CvM, and surfaces
+    it as `U2=` — the corroboration that separates a genuine crossing from a residual level offset."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    shape = score_shape(base, cur, ScoreConfig())
+    assert shape is not None
+    entry = shape.details["fields"]["amount"]
+    assert "watson" in entry and "watson_band" in entry
+    assert entry["watson"] <= entry["cvm"] + 1e-12   # the centered-energy ceiling holds inside the finding
+    assert "U2=" in shape.message
 
 
 def test_shape_w1_unbanded_when_a_stdev_is_absent():
