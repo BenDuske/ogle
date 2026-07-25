@@ -299,6 +299,53 @@ def test_empty_batch_is_clean_heartbeat():
     assert "No drift" in report.narrative
 
 
+# ---- unreachable-datasets passthrough (walker errored_urns -> report) --------------
+def test_unreachable_defaults_empty_when_not_passed():
+    # Offline mode never fails a fetch — a report built without `unreachable` carries none.
+    store = BaselineStore()
+    report = run_drift_check(store, [_sig()])
+    assert report.unreachable_urns == []
+    assert report.to_dict()["unreachable_urns"] == []
+
+
+def test_unreachable_carried_onto_report_verbatim():
+    # The walker's errored_urns ride through untouched, first-seen order preserved.
+    store = BaselineStore()
+    errored = [
+        (ORDERS_URN, "TimeoutError: read timed out"),
+        (CUSTOMERS_URN, "HTTPError: 503 Service Unavailable"),
+    ]
+    report = run_drift_check(store, [_sig()], unreachable=errored)
+    assert report.unreachable_urns == errored
+
+
+def test_unreachable_is_diagnostic_only_never_pages_or_scores():
+    # An unreachable dataset is an OUTAGE signal, not drift: it must not manufacture an
+    # incident, score, or seed — a clean batch stays clean even with fetch failures alongside.
+    store = BaselineStore()
+    report = run_drift_check(
+        store, [], unreachable=[(CUSTOMERS_URN, "ConnectionResetError: connection reset")]
+    )
+    assert report.findings == []
+    assert report.incident is None
+    assert report.should_alert is False
+    assert report.scored_urns == []
+    assert report.new_urns == []
+    assert report.unreachable_urns == [(CUSTOMERS_URN, "ConnectionResetError: connection reset")]
+
+
+def test_unreachable_urns_round_trips_through_json():
+    import json
+
+    store = BaselineStore()
+    report = run_drift_check(
+        store, [_sig()], unreachable=[(ORDERS_URN, "TimeoutError: read timed out")]
+    )
+    # tuples serialize as [urn, msg] pairs and survive a JSON round-trip.
+    d = json.loads(json.dumps(report.to_dict()))
+    assert d["unreachable_urns"] == [[ORDERS_URN, "TimeoutError: read timed out"]]
+
+
 # ---- incident memory provenance ---------------------------------------------------
 def test_incident_recorded_with_provenance_for_ogle_incidents():
     # A real drift run must persist the incident's human context into store memory so

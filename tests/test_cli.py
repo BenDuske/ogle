@@ -481,6 +481,46 @@ def test_captured_example_alert_matches_live_render():
     assert captured_block == live_block
 
 
+def test_render_report_surfaces_unreachable_tail():
+    """A resilient walk that skipped past unreachable datasets must SAY so in the tail —
+    an outage signal shouldn't vanish just because the walk survived it."""
+    from ogle.cli import render_report
+    from ogle.pipeline import DriftReport
+
+    report = DriftReport(
+        findings=[],
+        incident=None,
+        narrative="No drift detected.",
+        scored_urns=["urn:li:dataset:(a)"],
+        unreachable_urns=[
+            ("urn:li:dataset:(b)", "TimeoutError: read timed out"),
+            ("urn:li:dataset:(c)", "HTTPError: 503"),
+        ],
+    )
+    out = render_report(report, as_json=False)
+    assert "2 dataset(s) unreachable this run" in out
+    # and it rides in the JSON twin as [urn, msg] pairs
+    import json
+
+    d = json.loads(render_report(report, as_json=True))
+    assert d["unreachable_urns"] == [
+        ["urn:li:dataset:(b)", "TimeoutError: read timed out"],
+        ["urn:li:dataset:(c)", "HTTPError: 503"],
+    ]
+
+
+def test_render_report_no_unreachable_tail_when_all_reachable():
+    """No fetch failures -> no unreachable line (the tail stays quiet, not '0 unreachable')."""
+    from ogle.cli import render_report
+    from ogle.pipeline import DriftReport
+
+    report = DriftReport(
+        findings=[], incident=None, narrative="No drift detected.",
+        scored_urns=["urn:li:dataset:(a)"],
+    )
+    assert "unreachable" not in render_report(report, as_json=False)
+
+
 def test_parser_registers_demo():
     args = build_parser().parse_args(["demo"])
     assert args.func.__name__ == "cmd_demo"

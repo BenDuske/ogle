@@ -234,6 +234,10 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
         tail.append(f"checked {len(report.scored_urns)} dataset(s)")
     if report.suppressed_urns:
         tail.append(f"silenced {len(report.suppressed_urns)} muted dataset(s)")
+    if report.unreachable_urns:
+        # An outage signal, not drift: these datasets couldn't be fetched, so a resilient
+        # walk continued past them — say so plainly rather than let it vanish silently.
+        tail.append(f"{len(report.unreachable_urns)} dataset(s) unreachable this run")
     if tail:
         lines.append("")
         lines.append("_" + "; ".join(tail) + "._")
@@ -332,6 +336,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         # Live walks carry per-dataset ownership; the narrative renders it as the
         # "who to page" line. Offline (--signatures) mode has no owner source -> None.
         owners=(walk_result.owners if walk_result is not None else None),
+        # Datasets the live walk couldn't reach (guarded per-dataset fetch) ride along as a
+        # diagnostic so the report can note "N unreachable". Offline mode never fails a fetch.
+        unreachable=(walk_result.errored_urns if walk_result is not None else None),
     )
 
     _emit(render_report(report, as_json=args.json))

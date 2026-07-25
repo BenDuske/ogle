@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .narrative import Incident, build_incident, narrate
 from .scorer import DriftFinding, ScoreConfig, score_dataset
@@ -44,6 +44,14 @@ class DriftReport:
     scored_urns: List[str] = field(default_factory=list)      # had a baseline -> diffed
     new_urns: List[str] = field(default_factory=list)         # first sighting -> seeded only
     suppressed_urns: List[str] = field(default_factory=list)  # drifted but muted -> not paged
+    # Datasets whose live aspect fetch RAISED this run (transient GMS 5xx, socket reset, SDK
+    # bug) paired with a short "ExcType: message" — carried straight through from the walker's
+    # `WalkResult.errored_urns`. Presentation/diagnostic ONLY: these datasets could not be
+    # reached, so they were neither scored nor seeded, and they never touch findings, the
+    # incident, severity, or `should_alert`. Surfaced so an operator learns "N unreachable this
+    # run" (an outage signal) instead of a resilient walk silently swallowing it. Empty in
+    # offline (--signatures) mode, which has no live fetch to fail.
+    unreachable_urns: List[Tuple[str, str]] = field(default_factory=list)
     # True when there IS an incident AND it wasn't reported on an earlier run.
     is_new_incident: bool = False
     # Running observation count of this incident (1 = first time). 0 when no incident.
@@ -61,6 +69,8 @@ class DriftReport:
             "scored_urns": list(self.scored_urns),
             "new_urns": list(self.new_urns),
             "suppressed_urns": list(self.suppressed_urns),
+            # list-of-pairs -> list-of-[urn, msg] so it round-trips through JSON cleanly.
+            "unreachable_urns": [[urn, msg] for urn, msg in self.unreachable_urns],
             "is_new_incident": self.is_new_incident,
             "incident_count": self.incident_count,
             "should_alert": self.should_alert,
@@ -76,6 +86,7 @@ def run_drift_check(
     update_baselines: bool = True,
     now: Optional[float] = None,
     owners: Optional[Dict[str, List[str]]] = None,
+    unreachable: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> DriftReport:
     """Score a batch of fresh signatures against stored baselines and narrate the result.
 
@@ -92,6 +103,10 @@ def run_drift_check(
             snooze-expiry and freshness behaviour.
         owners: optional urn -> owner-names map (DataHub Ownership aspect) surfaced in the
             narrative as a "who to page" line; never affects severity or the dedup fingerprint.
+        unreachable: optional (urn, "ExcType: msg") pairs for datasets whose live fetch RAISED
+            this run (the walker's `WalkResult.errored_urns`). Diagnostic ONLY — copied onto the
+            report so a caller can surface "N unreachable" without re-walking; never scored,
+            seeded, or folded into findings/severity/should_alert. None in offline mode.
 
     Returns:
         A `DriftReport`. `should_alert` is the single field a scheduled loop needs.
@@ -154,6 +169,9 @@ def run_drift_check(
         scored_urns=sorted(scored_urns),
         new_urns=sorted(new_urns),
         suppressed_urns=sorted(suppressed_urns),
+        # Carried through verbatim (first-seen order preserved) — a pure passthrough of the
+        # walker's diagnostic; the pipeline neither reaches these datasets nor reorders them.
+        unreachable_urns=list(unreachable or []),
         is_new_incident=is_new,
         incident_count=count,
     )
