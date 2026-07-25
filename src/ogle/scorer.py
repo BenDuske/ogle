@@ -1194,6 +1194,84 @@ def _empirical_massl1(
     return min(1.0, weighted_abs / total_mass)
 
 
+def _empirical_cramer_shape(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample mean-removed Cramér separation between two empirical quantile functions.
+
+    Watson's twin under the *other measure*, and the value-axis reading of shape net of level.
+    Watson (`_empirical_watson`) strips the average CDF gap from CvM before it squares — the gap's
+    variation under the pooled *mixture mass* `dH`. This does the identical mean-removal to Cramér
+    (`_empirical_cramer`), whose square is integrated over the *value axis* `dx` instead of the mass.
+    The two mean-removed members close the same square their raw parents trace: CvM and Cramér are
+    the L2 energy read over `dH` and `dx`; Watson and THIS are those same energies once the level
+    component is subtracted, over `dH` and `dx` respectively. The classic form integrates the
+    centered square against the value axis,
+
+        Cr0^2 = integral of (g(x) - gbar_dx)^2 dx,   gbar_dx = (1/W) integral of g(x) dx
+
+    with `g(x) = F_cur(x) - F_base(x)`, `W` the shared band's value width, and `gbar_dx` the
+    *value-weighted* mean gap (Watson's `gbar` is the mass-weighted one — the single line that parts
+    the two). A gap that holds one sign across the support (a location tilt) is largely absorbed into
+    `gbar_dx` and contributes little; a gap that crosses zero over the value range (a spread/tail
+    move with no net level over `dx`) passes through nearly whole. Read beside Watson it localizes the
+    surviving shape the way Cramér-vs-CvM localizes the raw energy: Cr0 above Watson says the residual
+    shape lives out in a wide, thinly-populated stretch of values that `dx` weights and `dH` discounts,
+    Cr0 below Watson says the shape sits in the dense body the mass measure favors.
+
+    On the same [0, 1] scale as its siblings — the ROOT of that centered integral, renormalized by the
+    band width, a value-weighted RMS of the *centered* gap. Because removing the (value-weighted) mean
+    can only shrink the value-weighted mean-square (Jensen: E_dx[g^2] >= E_dx[g]^2),
+
+        _empirical_cramer_shape <= _empirical_cramer <= _empirical_ks
+
+    holds exactly on every pair — Cr0 is Cramér's energy with the level component removed, twin to
+    `_empirical_watson <= _empirical_cvm`, equality only when the value-mean gap is zero (a gap that
+    already integrates to nothing over `dx` — a crossing balanced on the value axis). It rides under
+    the same Cramér <= KS ceiling and reads in the same probability units, so it shares Cramér's bands
+    (`_cvm_band`). Computed over the SAME union-of-knot bins Cramér uses (`_cdf_at` gaps, each
+    piecewise-linear bin's exact mean gap (a+b)/2 and exact mean-square (a^2+ab+b^2)/3, both weighted
+    by the bin width `dx` and divided by the total width): the mean-square is Cramér's own integrand
+    and the mean is accumulated alongside it in the same pass, so Cr0 = sqrt(meansq - meangap^2).
+    Guarded identically to Cramér — needs a shared probability band both sides sampled (`lo < hi`), at
+    least one bin between two distinct values, and non-degenerate total width; otherwise None. Pure
+    enrichment, never gates a finding; unsigned like its siblings — it measures how separated in shape,
+    not which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_sq = 0.0
+    weighted_mean = 0.0
+    total_width = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        dx = x1 - x0
+        if dx <= 0:
+            continue  # coincident knots span no value range
+        a = _cdf_at(cur_q, x0) - _cdf_at(base_q, x0)
+        b = _cdf_at(cur_q, x1) - _cdf_at(base_q, x1)
+        # Value-weighted (dx) like Cramér — the mean-removal is the only change from it. Exact
+        # mean-square and mean of the linear gap on the bin, both integrated against the width.
+        weighted_sq += dx * (a * a + a * b + b * b) / 3.0  # Cramér's own per-bin energy
+        weighted_mean += dx * (a + b) / 2.0  # signed value-mean gap on the linear bin
+        total_width += dx
+    if total_width <= 0:
+        return None  # a degenerate band with no value width tells us nothing comparable
+    mean_sq = weighted_sq / total_width
+    mean_gap = weighted_mean / total_width
+    # Variance of the CDF gap under the value measure — the mean-removed energy. Jensen keeps this
+    # non-negative; clamp float drift so cramer_shape <= cramer holds and stays inside the unit interval.
+    cramer_shape = math.sqrt(max(0.0, mean_sq - mean_gap * mean_gap))
+    return min(1.0, cramer_shape)
+
+
 def _ad_band(d: float) -> str:
     """Classify an Anderson-Darling separation into CvM's bands scaled by two.
 
@@ -2417,6 +2495,17 @@ def score_shape(
         if cramer is not None:
             entry["cramer"] = cramer
             entry["cramer_band"] = _cvm_band(cramer)
+        # Cr0 is Cramér's mean-removed twin — Watson under the value measure. It subtracts the
+        # value-weighted mean CDF gap before squaring, so a residual one-sided level offset over the
+        # support is stripped and only the value-axis *shape* of the gap survives. On a shape finding
+        # Cr0 near Cramér certifies a genuine crossing over dx (no net level) while Cr0 far below
+        # Cramér says the Cramér energy was mostly a value-scale level offset; read beside Watson it
+        # says whether the surviving shape lives in a wide sparse stretch (Cr0 above U2) or the dense
+        # body (Cr0 below U2). Bounded [0,1] under Cr0 <= Cramér <= KS, so it shares Cramér's band.
+        cramer_shape = _empirical_cramer_shape(base_q, cur_q)
+        if cramer_shape is not None:
+            entry["cramer_shape"] = cramer_shape
+            entry["cramer_shape_band"] = _cvm_band(cramer_shape)
         # Mass-L1 is CvM's L1 twin: the same pooled-mixture gap read with the bare absolute value
         # instead of the square, the fourth corner of the {L1,L2}x{value,mass} square beside W1
         # (value-L1), Cramér (value-L2) and CvM (mass-L2). Read beside CvM it says whether the
@@ -2510,6 +2599,9 @@ def score_shape(
         cramer = worsened[p].get("cramer")
         if cramer is not None:
             base += f", Cr={cramer:.2f} {worsened[p]['cramer_band']}"
+        cramer_shape = worsened[p].get("cramer_shape")
+        if cramer_shape is not None:
+            base += f", Cr0={cramer_shape:.2f} {worsened[p]['cramer_shape_band']}"
         massl1 = worsened[p].get("massl1")
         if massl1 is not None:
             base += f", M1={massl1:.2f} {worsened[p]['massl1_band']}"

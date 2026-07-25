@@ -31,6 +31,7 @@ from ogle.scorer import (
     _empirical_cvm,
     _empirical_ad,
     _empirical_cramer,
+    _empirical_cramer_shape,
     _empirical_watson,
     _empirical_massl1,
     _empirical_kuiper,
@@ -1528,6 +1529,82 @@ def test_watson_shares_the_cvm_bands():
     # U^2 is [0,1]-bounded and reads on CvM's separation scale, so score_shape bands it with CvM.
     for d in (0.05, 0.1, 0.25, 0.5, 0.73):
         assert _cvm_band(d) == _ks_band(d)
+
+
+# ---- empirical mean-removed Cramér (Watson's value-axis twin, shape net of level over dx) ----
+
+def test_empirical_cramer_shape_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_cramer_shape(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_cramer_shape_never_exceeds_cramer_the_energy_it_centers():
+    """The core invariant: subtracting the squared value-weighted mean gap can only shrink the
+    value-weighted mean-square (Jensen), so Cr0 <= Cramér <= KS on every pair — twin to U2 <= CvM."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.5, 80.0), (0.95, 130.0)]),
+    ]:
+        cs = _empirical_cramer_shape(b, c)
+        cramer = _empirical_cramer(b, c)
+        ks = _empirical_ks(b, c)
+        assert cs is not None and cramer is not None and ks is not None
+        assert cs <= cramer + 1e-12  # Jensen floor of the value-weighted RMS
+        assert cramer <= ks + 1e-12   # and Cramér under the sup, so Cr0 under it too
+
+
+def test_empirical_cramer_shape_equals_cramer_on_a_value_balanced_crossing():
+    """Cr0's equality case: a symmetric spread move about a median centered in the value band makes
+    the CDF gap antisymmetric over dx, so its value-weighted mean is exactly zero — nothing to strip,
+    Cr0 == Cramér (where Watson's equality needs the *mass*-weighted mean to vanish instead)."""
+    b = [(0.1, 4.0), (0.5, 10.0), (0.9, 16.0)]  # narrow, median 10, band center 10
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]  # wide, same median, symmetric about 10
+    cs = _empirical_cramer_shape(b, c)
+    cramer = _empirical_cramer(b, c)
+    assert cs is not None and cramer is not None
+    assert cs == pytest.approx(cramer, abs=1e-12)
+
+
+def test_empirical_cramer_shape_strips_a_one_sided_level_offset():
+    """Cr0's reason to exist: a pure location shift makes the CDF gap one-signed across the support,
+    so its value-mean carries most of the energy and Cr0 falls well below Cramér — where a value-
+    balanced crossing keeps Cr0 pinned to Cramér. The ratio Cr0/Cramér discriminates, as U2/CvM does."""
+    shift_b = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    shift_c = [(0.1, 5.0), (0.5, 15.0), (0.9, 25.0)]  # same shape, +5 — one-signed gap
+    cross_b = [(0.1, 4.0), (0.5, 10.0), (0.9, 16.0)]
+    cross_c = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]  # symmetric spread, value-balanced crossing
+    shift_ratio = _empirical_cramer_shape(shift_b, shift_c) / _empirical_cramer(shift_b, shift_c)
+    cross_ratio = _empirical_cramer_shape(cross_b, cross_c) / _empirical_cramer(cross_b, cross_c)
+    assert shift_ratio < cross_ratio
+    assert shift_ratio < 0.5  # most of the shift's Cramér energy was level, not shape
+
+
+def test_empirical_cramer_shape_symmetric_in_its_two_sides():
+    b = [(0.1, 0.0), (0.5, 40.0), (0.9, 80.0)]
+    c = [(0.1, 10.0), (0.5, 30.0), (0.9, 95.0)]
+    assert _empirical_cramer_shape(b, c) == pytest.approx(_empirical_cramer_shape(c, b), abs=1e-12)
+
+
+def test_empirical_cramer_shape_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    cs = _empirical_cramer_shape(b, c)
+    assert cs is not None and 0.0 <= cs <= 1.0
+
+
+def test_empirical_cramer_shape_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_cramer_shape(None, q) is None
+    assert _empirical_cramer_shape(q, None) is None
+    assert _empirical_cramer_shape((), q) is None
+
+
+def test_empirical_cramer_shape_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_cramer_shape(b, c) is None
 
 
 # ---- empirical mass-weighted L1 (CvM's L1 twin, the fourth {L1,L2}x{value,mass} corner) ----
