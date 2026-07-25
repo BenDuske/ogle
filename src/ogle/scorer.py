@@ -2052,10 +2052,12 @@ def score_shape(
     Guards, in order, per field: needs a quantile set on both sides (numeric, profiled); needs
     JS to be computable (a shared probability band both sides sampled — else `_empirical_js`
     returns None and the field is skipped, never guessed); needs the moments to have held; and
-    needs JS >= `cfg.shape_js_threshold`. KS and (when the field carries a spread) the in-units
-    W1 ride along as corroborating enrichment — the same readings the moment rules attach — so an
-    operator sees the shape move measured three ways. Severity scales with how far past the JS
-    band the worst field sits, like every other rule.
+    needs JS >= `cfg.shape_js_threshold`. KS, CvM, AD, Kuiper and (when the field carries a spread)
+    the in-units W1/W2 transport pair ride along as corroborating enrichment — the same readings the
+    moment rules attach — so an operator sees the shape move measured several orthogonal ways at
+    once: bounded CDF separation (KS/CvM/AD/Kuiper) beside the field's-units transport cost (W1
+    typical, W2 tail-weighted). Severity scales with how far past the JS band the worst field sits,
+    like every other rule.
     """
     worsened: Dict[str, Dict[str, float]] = {}
     for path, cur_q in current.field_quantiles.items():
@@ -2127,6 +2129,27 @@ def score_shape(
                 and abs(bstd) >= cfg.stdev_zero_floor
             ):
                 entry["w1_emp_band"] = _w2_band(w1, bstd, cstd)
+        # W2 is the L2 transport twin of that W1, and it earns its place on a *shape* finding more
+        # than anywhere else: a moment-invariant move (mean and spread both held, by the guards
+        # above) that nonetheless splits a mode or fattens one tail transports a thin slice of mass
+        # a long way while leaving the bulk put — exactly the far-displaced-quantile signature W2's
+        # squared gap amplifies and W1's mass-democratic average flattens. Reading them side by
+        # side, a W2 well above its W1 localizes the shape move to the tails (the AD-over-CvM story
+        # told in transport units) where W2≈W1 says the whole quantile function slid evenly. Same
+        # units, same trapezoid grid as W1 so W2 >= W1 holds exactly, same pooled-spread band under
+        # the same stdev guard — so score_shape now carries the full W1/W2 transport pair the moment
+        # rules already attach, not just its L1 half.
+        w2e = _empirical_w2(base_q, cur_q)
+        if w2e is not None:
+            entry["w2_emp"] = w2e
+            bstd = baseline.field_stdevs.get(path)
+            cstd = current.field_stdevs.get(path)
+            if (
+                bstd is not None
+                and cstd is not None
+                and abs(bstd) >= cfg.stdev_zero_floor
+            ):
+                entry["w2_emp_band"] = _w2_band(w2e, bstd, cstd)
         worsened[path] = entry
 
     if not worsened:
@@ -2156,6 +2179,12 @@ def score_shape(
             w1band = worsened[p].get("w1_emp_band")
             if w1band is not None:
                 base += f" {w1band}"
+        w2 = worsened[p].get("w2_emp")
+        if w2 is not None:
+            base += f", W2emp={w2:g}"
+            w2band = worsened[p].get("w2_emp_band")
+            if w2band is not None:
+                base += f" {w2band}"
         return base + ")"
 
     return DriftFinding(

@@ -2432,10 +2432,15 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["kuiper"] >= entry["ks"] - 1e-12  # V = D+ + D- is never below the sup KS reads
     assert entry["w1_emp"] == pytest.approx(_empirical_w1(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["w1_emp_band"] == "large"  # both stdevs present -> banded
+    # W2 rides along beside W1 as its tail-weighted transport twin; the invariant survives the pipeline.
+    assert entry["w2_emp"] == pytest.approx(_empirical_w2(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["w2_emp_band"] == "large"  # both stdevs present -> banded
+    assert entry["w2_emp"] >= entry["w1_emp"] - 1e-12  # RMS transport never below the L1 mean
     assert "distribution shape shifted (mean and spread held)" in shape.message
     assert f"JS={entry['js']:.2f}" in shape.message
     assert f"CvM={entry['cvm']:.2f}" in shape.message
     assert f"V={entry['kuiper']:.2f}" in shape.message
+    assert f"W2emp={entry['w2_emp']:g}" in shape.message
 
 
 def test_shape_silent_when_shape_barely_moved():
@@ -2490,6 +2495,18 @@ def test_shape_w1_unbanded_when_a_stdev_is_absent():
     assert "w1_emp" in entry            # the raw earth-mover move still reports
     assert "w1_emp_band" not in entry   # no stdev -> no pooled-spread band
     assert entry["js"] >= ScoreConfig.shape_js_threshold  # JS still gates it
+
+
+def test_shape_w2_unbanded_when_a_stdev_is_absent():
+    """W2, like W1, rides on quantiles alone; without a spread on both sides it carries no band."""
+    base = _sig(field_means={"amount": 50.0}, field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_quantiles={"amount": _SHAPE_CUR_Q})
+    shape = score_shape(base, cur, ScoreConfig())
+    assert shape is not None
+    entry = shape.details["fields"]["amount"]
+    assert "w2_emp" in entry            # the RMS earth-mover move still reports
+    assert "w2_emp_band" not in entry   # no stdev -> no pooled-spread band
+    assert entry["w2_emp"] >= entry["w1_emp"] - 1e-12  # invariant holds unbanded too
 
 
 def test_shape_escalates_on_a_serving_path():
