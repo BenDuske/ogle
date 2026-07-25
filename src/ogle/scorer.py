@@ -964,6 +964,78 @@ def _empirical_ad(
     return math.sqrt(max(0.0, weighted_sq / total_mass))
 
 
+def _empirical_cramer(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Two-sample Cramér (energy) separation between two empirical quantile functions.
+
+    CvM's twin under a *different measure*, and the last face of the CDF-gap family beside KS's
+    sup, CvM's mass-weighted L2 and AD's tail-weighted L2. All four read the very same vertical
+    gap between the two CDFs, `F_cur(x) - F_base(x)`; they differ only in how they weight it across
+    the value axis. `_empirical_cvm` integrates its square against the pooled *mixture mass* `dH` —
+    it asks "how separated on average over the observations that are actually there", so a wide
+    CDF gap out in a sparsely-populated stretch of the value range, carrying little mixture mass,
+    barely counts. The classic Cramér distance (the one-dimensional energy distance) integrates the
+    same square against the *value axis itself*,
+
+        Cramér^2 = integral of (F_cur(x) - F_base(x))^2 dx
+
+    weighting every unit of the range equally regardless of how much mass sits there. Where CvM
+    reads the gap over the mass, Cramér reads it over the *support*: a separation that opens up
+    across a long, thinly-populated span of values — a tail stretching out, a floor sliding — spans
+    many units of x even while covering little probability, so Cramér registers it where CvM's
+    mass weighting discounts it. Neither dominates the other in general (they weight by orthogonal
+    measures, `dx` vs `dH`), which is exactly why both earn a place: read side by side, Cramér far
+    above CvM localizes the move to a wide sparse stretch, Cramér below CvM to a narrow dense one.
+
+    To sit on the same [0, 1] scale as its siblings this returns the ROOT of that integral
+    renormalized by the shared value band's width — a value-weighted RMS of the CDF gap, reading in
+    the same probability units KS and CvM do. Because it is the RMS of the identical gap KS takes
+    the sup of, over the identical knot set, the invariant
+
+        _empirical_cramer <= _empirical_ks
+
+    holds exactly on every pair, twin to `_empirical_cvm <= _empirical_ks`: KS is the worst point,
+    Cramér the value-typical one, CvM the mass-typical one. Equality only when the gap is constant
+    across the sampled band. Computed over the SAME union-of-knot-values bins KS/CvM/AD use, each
+    bin's CDFs (`_cdf_at`) piecewise-linear so the exact mean-square of the linear gap is
+    (a^2 + a*b + b^2)/3 for endpoint gaps a, b; each bin is weighted by its own width `dx` (not
+    CvM's mixture mass `hm`) and the total divided by the summed width, a proper value-weighted
+    average — bounded [0, 1], honestly capped by the shared band the same way KS is. Guarded
+    identically to CvM: needs a shared probability band both sides sampled (`lo < hi`), at least one
+    bin between two distinct values, and non-degenerate total width; otherwise None. Pure
+    enrichment, never gates a finding; unsigned like its siblings — it measures how separated, not
+    which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    weighted_sq = 0.0
+    total_width = 0.0
+    for x0, x1 in zip(xs, xs[1:]):
+        dx = x1 - x0
+        if dx <= 0:
+            continue  # coincident knots span no value range
+        a = _cdf_at(cur_q, x0) - _cdf_at(base_q, x0)
+        b = _cdf_at(cur_q, x1) - _cdf_at(base_q, x1)
+        # Value-weighted (dx) rather than CvM's mass-weighted (hm) — the one line that separates
+        # the Cramér energy from its mixture twin. Exact mean-square of the linear gap on the bin.
+        weighted_sq += dx * (a * a + a * b + b * b) / 3.0
+        total_width += dx
+    if total_width <= 0:
+        return None  # a degenerate band with no value width tells us nothing comparable
+    cramer = math.sqrt(max(0.0, weighted_sq / total_width))
+    # A value-weighted RMS of a [0,1]-bounded gap; clamp float drift back into the unit interval.
+    return min(1.0, cramer)
+
+
 def _ad_band(d: float) -> str:
     """Classify an Anderson-Darling separation into CvM's bands scaled by two.
 
@@ -2109,12 +2181,13 @@ def score_shape(
     Guards, in order, per field: needs a quantile set on both sides (numeric, profiled); needs
     JS to be computable (a shared probability band both sides sampled — else `_empirical_js`
     returns None and the field is skipped, never guessed); needs the moments to have held; and
-    needs JS >= `cfg.shape_js_threshold`. KS, CvM, AD, Kuiper and (when the field carries a spread)
-    the in-units W1/W2 transport pair ride along as corroborating enrichment — the same readings the
-    moment rules attach — so an operator sees the shape move measured several orthogonal ways at
-    once: bounded CDF separation (KS/CvM/AD/Kuiper) beside the field's-units transport cost (W1
-    typical, W2 tail-weighted). Severity scales with how far past the JS band the worst field sits,
-    like every other rule.
+    needs JS >= `cfg.shape_js_threshold`. KS, CvM, AD, Cramér, Kuiper and (when the field carries a
+    spread) the in-units W1/W2 transport pair ride along as corroborating enrichment — the same
+    readings the moment rules attach — so an operator sees the shape move measured several orthogonal
+    ways at once: bounded CDF separation (KS the worst point, CvM the mass-typical L2, AD its
+    tail-weighted twin, Cramér the value-typical L2, Kuiper the both-directions sum) beside the
+    field's-units transport cost (W1 typical, W2 tail-weighted). Severity scales with how far past
+    the JS band the worst field sits, like every other rule.
     """
     worsened: Dict[str, Dict[str, float]] = {}
     for path, cur_q in current.field_quantiles.items():
@@ -2167,6 +2240,16 @@ def score_shape(
         if ad is not None:
             entry["ad"] = ad
             entry["ad_band"] = _ad_band(ad)
+        # Cramér is CvM's twin under the other measure: the same squared CDF gap integrated over the
+        # value axis (dx) instead of the pooled mixture mass (dH). On a moment-invariant shape move
+        # it separates a gap that opens across a wide, thinly-populated stretch of values (Cramér
+        # above CvM) from one packed into a narrow dense one (Cramér below CvM) — the support-vs-mass
+        # reading of the same separation. Bounded [0,1] and RMS of the gap KS sups, so it shares KS's
+        # bands (via `_cvm_band`) and rides under the same Cramér <= KS ceiling CvM does.
+        cramer = _empirical_cramer(base_q, cur_q)
+        if cramer is not None:
+            entry["cramer"] = cramer
+            entry["cramer_band"] = _cvm_band(cramer)
         # Kuiper is KS's both-directions cousin: D+ + D-, the sum of the worst up- and down-gaps
         # rather than KS's single larger one. On a shape that crosses (center thins, both tails
         # fatten) the two half-gaps both count, so Kuiper rises above KS (invariant Kuiper >= KS)
@@ -2245,6 +2328,9 @@ def score_shape(
         ad = worsened[p].get("ad")
         if ad is not None:
             base += f", AD={ad:.2f} {worsened[p]['ad_band']}"
+        cramer = worsened[p].get("cramer")
+        if cramer is not None:
+            base += f", Cr={cramer:.2f} {worsened[p]['cramer_band']}"
         kuiper = worsened[p].get("kuiper")
         if kuiper is not None:
             base += f", V={kuiper:.2f} {worsened[p]['kuiper_band']}"

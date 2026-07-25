@@ -30,6 +30,7 @@ from ogle.scorer import (
     _empirical_js,
     _empirical_cvm,
     _empirical_ad,
+    _empirical_cramer,
     _empirical_kuiper,
     _cdf_at,
     _ks_band,
@@ -1369,6 +1370,85 @@ def test_ad_band_doubles_the_cvm_cutoffs():
     assert _ad_band(1.0) == "large"
 
 
+# ---- empirical Cramér / energy distance (value-weighted L2 CDF separation, CvM's dx-twin) --
+
+
+def test_empirical_cramer_is_zero_for_identical_quantiles():
+    q = [(0.1, 0.0), (0.5, 10.0), (0.9, 20.0)]
+    assert _empirical_cramer(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_cramer_never_exceeds_ks_the_sup_it_averages():
+    """The core invariant: a value-weighted RMS of the CDF gap can never exceed the sup KS reads.
+    Twin to CvM's ceiling — holds on any pair regardless of how the mass or the range is arranged."""
+    for b, c in [
+        ([(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)], [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]),
+        (_SHAPE_BASE_Q, _SHAPE_CUR_Q),
+        ([(0.1, 0.0), (0.9, 10.0)], [(0.1, 3.0), (0.9, 13.0)]),
+        ([(0.05, 0.0), (0.5, 50.0), (0.95, 100.0)], [(0.05, 30.0), (0.5, 80.0), (0.95, 130.0)]),
+    ]:
+        cramer = _empirical_cramer(b, c)
+        ks = _empirical_ks(b, c)
+        assert cramer is not None and ks is not None
+        assert cramer <= ks + 1e-12
+
+
+def test_empirical_cramer_positive_when_the_distributions_separate():
+    b = [(0.1, 0.0), (0.5, 50.0), (0.9, 100.0)]
+    c = [(0.1, 0.0), (0.5, 10.0), (0.9, 100.0)]  # interior shape pulls apart
+    assert _empirical_cramer(b, c) > 0.0
+
+
+def test_empirical_cramer_diverges_from_cvm_by_weighting_range_not_mass():
+    """Cramér's reason to exist: it weights the gap by the value axis (dx), CvM by the mixture mass
+    (dH). A separation that opens across a wide, thinly-sampled stretch of values reads higher on
+    Cramér than on CvM relative to KS — the support-vs-mass distinction, neither dominating the
+    other in general. Here a gap parked out in a long sparse span lifts the value-weighted RMS
+    above the mass-weighted one."""
+    # Dense core near the low end, then a long sparse reach to a far upper value where the two
+    # sides separate — little mixture mass out there, but many units of range.
+    b = [(0.1, 0.0), (0.2, 1.0), (0.3, 2.0), (0.9, 100.0)]
+    c = [(0.1, 0.0), (0.2, 1.0), (0.3, 2.0), (0.9, 40.0)]  # upper reach pulled in
+    cramer = _empirical_cramer(b, c)
+    cvm = _empirical_cvm(b, c)
+    ks = _empirical_ks(b, c)
+    assert cramer is not None and cvm is not None and ks is not None
+    # Value-weighting keeps more of the sup than mass-weighting does for a wide sparse separation.
+    assert cramer / ks > cvm / ks
+
+
+def test_empirical_cramer_symmetric_in_its_two_sides():
+    b = [(0.1, 0.0), (0.5, 40.0), (0.9, 80.0)]
+    c = [(0.1, 10.0), (0.5, 30.0), (0.9, 95.0)]
+    assert _empirical_cramer(b, c) == pytest.approx(_empirical_cramer(c, b), abs=1e-12)
+
+
+def test_empirical_cramer_stays_bounded_unit_interval():
+    b = [(0.0, 0.0), (1.0, 1.0)]
+    c = [(0.0, 1000.0), (1.0, 2000.0)]  # far-disjoint supports
+    cramer = _empirical_cramer(b, c)
+    assert cramer is not None and 0.0 <= cramer <= 1.0
+
+
+def test_empirical_cramer_none_without_a_quantile_set_on_a_side():
+    q = [(0.1, 0.0), (0.9, 10.0)]
+    assert _empirical_cramer(None, q) is None
+    assert _empirical_cramer(q, None) is None
+    assert _empirical_cramer((), q) is None
+
+
+def test_empirical_cramer_none_when_no_shared_probability_band():
+    b = [(0.1, 0.0), (0.4, 10.0)]
+    c = [(0.6, 0.0), (0.9, 10.0)]  # bands don't overlap
+    assert _empirical_cramer(b, c) is None
+
+
+def test_cramer_shares_the_cvm_bands():
+    # Cramér is [0,1]-bounded and reads on KS's separation scale, so score_shape bands it with CvM.
+    for d in (0.05, 0.1, 0.25, 0.5, 0.73):
+        assert _cvm_band(d) == _ks_band(d)
+
+
 # ---- empirical Jensen-Shannon divergence (bounded symmetric shape divergence) -------
 
 def test_empirical_js_is_zero_for_identical_quantiles():
@@ -2562,6 +2642,21 @@ def test_shape_none_without_quantiles():
     base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0})
     cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0})
     assert score_shape(base, cur, ScoreConfig()) is None
+
+
+def test_shape_carries_cramer_enrichment_end_to_end():
+    """A SHAPE finding decorates the field with the value-weighted Cramér energy beside CvM/KS, and
+    surfaces it in the message as `Cr=` — the corroboration an operator reads without recomputing."""
+    base = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+                field_quantiles={"amount": _SHAPE_BASE_Q})
+    cur = _sig(field_means={"amount": 50.0}, field_stdevs={"amount": 30.0},
+               field_quantiles={"amount": _SHAPE_CUR_Q})
+    shape = score_shape(base, cur, ScoreConfig())
+    assert shape is not None
+    entry = shape.details["fields"]["amount"]
+    assert "cramer" in entry and "cramer_band" in entry
+    assert entry["cramer"] <= entry["ks"] + 1e-12   # the ceiling holds inside the finding too
+    assert "Cr=" in shape.message
 
 
 def test_shape_w1_unbanded_when_a_stdev_is_absent():
