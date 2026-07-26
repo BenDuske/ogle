@@ -309,6 +309,40 @@ def is_model_serving(backend: WalkerBackend, model_urn: str) -> bool:
     return False
 
 
+def discover_serving_models(
+    backend: WalkerBackend, candidate_urns: Iterable[str]
+) -> List[str]:
+    """From candidate `mlModel` URNs, return those to walk — every one probed `IN_SERVICE`,
+    plus any whose serving-probe could not complete.
+
+    This is the discovery-tier twin of the `walk_model` guard. Probing each candidate calls
+    `is_model_serving`, which hits the backend (`get_model_props` + `get_deployment_props`);
+    a live GMS can 5xx, reset a socket, or trip an SDK bug on ONE candidate's aspects. Without
+    a guard that single raise propagates out of discovery and aborts the whole `--discover`
+    run — dropping EVERY serving model from the walk, the exact "one flaky model blinds the
+    run / total crash -> no report" failure the walk tier already guards against, surviving one
+    tier upstream.
+
+    A candidate whose serving-probe RAISES is included CONSERVATIVELY (kept in the walk list)
+    rather than dropped: `walk_model` then either walks it (if the transient cleared) or records
+    it in `errored_urns`, which flows into `report.unreachable_urns` + `--fail-on-unreachable`.
+    Dropping it would be a silent blind-spot — a model we could not classify vanishing from the
+    run with no trace; including it routes the failure into the existing surfacing machinery.
+    A candidate cleanly probed as not-serving is excluded as before. Order is first-seen.
+    """
+    discovered: List[str] = []
+    for urn in candidate_urns:
+        u = str(urn)
+        try:
+            serving = is_model_serving(backend, u)
+        except Exception:  # noqa: BLE001 — one flaky probe must not abort discovery
+            discovered.append(u)  # conservative: keep it so it's walked + its failure surfaced
+            continue
+        if serving:
+            discovered.append(u)
+    return discovered
+
+
 def dataset_urns_for_model(backend: WalkerBackend, model_urn: str) -> List[str]:
     """Every upstream dataset URN feeding a given `mlModel`.
 
@@ -579,6 +613,10 @@ class DataHubBackend:
         Uses the SDK's search over MLMODEL to enumerate candidates, then checks each. Only
         needed when a caller wants Ogle to auto-select which models to walk; a scheduled job
         can just pin an explicit list.
+
+        Serving-probe failures are guarded per candidate by `discover_serving_models`: one
+        flaky probe degrades that candidate to "walk it anyway" instead of aborting the whole
+        discovery (see that function for the rationale).
         """
         urns: List[str] = list(self._graph.get_urns_by_filter(entity_types=["mlModel"]))
-        return [u for u in urns if is_model_serving(self, u)]
+        return discover_serving_models(self, urns)

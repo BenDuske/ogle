@@ -23,6 +23,7 @@ from ogle.walker import (
     WalkResult,
     build_signature_from_aspects,
     dataset_urns_for_model,
+    discover_serving_models,
     extract_owner_names,
     is_model_serving,
     owner_display_name,
@@ -697,6 +698,36 @@ def test_walk_models_one_flaky_model_does_not_blind_the_others():
     # The flaky model flows into the unreachable machinery, and both were attempted.
     assert MODEL_DEMAND in dict(result.errored_urns)
     assert set(result.walked_models) == {MODEL_CHURN, MODEL_DEMAND}
+
+
+def test_discover_serving_models_returns_only_serving():
+    """Baseline: with no probe failures, discovery keeps serving models and drops the rest.
+    churn is serving (IN_SERVICE deployment); demand has no deployments."""
+    b = _two_model_backend()
+    assert discover_serving_models(b, [MODEL_CHURN, MODEL_DEMAND]) == [MODEL_CHURN]
+
+
+def test_discover_serving_models_flaky_probe_does_not_abort_discovery():
+    """The real bug: one candidate's serving-probe raising must NOT abort the whole discovery
+    and drop every OTHER serving model from the walk — the discovery-tier twin of the walk
+    guard. The flaky candidate is kept conservatively; the healthy serving model still lands."""
+    b = _model_flaky_backend(MODEL_DEMAND)  # probing demand's props 5xx's; churn is healthy
+    discovered = discover_serving_models(b, [MODEL_CHURN, MODEL_DEMAND])
+    # Healthy serving model survives (not dropped by the sibling's failure), and the flaky one
+    # is conservatively kept — contrast the clean run above, where not-serving demand is excluded.
+    assert MODEL_CHURN in discovered
+    assert MODEL_DEMAND in discovered
+
+
+def test_discover_serving_models_flaky_candidate_is_walkable_downstream():
+    """A conservatively-kept flaky candidate flows into the walk, where walk_model's own guard
+    records it as unreachable — so the discovery-tier flake still surfaces, never silently lost."""
+    b = _model_flaky_backend(MODEL_DEMAND)
+    discovered = discover_serving_models(b, [MODEL_CHURN, MODEL_DEMAND])
+    result = walk_models(b, discovered)
+    # churn fingerprints; demand degrades to unreachable via the existing machinery.
+    assert {s.urn for s in result.signatures} == {DS_CUSTOMERS, DS_ORDERS}
+    assert MODEL_DEMAND in dict(result.errored_urns)
 
 
 def test_walk_model_empty_result_when_model_absent():
