@@ -429,8 +429,23 @@ def walk_model(
     at least one `IN_SERVICE` deployment) or empty. `pipeline.run_drift_check` uses it to
     escalate the severity of any finding on those datasets.
     """
-    dataset_urns = dataset_urns_for_model(backend, model_urn)
-    serving = is_model_serving(backend, model_urn)
+    # The model's OWN top-level traversal (its props -> mlFeatures -> sources, and its
+    # deployment status) hits the backend too. In a multi-model walk a live server can 5xx,
+    # reset a socket, or trip an SDK bug on ONE model's aspects — and that must not abort the
+    # whole run and blind Ogle to drift on every OTHER model. This is the model-tier twin of
+    # the per-dataset guard below. Guard ONLY these backend calls: a raise here degrades the
+    # model to "unreachable" (recorded in `errored_urns` so it flows into the existing
+    # unreachable machinery — report.unreachable_urns + `--fail-on-unreachable`), and
+    # `walk_models` continues to the next model. `walked_models` still lists it so diagnostics
+    # see it was attempted.
+    try:
+        dataset_urns = dataset_urns_for_model(backend, model_urn)
+        serving = is_model_serving(backend, model_urn)
+    except Exception as exc:  # noqa: BLE001 — one flaky model must not blind a multi-model walk
+        return WalkResult(
+            errored_urns=[(model_urn, f"{type(exc).__name__}: {exc}")],
+            walked_models=[model_urn],
+        )
 
     # `get_ownership` is an optional backend method (added after the original five) — probe
     # for it so a pre-existing custom backend that lacks it degrades to "no owners", never

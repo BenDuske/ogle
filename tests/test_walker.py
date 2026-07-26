@@ -647,6 +647,58 @@ def test_walk_result_merge_unions_errored_urns_first_seen_message():
     assert merged_map[DS_ORDERS] == "RuntimeError: first"  # first-seen wins, deterministic
 
 
+@dataclass
+class ModelFlakyBackend(FakeBackend):
+    """A backend that raises on `get_model_props` for a chosen model URN — mirrors a live GMS
+    that 5xx's / resets the socket on ONE model's top-level aspects while others answer fine.
+    The failure is at the model tier (not a leaf dataset), so it exercises the model-level guard."""
+
+    raise_on_model: Optional[str] = None
+
+    def get_model_props(self, urn):
+        if urn == self.raise_on_model:
+            raise RuntimeError("GMS 503 Service Unavailable")
+        return self.model_props.get(urn)
+
+
+def _model_flaky_backend(raise_on_model: str) -> "ModelFlakyBackend":
+    base = _two_model_backend()
+    return ModelFlakyBackend(
+        model_props=base.model_props,
+        feature_props=base.feature_props,
+        deployment_props=base.deployment_props,
+        schemas=base.schemas,
+        profiles=base.profiles,
+        ownership=base.ownership,
+        raise_on_model=raise_on_model,
+    )
+
+
+def test_walk_model_records_errored_model_when_top_level_fetch_raises():
+    """A model whose OWN aspect fetch raises degrades to unreachable (errored_urns) instead of
+    propagating — the model-tier twin of the per-dataset guard. It is still marked attempted."""
+    b = _model_flaky_backend(MODEL_DEMAND)
+    result = walk_model(b, MODEL_DEMAND)
+    errored_map = dict(result.errored_urns)
+    assert MODEL_DEMAND in errored_map
+    assert "RuntimeError" in errored_map[MODEL_DEMAND]
+    # Nothing could be fingerprinted, but the model is recorded as walked (attempted).
+    assert result.signatures == []
+    assert result.walked_models == [MODEL_DEMAND]
+
+
+def test_walk_models_one_flaky_model_does_not_blind_the_others():
+    """The real bug: in a multi-model walk, one model's top-level fetch failure must NOT abort
+    the whole run and silence drift on every other model. The healthy model still fingerprints."""
+    b = _model_flaky_backend(MODEL_DEMAND)  # churn is healthy, demand 5xx's
+    result = walk_models(b, [MODEL_CHURN, MODEL_DEMAND])
+    # Healthy model's datasets still landed — the run did not abort.
+    assert {s.urn for s in result.signatures} == {DS_CUSTOMERS, DS_ORDERS}
+    # The flaky model flows into the unreachable machinery, and both were attempted.
+    assert MODEL_DEMAND in dict(result.errored_urns)
+    assert set(result.walked_models) == {MODEL_CHURN, MODEL_DEMAND}
+
+
 def test_walk_model_empty_result_when_model_absent():
     result = walk_model(FakeBackend(), MODEL_CHURN)
     assert result.signatures == []
