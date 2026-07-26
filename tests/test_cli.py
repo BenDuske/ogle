@@ -424,17 +424,18 @@ def test_demo_seeds_then_alerts_exit_one(capsys):
     assert "d232226d661c10d6" in out
 
 
-def test_demo_shows_freshness_as_eighth_dimension(capsys):
-    """The always-on ## 3 section exercises freshness — the 8th drift dimension by ship order.
+def test_demo_shows_freshness_as_ninth_dimension(capsys):
+    """The always-on ## 3 section exercises freshness — the 9th drift dimension by ship order.
 
     Freshness is clock-driven, so the showcase injects a fixed stamp + clock: the age (90.0h)
     and SLA (24.0h) are deterministic, and it must fire ALONE (every other dimension green) to
-    make the silent-stall point. The churn incident above stays the untouched 7-dim alert.
+    make the silent-stall point. The churn incident above stays the untouched 7-dim alert
+    (its 8th dimension, shape, rides as enrichment on the mean finding, not a standalone one).
     """
     rc = main(["demo"])
     out = capsys.readouterr().out
     assert rc == 1  # exit code still driven by the churn serving-path incident
-    assert "## 3. The 8th dimension: freshness" in out
+    assert "## 3. The 9th dimension: freshness" in out
     # Deterministic, and the only finding in its section (fired alone on a green-everywhere source).
     assert "**freshness** — data is stale" in out
     assert "90.0h ago, SLA 24.0h" in out

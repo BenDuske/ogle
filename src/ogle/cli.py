@@ -622,10 +622,12 @@ def cmd_demo(args: argparse.Namespace) -> int:
     drift = run_drift_check(store, d_sigs, serving_urns=d_serving, update_baselines=True)
     _emit(render_report(drift, as_json=False))
 
-    # 8th-dimension showcase: freshness — the silent-stall signal the other seven can't see.
+    # 9th-dimension showcase: freshness — the silent-stall signal the other eight can't see.
     # Runs as its own keyless mini-scenario against a *separate* in-memory store, so the churn
     # incident above stays the exact 7-dimension alert `examples/alerts/churn-orders-drift.md`
-    # captured, while the demo as a whole exercises all eight of Ogle's drift dimensions in one
+    # captured (the 8th dimension, shape, rides as JS/Wasserstein enrichment on that alert's mean
+    # finding rather than firing standalone — the shape rule gates only when the moments hold),
+    # while the demo as a whole surfaces eight of Ogle's nine drift dimensions in one
     # command. The source below is byte-for-byte unchanged — same schema, rows, nulls, means,
     # spread and range — but its profile timestamp stopped advancing: every other dimension
     # stays green, only freshness fires. Clock + stamps are fixed so the output is deterministic
@@ -662,7 +664,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     fresh_drift = run_drift_check(
         fresh_store, [stale_source], cfg=fresh_cfg, serving_urns=[fresh_urn], now=fresh_now
     )
-    _emit("\n## 3. The 8th dimension: freshness (the silent stall)\n")
+    _emit("\n## 3. The 9th dimension: freshness (the silent stall)\n")
     _emit(
         "_Same rows, schema, nulls and distributions as yesterday — only the profile "
         "timestamp stopped advancing, so a model retraining on it learns a frozen world. "
