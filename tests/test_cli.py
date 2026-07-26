@@ -4587,6 +4587,51 @@ def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, 
     assert "nothing to clear" in capsys.readouterr().out
 
 
+def test_retract_cleared_never_recovers_a_muted_but_drifting_dataset(tmp_path, capsys, monkeypatch):
+    """A muted dataset that is STILL drifting is held out of `report.findings` (mute suppresses
+    the page), so it looks 'not drifting' — but it is NOT recovered. Retracting its Ogle tag would
+    strip a live drift flag off a genuinely-broken asset, so a suppressed dataset must never reach
+    the recovered set handed to retract."""
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    # Seed both datasets healthy so a later run has baselines to diff against.
+    seed = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=2000)]
+    wr_seed = WalkResult(signatures=seed, serving_dataset_urns=frozenset())
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (seed, [], wr_seed))
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])
+    capsys.readouterr()
+
+    # Mute ORDERS, then arm a run where CUSTOMERS is unchanged (a true recovered candidate) and
+    # ORDERS drifts hard (a dropped schema field) — but, muted, it lands in suppressed_urns, not
+    # findings. The bug this guards: `scored_urns - findings` swept ORDERS into `recovered`.
+    main(["mute", ORDERS_URN, "--store", str(store)])
+    capsys.readouterr()
+    customers_ok = _sig(CUSTOMERS_URN, row_count=1000)  # identical to baseline -> healthy
+    orders_drift = _sig(ORDERS_URN, row_count=2000, schema_fields=[("id", "int")])  # dropped a field
+    cur = [customers_ok, orders_drift]
+    wr = WalkResult(signatures=cur, serving_dataset_urns=frozenset())
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (cur, [], wr))
+
+    captured = {}
+
+    def _fake_retract(recovered, active, walk_result, gms):
+        captured["recovered"] = list(recovered)
+        from ogle.writeback import WritebackPlan, WritebackResult
+        return WritebackPlan(), WritebackResult()
+
+    monkeypatch.setattr("ogle.cli._do_retract", _fake_retract)
+
+    rc = main(
+        ["check", "--store", str(store), "--gms", "http://x", "--discover", "--retract-cleared"]
+    )
+
+    assert rc == 0  # muted drift never pages, nothing else fails
+    # CUSTOMERS is genuinely recovered; muted-but-drifting ORDERS must be excluded.
+    assert captured["recovered"] == [CUSTOMERS_URN]
+    assert ORDERS_URN not in captured["recovered"]
+
+
 # ---- --fail-on-unreachable: a blind live run must not exit 0 -----------------------
 def _arm_blind_walk(tmp_path, store, monkeypatch):
     """Seed CUSTOMERS healthy, then arm a live walk that returns CUSTOMERS unchanged

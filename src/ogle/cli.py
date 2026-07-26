@@ -489,7 +489,16 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
             return 2
         drifted = {f.urn for f in report.findings}
-        recovered = [u for u in report.scored_urns if u not in drifted]
+        # A muted dataset is diffed (so it lands in scored_urns) but its findings are held
+        # out of the incident, so it is absent from `report.findings` too — which would make
+        # it look "recovered" here. It is NOT: muting suppresses PAGING, not the drift, and a
+        # muted dataset that is still drifting sits in `suppressed_urns`. Retracting it would
+        # strip a live drift flag off an asset that is genuinely broken (the exact stale/wrong-
+        # tag class retraction exists to kill), so a suppressed dataset can never be recovered.
+        suppressed = set(report.suppressed_urns)
+        recovered = [
+            u for u in report.scored_urns if u not in drifted and u not in suppressed
+        ]
         if not recovered:
             _emit("_retract: no recovered datasets this run._")
         elif getattr(args, "catalog_dry_run", False):
