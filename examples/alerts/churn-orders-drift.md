@@ -4,7 +4,7 @@ examples/demo/drifted-signatures.json (see README Quickstart). Not hand-written 
 this is exactly what a scheduler would page to an on-call engineer. Two serving-path
 tables drift at once: orders breaks loudly (schema/volume/quality) while churn_features
 drifts silently in its value distributions (distribution/mean/stdev/range) — 7 of Ogle's
-8 dimensions in one alert. -->
+9 dimensions in one alert. -->
 
 ## 🔴 HIGH drift across 2 datasets on a serving path
 
