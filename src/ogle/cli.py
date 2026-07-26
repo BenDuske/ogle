@@ -468,8 +468,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"ogle check: write-back failed: {exc}", file=sys.stderr)
                 # Alert still fires — the check itself succeeded; the write-back is an
-                # optional side-effect. Return 1 (new incident), not 2.
-                return 1
+                # optional side-effect, so its failure must not upgrade the exit code past
+                # what the drift/blind gates decided. Route through the same _check_exit_fail
+                # helper the retract-error path uses, so a below-`--fail-on` incident (or a
+                # clean-but-blind run) still exits per the gate — never a hardcoded 1 that
+                # would page a CI wrapper the operator explicitly told to ignore this severity.
+                return 1 if _check_exit_fail(report, args) else 0
             _render_writeback(plan, wb_result, as_json=args.json)
 
     # Optional retraction — clear Ogle's tag off assets that recovered. Unlike write-back

@@ -4707,6 +4707,77 @@ def test_write_back_catalog_dry_run_json_sets_flag(tmp_path, capsys, monkeypatch
     assert any(a["entity_urn"] == ds for a in payload["plan"]["actions"])
 
 
+# ---- write-back FAILURE must respect the exit gate, not hardcode exit 1 ------------
+def _seed_and_low_drift(tmp_path, store, monkeypatch):
+    """Seed a HEALTHY CUSTOMERS baseline offline, then arm the live walk to return a
+    -35% row-count CUSTOMERS = a fresh but only-LOW volume incident (no serving path, so no
+    severity escalation). The live walk carries a WalkResult, so --write-back is permitted."""
+    from ogle.walker import WalkResult
+
+    healthy = _write_sigs(tmp_path / "healthy.json", [_sig(row_count=1000)])
+    main(["check", "--store", str(store), "--signatures", str(healthy)])  # seed baseline
+    drifted = _sig(row_count=650)  # -35% -> LOW volume drift (see _drift_run severity bands)
+    wr = WalkResult(signatures=[drifted], serving_dataset_urns=set(), dataset_to_models={})
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: ([drifted], [], wr),
+    )
+
+
+def _boom_writeback(*a, **k):
+    raise RuntimeError("catalog write endpoint down")
+
+
+def test_writeback_failure_respects_fail_on_gate(tmp_path, capsys, monkeypatch):
+    """A --write-back exception must not upgrade the exit code past the drift gate.
+
+    A new LOW incident under `--fail-on high` is below the floor (gate_should_fail=False), so
+    even when write-back throws, the run exits 0 — the write-back is an optional side-effect,
+    symmetric with the retract-error path (both route through _check_exit_fail). The old code
+    hardcoded `return 1` here, silently defeating the operator's `--fail-on high` intent.
+    """
+    store = tmp_path / "b.json"
+    _seed_and_low_drift(tmp_path, store, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("ogle.cli._do_writeback", _boom_writeback)
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back", "--fail-on", "high",
+    ])
+    assert "write-back failed" in capsys.readouterr().err  # the failure IS still surfaced
+    assert rc == 0                                          # ...but below the floor -> exit 0
+
+
+def test_writeback_failure_still_fails_by_default(tmp_path, capsys, monkeypatch):
+    """Control: with the default gate (no --fail-on) a new incident exits 1, and a failed
+    write-back preserves that historical contract — the fix only changes the gated case."""
+    store = tmp_path / "b.json"
+    _seed_and_low_drift(tmp_path, store, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("ogle.cli._do_writeback", _boom_writeback)
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back",
+    ])
+    assert "write-back failed" in capsys.readouterr().err
+    assert rc == 1                                          # new LOW incident, default gate
+
+
+def test_writeback_failure_exits_1_when_incident_meets_floor(tmp_path, capsys, monkeypatch):
+    """The gate still bites: a new incident that MEETS `--fail-on` exits 1 even if write-back
+    throws — the fix only relaxes the below-floor case, never suppresses a real page."""
+    store = tmp_path / "b.json"
+    _seed_and_low_drift(tmp_path, store, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setattr("ogle.cli._do_writeback", _boom_writeback)
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back", "--fail-on", "low",
+    ])
+    assert "write-back failed" in capsys.readouterr().err
+    assert rc == 1                                          # LOW incident >= --fail-on low
+
+
 def test_retract_cleared_catalog_dry_run_previews_without_applying(tmp_path, capsys, monkeypatch):
     """--retract-cleared --catalog-dry-run previews the clear plan and never calls _do_retract."""
     from ogle.walker import WalkResult
