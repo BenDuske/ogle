@@ -35,7 +35,15 @@ quality (null-rate), categorical distribution, freshness (stale-feed SLA), the
 per-feature numeric moments mean, stdev, and range, and distribution **shape**
 (a histogram reshaping while its mean *and* stdev both hold — the residual the
 moment rules miss) — so covariate shift, a silent stall, and a broken load each
-surface as their own labeled signal. When an
+surface as their own labeled signal. Under the distribution and shape dimensions
+sits a **distance layer** that reads a whole-feature move as a single number: a
+*parametric* half (Hellinger, Jeffreys/PSI, and the 2-Wasserstein, modeled from the
+mean+stdev already in the signature) folds a joint location-and-scale shift into one
+reading, and an *empirical* half computed from raw quantiles — a bounded
+Jensen–Shannon gate corroborated by the Kolmogorov–Smirnov / Kuiper / Cramér-von
+Mises / Cramér-energy / Watson U² distance family and the W1 ≤ W2 ≤ W∞ transport
+ladder — catches multimodal or skew moves the Gaussian summaries idealize away. All
+of it ships today under the keyless test suite. When an
 above-threshold anomaly on a serving-path asset is
 detected, Ogle writes a root-cause **narrative** an on-call engineer can act on in
 30 seconds: what changed, when, who owns it, which downstream models are exposed,
@@ -84,27 +92,12 @@ architecture diagram, so we invested in making `pytest` and the offline demo run
 clean from a fresh clone.
 
 ### What's next
-The nine moment-and-metric drift dimensions ship alongside a **distribution-distance**
-layer that reads a whole-feature move as one number instead of one moment at a time. It
-has two halves. The *parametric* half models each side as a Gaussian from the mean+stdev
-already in the signature — Hellinger, Jeffreys/PSI, and the 2-Wasserstein — so a joint
-location-and-scale shift folds into a single reading. The *empirical* half then rides
-beside it, computed nonparametrically from the two sides' raw quantile functions when a
-signature carries sample quantiles, so a multimodal or skew move the Gaussian summaries
-idealize away still surfaces: a bounded Jensen-Shannon divergence gates the finding, and
-a full CDF-and-transport distance family corroborates it several orthogonal ways at
-once — the CDF gap read as its worst point (Kolmogorov-Smirnov), its both-directions sum
-(Kuiper), and its typical magnitude under every {L1,L2}×{value-axis,mass} measure
-(Cramér-von Mises, Cramér/energy, mass-L1, plus the mean-removed Watson U² and Cr0 shape
-twins), and the same move in the feature's own units as the transport ladder W1 (mean
-displacement) ≤ W2 (RMS) ≤ W∞ (worst quantile), the horizontal dual of KS. Closing that
-empirical family, histogram-PSI now reads the same quantile bins as the bounded JS but as
-its unbounded Jeffreys twin — the industry drift number on the 0.1/0.25 scale, still
-ranking two population moves after JS has saturated. After that: swapping the
-`BaselineStore` onto the salience-ranked Aegis MemoryAgent so past false positives and
-real incidents sharpen future walks, agent-to-agent Ogle deployments that share incident
-memory across teams, and publishing Ogle's DataHub Skill wrapper back upstream as an OSS
-contribution.
+With the nine drift dimensions and their distribution-distance layer already shipped
+(above), what's ahead is memory and reach: swapping the `BaselineStore` onto the
+salience-ranked Aegis MemoryAgent so past false positives and real incidents sharpen
+future walks; agent-to-agent Ogle deployments that share incident memory across teams
+so one team's confirmed drift primes another's; and publishing Ogle's DataHub Skill
+wrapper back upstream as an OSS contribution.
 
 ---
 
