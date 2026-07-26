@@ -171,6 +171,22 @@ the rest. No new incident is always **0**.
 ogle check --signatures sigs.json --fail-on high   # exit 1 only on a HIGH incident
 ```
 
+**Failing on a blind run (`--fail-on-unreachable`).** On a live walk a dataset's fetch can
+raise (GMS 5xx, socket reset, an SDK bug). Ogle already keeps walking so one flaky table
+can't blind it to drift on all the others, and it lists what it couldn't reach — but a table
+it never read can't be diffed, so by default the exit code is unaffected. That means a *total*
+outage (every fetch failing, zero findings) exits **0** and reads as "all clear" to a
+scheduled gate — the exact silently-blind failure Ogle exists to catch. `--fail-on-unreachable`
+turns a blind run into a non-zero exit so a monitor treats it as a failure, not health:
+
+```bash
+ogle check --gms http://localhost:8080 --discover --fail-on-unreachable     # exit 1 if any table was unreachable
+ogle check --gms http://localhost:8080 --discover --fail-on-unreachable 5   # ...only once 5+ were
+```
+
+Opt-in (off by default, so the existing 0/1 contract is unchanged) and a no-op offline, where
+there is no live fetch to fail.
+
 ### Muting known false positives (`ogle mute`)
 
 Some assets are chronically noisy — a dashboard that bounces every Monday, a staging table

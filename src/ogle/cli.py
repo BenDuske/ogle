@@ -20,6 +20,10 @@ Exit codes are chosen so a cron/Task wrapper can branch on them:
     2  usage / input error
 `--fail-on {low,medium,high}` tightens the 0/1 line for a CI gate: a new incident below
 that severity floor is still reported (and tagged) but exits 0 instead of 1.
+`--fail-on-unreachable [N]` adds a second, independent reason to exit 1: the run was
+(partly) blind because N+ datasets couldn't be fetched. Opt-in — Ogle can't diff a table it
+never read, so a total GMS outage otherwise exits 0 ("all clear"), the exact silent-blind
+failure Ogle exists to catch, turned on its own read path.
 """
 
 from __future__ import annotations
@@ -280,6 +284,40 @@ def gate_should_fail(report: DriftReport, fail_on: Optional[str]) -> bool:
     return report.incident.overall_severity.rank >= Severity(fail_on).rank
 
 
+def unreachable_gate_fail(report: DriftReport, threshold: Optional[int]) -> bool:
+    """CI exit-code gate for BLIND spots — the outage twin of `gate_should_fail`.
+
+    Ogle can't diff a dataset it couldn't fetch, so a run that hit unreachable datasets was
+    partly (or, if every fetch failed, wholly) blind. Without this gate a total GMS outage —
+    every dataset raising — produces no findings, no incident, and exits 0: to a scheduled
+    wrapper that reads exactly as "all clear, no drift," the very silently-blind failure Ogle
+    exists to catch, turned on Ogle's own read path.
+
+    Pure — no I/O — so the page/no-page decision stays unit-testable alongside `gate_should_fail`.
+
+    * `threshold is None` (default) -> always False: the gate is opt-in, so the historical
+      exit contract (0 = no new drift) is unchanged for anyone who doesn't ask for it.
+    * `threshold = N` (>= 1) -> True iff at least N datasets were unreachable this run.
+
+    Offline (`--signatures`) mode has no live fetch to fail, so `unreachable_urns` is always
+    empty there and this gate can never trip — it is meaningful only on a live `--gms` walk.
+    """
+    if threshold is None:
+        return False
+    return len(report.unreachable_urns) >= threshold
+
+
+def _check_exit_fail(report: DriftReport, args: argparse.Namespace) -> bool:
+    """Combined 0/1 exit decision for `check`: fail on new drift OR on a blind run.
+
+    The single place both gates are OR'd, so the retract-error early-return and the normal
+    tail can't drift apart on what counts as a non-zero exit.
+    """
+    return gate_should_fail(report, getattr(args, "fail_on", None)) or unreachable_gate_fail(
+        report, getattr(args, "fail_on_unreachable", None)
+    )
+
+
 # ---------------------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------------------
@@ -299,6 +337,17 @@ def cmd_check(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    # A threshold < 1 would make the blind-spot gate trip on a healthy (0-unreachable) run —
+    # a footgun, not a use case — so reject it as a usage error rather than silently failing
+    # every clean check. (Bare `--fail-on-unreachable` is const=1, so this only guards `... 0`.)
+    fou = getattr(args, "fail_on_unreachable", None)
+    if fou is not None and fou < 1:
+        print(
+            "ogle check: --fail-on-unreachable wants a positive count (>= 1), "
+            "or use the bare flag for 1.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         cfg = build_score_config(
             volume_threshold=getattr(args, "volume_threshold", None),
@@ -451,20 +500,31 @@ def cmd_check(args: argparse.Namespace) -> int:
                 print(f"ogle check: retract failed: {exc}", file=sys.stderr)
                 # Same contract as write-back: the check succeeded; retraction is an
                 # optional side-effect, so don't upgrade the exit code on its account.
-                return 1 if gate_should_fail(report, getattr(args, "fail_on", None)) else 0
+                return 1 if _check_exit_fail(report, args) else 0
             _render_retract(r_plan, r_result, as_json=args.json)
 
-    # CI exit-code gate. Without --fail-on this is exactly the old "fail on any new
-    # incident" contract; with it, a below-floor new incident is still reported (and
-    # tagged) but exits 0. Announce that suppression so it's never a silent pass —
-    # skipped in --json mode where prose would corrupt the payload.
-    fail = gate_should_fail(report, getattr(args, "fail_on", None))
-    if report.should_alert and not fail and not args.json:
+    # CI exit-code gate. Two independent reasons to exit 1:
+    #   (1) a new drift incident — the historical contract; --fail-on tightens the floor.
+    #   (2) --fail-on-unreachable — the run was (partly) blind; a dataset it couldn't fetch
+    #       can't be diffed, so a total outage must not read as "exit 0, all clear."
+    # Without either flag this is exactly the old "fail on any new incident" behaviour.
+    drift_fail = gate_should_fail(report, getattr(args, "fail_on", None))
+    blind_fail = unreachable_gate_fail(report, getattr(args, "fail_on_unreachable", None))
+    # Announce a below-floor drift suppression so it's never a silent pass — skipped in
+    # --json mode where prose would corrupt the payload.
+    if report.should_alert and not drift_fail and not args.json:
         _emit(
             f"_new {report.incident.overall_severity.value} incident is below "
             f"--fail-on {args.fail_on} — reported, exit 0._"
         )
-    return 1 if fail else 0
+    # Make a blind-spot-only failure legible: an exit 1 with no incident would otherwise look
+    # like a bug rather than the outage gate doing its job.
+    if blind_fail and not drift_fail and not args.json:
+        _emit(
+            f"_exit 1: {len(report.unreachable_urns)} dataset(s) unreachable this run "
+            f"(--fail-on-unreachable {args.fail_on_unreachable})._"
+        )
+    return 1 if (drift_fail or blind_fail) else 0
 
 
 def _warn_writeback_failures(result, *, verb: str) -> None:
@@ -3119,6 +3179,20 @@ def build_parser() -> argparse.ArgumentParser:
             "CI gate: exit 1 only when a NEW incident's overall severity is at least SEV "
             "(low|medium|high). Below-floor incidents are still reported and tagged but "
             "exit 0. Default: any new incident exits 1."
+        ),
+    )
+    check.add_argument(
+        "--fail-on-unreachable",
+        nargs="?",
+        type=int,
+        const=1,
+        default=None,
+        metavar="N",
+        help=(
+            "CI gate: exit 1 when at least N datasets were unreachable this run (live fetch "
+            "raised). Bare flag means N=1. Ogle can't diff a table it couldn't read, so a "
+            "GMS outage otherwise exits 0 ('all clear') — use this so a scheduled monitor "
+            "treats a blind run as a failure, not health. Off by default; no effect offline."
         ),
     )
     check.add_argument(

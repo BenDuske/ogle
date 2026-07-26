@@ -306,6 +306,44 @@ def test_gate_should_fail_pure_helper():
     assert gate_should_fail(_report(Severity.HIGH, is_new=False), "low") is False
 
 
+def test_unreachable_gate_fail_pure_helper():
+    """Direct unit of the blind-spot gate (fault-injection anchor), independent of argparse/I-O."""
+    from ogle.cli import unreachable_gate_fail
+    from ogle.pipeline import DriftReport
+
+    def _report(n):
+        return DriftReport(
+            findings=[], incident=None, narrative="",
+            unreachable_urns=[(f"urn:li:dataset:(d{i})", "IOError: boom") for i in range(n)],
+        )
+
+    # Opt-in: no threshold -> never fails, even with unreachable datasets present.
+    assert unreachable_gate_fail(_report(3), None) is False
+    # Threshold met/exceeded fails; below threshold passes.
+    assert unreachable_gate_fail(_report(0), 1) is False   # a clean run never trips
+    assert unreachable_gate_fail(_report(1), 1) is True     # bare-flag semantics (N=1)
+    assert unreachable_gate_fail(_report(2), 3) is False    # 2 < 3 floor
+    assert unreachable_gate_fail(_report(3), 3) is True      # 3 >= 3 floor
+
+
+def test_fail_on_unreachable_registered_and_parsed():
+    parser = build_parser()
+    # Absent -> None (gate off); bare -> 1; explicit count preserved.
+    assert parser.parse_args(["check", "--signatures", "x"]).fail_on_unreachable is None
+    assert parser.parse_args(["check", "--signatures", "x", "--fail-on-unreachable"]).fail_on_unreachable == 1
+    assert parser.parse_args(["check", "--signatures", "x", "--fail-on-unreachable", "4"]).fail_on_unreachable == 4
+
+
+def test_fail_on_unreachable_rejects_nonpositive(tmp_path, capsys):
+    """A threshold < 1 would fail even a healthy 0-unreachable run -> usage error (exit 2)."""
+    store = tmp_path / "b.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--fail-on-unreachable", "0"])
+    assert rc == 2
+    assert "positive count" in capsys.readouterr().err
+
+
 # ---- persistence + --no-update ----------------------------------------------------
 def test_baselines_persist_across_runs(tmp_path):
     store = tmp_path / "baselines.json"
@@ -4547,6 +4585,58 @@ def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, 
     assert set(captured["recovered"]) == {CUSTOMERS_URN, ORDERS_URN}
     assert captured["active"] == []  # no drift this run
     assert "nothing to clear" in capsys.readouterr().out
+
+
+# ---- --fail-on-unreachable: a blind live run must not exit 0 -----------------------
+def _arm_blind_walk(tmp_path, store, monkeypatch):
+    """Seed CUSTOMERS healthy, then arm a live walk that returns CUSTOMERS unchanged
+    (no drift) but reports ORDERS as an errored/unreachable fetch. Isolates the blind-spot
+    gate: the only reason to exit non-zero is the unreachable dataset, never drift."""
+    from ogle.walker import WalkResult
+
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(CUSTOMERS_URN)}).save()
+    healthy = [_sig(CUSTOMERS_URN)]  # identical to baseline -> scored, no drift
+    wr = WalkResult(
+        signatures=healthy,
+        serving_dataset_urns=frozenset(),
+        errored_urns=[(ORDERS_URN, "HTTPError: 503 Service Unavailable")],
+    )
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: (healthy, [], wr),
+    )
+
+
+def test_blind_run_exits_0_without_the_flag(tmp_path, capsys, monkeypatch):
+    """Backward-compat: an unreachable dataset alone does NOT change the exit code by default."""
+    store = tmp_path / "b.json"
+    _arm_blind_walk(tmp_path, store, monkeypatch)
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The diagnostic still shows (it always did) — only the exit code is unaffected here.
+    assert "1 dataset(s) unreachable this run" in out
+
+
+def test_fail_on_unreachable_fails_a_blind_run(tmp_path, capsys, monkeypatch):
+    """With the flag, the same blind run exits 1 and says WHY (no incident, so it'd be cryptic)."""
+    store = tmp_path / "b.json"
+    _arm_blind_walk(tmp_path, store, monkeypatch)
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover",
+               "--fail-on-unreachable"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "exit 1: 1 dataset(s) unreachable this run (--fail-on-unreachable 1)" in out
+
+
+def test_fail_on_unreachable_below_threshold_still_exits_0(tmp_path, capsys, monkeypatch):
+    """A threshold above the actual unreachable count does not trip — 1 unreachable < floor 2."""
+    store = tmp_path / "b.json"
+    _arm_blind_walk(tmp_path, store, monkeypatch)
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover",
+               "--fail-on-unreachable", "2"])
+    assert rc == 0
+    assert "exit 1" not in capsys.readouterr().out
 
 
 # ---- --catalog-dry-run: preview the live-catalog write without applying ------------
