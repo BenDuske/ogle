@@ -568,6 +568,31 @@ def test_retract_protects_model_still_downstream_of_active_drift():
     assert MODEL_DEMAND not in entities     # not downstream of any recovered dataset
 
 
+def test_retract_protects_model_downstream_of_muted_but_drifting_dataset():
+    """A muted-but-drifting upstream is held out of `active_findings` (mute suppresses the
+    page, not the drift). It is passed via `also_drifting_urns` so its downstream model keeps
+    its flag even when ANOTHER upstream recovers — retracting there would strip a live drift
+    flag off a model whose training data is still compromised."""
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN, MODEL_DEMAND]})
+    # DS_CUSTOMERS recovered; DS_ORDERS is muted-but-drifting (suppressed, absent from findings).
+    plan = plan_retract(
+        [DS_CUSTOMERS],
+        active_findings=[],
+        walk_result=walk,
+        also_drifting_urns=[DS_ORDERS],
+    )
+    entities = {a.entity_urn for a in plan.actions}
+    assert DS_CUSTOMERS in entities        # genuinely recovered dataset cleared
+    assert MODEL_CHURN not in entities     # still downstream of muted-but-drifting DS_ORDERS
+    assert MODEL_DEMAND not in entities     # only fed by the still-drifting dataset
+    # And a muted-but-drifting dataset itself must never be retracted, even if a caller leaks
+    # it into recovered_urns.
+    plan2 = plan_retract(
+        [DS_CUSTOMERS, DS_ORDERS], also_drifting_urns=[DS_ORDERS], walk_result=walk
+    )
+    assert DS_ORDERS not in {a.entity_urn for a in plan2.actions}
+
+
 def test_apply_retract_removes_present_tag_and_leaves_others():
     backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG, "urn:li:tag:pii"}})
     plan = plan_retract([DS_CUSTOMERS], severity_tags=False)

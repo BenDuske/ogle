@@ -390,6 +390,7 @@ def plan_retract(
     tag_urn: str = OGLE_DRIFT_TAG,
     severity_tags: bool = True,
     kind_tags: bool = True,
+    also_drifting_urns: Iterable[str] = (),
 ) -> WritebackPlan:
     """Plan removal of Ogle's tags from entities whose drift has cleared.
 
@@ -403,6 +404,15 @@ def plan_retract(
         datasets feed it — a model that is downstream of both a recovered dataset and a
         still-drifting one keeps its flag. Clearing it there would hide a live incident.
 
+    ``also_drifting_urns`` are dataset URNs that ARE still drifting but were held out of
+    ``active_findings`` — the muted-but-drifting (suppressed) datasets. Muting suppresses
+    the PAGE, not the drift, so these assets are genuinely broken: they must protect their
+    downstream models from retraction exactly like an un-muted still-drifting dataset, and
+    must never themselves be retracted. Folding them into the still-drifting set covers both
+    (a model fed by a muted-but-drifting upstream keeps its flag even when another upstream
+    recovers). Without this, retraction would strip a live drift flag off a model whose
+    training data is compromised — the same stale/wrong-tag class this exists to kill.
+
     Tags removed per entity: the flat ``tag_urn`` always; when ``severity_tags`` (default
     True), every severity variant too; when ``kind_tags`` (default True), every kind variant
     too — so `--write-back-kind`'s `ogle-kind-<kind>` tags are cleaned up on recovery instead
@@ -413,7 +423,7 @@ def plan_retract(
     Empty ``recovered_urns`` -> empty plan. If ``walk_result`` is None, only datasets are
     retracted (no model mapping to follow).
     """
-    still_drifting: Set[str] = {f.urn for f in active_findings}
+    still_drifting: Set[str] = {f.urn for f in active_findings} | set(also_drifting_urns)
 
     dataset_to_models: Dict[str, List[str]] = (
         walk_result.dataset_to_models if walk_result is not None else {}

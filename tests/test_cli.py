@@ -4568,9 +4568,10 @@ def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, 
 
     captured = {}
 
-    def _fake_retract(recovered, active, walk_result, gms):
+    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=()):
         captured["recovered"] = list(recovered)
         captured["active"] = list(active)
+        captured["suppressed"] = list(suppressed_urns)
         from ogle.writeback import WritebackPlan, WritebackResult
         return WritebackPlan(), WritebackResult()
 
@@ -4615,8 +4616,9 @@ def test_retract_cleared_never_recovers_a_muted_but_drifting_dataset(tmp_path, c
 
     captured = {}
 
-    def _fake_retract(recovered, active, walk_result, gms):
+    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=()):
         captured["recovered"] = list(recovered)
+        captured["suppressed"] = list(suppressed_urns)
         from ogle.writeback import WritebackPlan, WritebackResult
         return WritebackPlan(), WritebackResult()
 
@@ -4630,6 +4632,8 @@ def test_retract_cleared_never_recovers_a_muted_but_drifting_dataset(tmp_path, c
     # CUSTOMERS is genuinely recovered; muted-but-drifting ORDERS must be excluded.
     assert captured["recovered"] == [CUSTOMERS_URN]
     assert ORDERS_URN not in captured["recovered"]
+    # ...and ORDERS must reach retract as still-drifting so its downstream models stay flagged.
+    assert captured["suppressed"] == [ORDERS_URN]
 
 
 # ---- --fail-on-unreachable: a blind live run must not exit 0 -----------------------

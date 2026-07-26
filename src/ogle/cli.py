@@ -190,12 +190,18 @@ def _do_writeback(
     return plan, apply(plan, backend)
 
 
-def _do_retract(recovered_urns, active_findings, walk_result, gms: str):
-    """Live tag retraction — strip Ogle's tag off datasets whose drift cleared. Lazy import."""
+def _do_retract(recovered_urns, active_findings, walk_result, gms: str, suppressed_urns=()):
+    """Live tag retraction — strip Ogle's tag off datasets whose drift cleared. Lazy import.
+
+    ``suppressed_urns`` (muted-but-drifting) are passed as still-drifting so their downstream
+    models keep their flag — muting suppresses the page, not the drift.
+    """
     from .writeback import DataHubWritebackBackend, apply_retract, plan_retract
 
     backend = DataHubWritebackBackend(gms_server=gms)
-    plan = plan_retract(recovered_urns, active_findings, walk_result)
+    plan = plan_retract(
+        recovered_urns, active_findings, walk_result, also_drifting_urns=suppressed_urns
+    )
     return plan, apply_retract(plan, backend)
 
 
@@ -215,11 +221,13 @@ def _plan_writeback_only(
     )
 
 
-def _plan_retract_only(recovered_urns, active_findings, walk_result):
+def _plan_retract_only(recovered_urns, active_findings, walk_result, suppressed_urns=()):
     """Compute the retraction plan WITHOUT touching DataHub. Dry-run twin of `_do_retract`."""
     from .writeback import plan_retract
 
-    return plan_retract(recovered_urns, active_findings, walk_result)
+    return plan_retract(
+        recovered_urns, active_findings, walk_result, also_drifting_urns=suppressed_urns
+    )
 
 
 # ---------------------------------------------------------------------------------------
@@ -502,12 +510,18 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not recovered:
             _emit("_retract: no recovered datasets this run._")
         elif getattr(args, "catalog_dry_run", False):
-            r_plan = _plan_retract_only(recovered, report.findings, walk_result)
+            r_plan = _plan_retract_only(
+                recovered, report.findings, walk_result, suppressed_urns=report.suppressed_urns
+            )
             _render_plan_preview(r_plan, as_json=args.json, retract=True)
         else:
             try:
                 r_plan, r_result = _do_retract(
-                    recovered, report.findings, walk_result, args.gms
+                    recovered,
+                    report.findings,
+                    walk_result,
+                    args.gms,
+                    suppressed_urns=report.suppressed_urns,
                 )
             except Exception as exc:
                 print(f"ogle check: retract failed: {exc}", file=sys.stderr)
