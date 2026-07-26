@@ -593,6 +593,32 @@ def test_retract_protects_model_downstream_of_muted_but_drifting_dataset():
     assert DS_ORDERS not in {a.entity_urn for a in plan2.actions}
 
 
+def test_retract_protects_model_downstream_of_unreachable_dataset():
+    """An upstream dataset UNREACHABLE this run (live fetch raised) is unknown-state, not
+    confirmed-recovered: we could not diff it, so it might still be drifting. It is passed via
+    `unreachable_urns` so its downstream model keeps its flag even when ANOTHER upstream truly
+    recovers — retracting there would strip a live drift flag off a model whose training data
+    may still be compromised, the same stale/wrong-tag class the muted-but-drifting guard kills.
+    """
+    walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN, MODEL_DEMAND]})
+    # DS_CUSTOMERS genuinely recovered; DS_ORDERS was unreachable (never scored this run).
+    plan = plan_retract(
+        [DS_CUSTOMERS],
+        active_findings=[],
+        walk_result=walk,
+        unreachable_urns=[DS_ORDERS],
+    )
+    entities = {a.entity_urn for a in plan.actions}
+    assert DS_CUSTOMERS in entities        # genuinely recovered dataset cleared
+    assert MODEL_CHURN not in entities     # still downstream of unreachable DS_ORDERS -> protected
+    assert MODEL_DEMAND not in entities    # only fed by the unreachable dataset
+    # An unreachable dataset itself must never be retracted, even if a caller leaks it in.
+    plan2 = plan_retract(
+        [DS_CUSTOMERS, DS_ORDERS], unreachable_urns=[DS_ORDERS], walk_result=walk
+    )
+    assert DS_ORDERS not in {a.entity_urn for a in plan2.actions}
+
+
 def test_apply_retract_removes_present_tag_and_leaves_others():
     backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG, "urn:li:tag:pii"}})
     plan = plan_retract([DS_CUSTOMERS], severity_tags=False)

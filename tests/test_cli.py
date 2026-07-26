@@ -4568,10 +4568,11 @@ def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, 
 
     captured = {}
 
-    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=()):
+    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=(), unreachable_urns=()):
         captured["recovered"] = list(recovered)
         captured["active"] = list(active)
         captured["suppressed"] = list(suppressed_urns)
+        captured["unreachable"] = list(unreachable_urns)
         from ogle.writeback import WritebackPlan, WritebackResult
         return WritebackPlan(), WritebackResult()
 
@@ -4616,9 +4617,10 @@ def test_retract_cleared_never_recovers_a_muted_but_drifting_dataset(tmp_path, c
 
     captured = {}
 
-    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=()):
+    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=(), unreachable_urns=()):
         captured["recovered"] = list(recovered)
         captured["suppressed"] = list(suppressed_urns)
+        captured["unreachable"] = list(unreachable_urns)
         from ogle.writeback import WritebackPlan, WritebackResult
         return WritebackPlan(), WritebackResult()
 
@@ -4634,6 +4636,55 @@ def test_retract_cleared_never_recovers_a_muted_but_drifting_dataset(tmp_path, c
     assert ORDERS_URN not in captured["recovered"]
     # ...and ORDERS must reach retract as still-drifting so its downstream models stay flagged.
     assert captured["suppressed"] == [ORDERS_URN]
+
+
+def test_retract_cleared_forwards_unreachable_datasets_to_retract(tmp_path, capsys, monkeypatch):
+    """A dataset UNREACHABLE this run (live fetch raised) is unknown-state: it never enters
+    `scored_urns`, so it's already out of `recovered`, but it must still reach retract as an
+    `unreachable_urn` so its downstream models keep their flag. Without the wiring, a model fed
+    by one recovered upstream AND one unreachable upstream would be wrongly un-flagged even
+    though its training data may still be compromised."""
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    # Seed both datasets healthy so a later run has baselines to diff against.
+    seed = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=2000)]
+    wr_seed = WalkResult(signatures=seed, serving_dataset_urns=frozenset())
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (seed, [], wr_seed))
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])
+    capsys.readouterr()
+
+    # Second run: CUSTOMERS unchanged (a true recovered candidate); ORDERS could not be fetched
+    # (errored_urns) so it never lands in signatures/scored_urns — it's unknown, not recovered.
+    customers_ok = _sig(CUSTOMERS_URN, row_count=1000)
+    wr = WalkResult(
+        signatures=[customers_ok],
+        serving_dataset_urns=frozenset(),
+        errored_urns=[(ORDERS_URN, "RuntimeError: simulated 5xx")],
+    )
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: ([customers_ok], [], wr))
+
+    captured = {}
+
+    def _fake_retract(recovered, active, walk_result, gms, suppressed_urns=(), unreachable_urns=()):
+        captured["recovered"] = list(recovered)
+        captured["suppressed"] = list(suppressed_urns)
+        captured["unreachable"] = list(unreachable_urns)
+        from ogle.writeback import WritebackPlan, WritebackResult
+        return WritebackPlan(), WritebackResult()
+
+    monkeypatch.setattr("ogle.cli._do_retract", _fake_retract)
+
+    rc = main(
+        ["check", "--store", str(store), "--gms", "http://x", "--discover", "--retract-cleared"]
+    )
+
+    assert rc == 0  # no new incident (unreachable never scored, CUSTOMERS healthy)
+    # CUSTOMERS is genuinely recovered; the unreachable ORDERS must never be a recovered candidate.
+    assert captured["recovered"] == [CUSTOMERS_URN]
+    assert ORDERS_URN not in captured["recovered"]
+    # ...and ORDERS must reach retract as unreachable so its downstream models stay protected.
+    assert captured["unreachable"] == [ORDERS_URN]
 
 
 # ---- --fail-on-unreachable: a blind live run must not exit 0 -----------------------

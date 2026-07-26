@@ -190,17 +190,26 @@ def _do_writeback(
     return plan, apply(plan, backend)
 
 
-def _do_retract(recovered_urns, active_findings, walk_result, gms: str, suppressed_urns=()):
+def _do_retract(
+    recovered_urns, active_findings, walk_result, gms: str, suppressed_urns=(), unreachable_urns=()
+):
     """Live tag retraction — strip Ogle's tag off datasets whose drift cleared. Lazy import.
 
     ``suppressed_urns`` (muted-but-drifting) are passed as still-drifting so their downstream
-    models keep their flag — muting suppresses the page, not the drift.
+    models keep their flag — muting suppresses the page, not the drift. ``unreachable_urns``
+    (live fetch raised this run) are unknown-state, not confirmed-recovered, so they protect
+    their downstream models the same way — we could not diff them, so we must not clear a
+    model whose upstream might still be broken.
     """
     from .writeback import DataHubWritebackBackend, apply_retract, plan_retract
 
     backend = DataHubWritebackBackend(gms_server=gms)
     plan = plan_retract(
-        recovered_urns, active_findings, walk_result, also_drifting_urns=suppressed_urns
+        recovered_urns,
+        active_findings,
+        walk_result,
+        also_drifting_urns=suppressed_urns,
+        unreachable_urns=unreachable_urns,
     )
     return plan, apply_retract(plan, backend)
 
@@ -221,12 +230,18 @@ def _plan_writeback_only(
     )
 
 
-def _plan_retract_only(recovered_urns, active_findings, walk_result, suppressed_urns=()):
+def _plan_retract_only(
+    recovered_urns, active_findings, walk_result, suppressed_urns=(), unreachable_urns=()
+):
     """Compute the retraction plan WITHOUT touching DataHub. Dry-run twin of `_do_retract`."""
     from .writeback import plan_retract
 
     return plan_retract(
-        recovered_urns, active_findings, walk_result, also_drifting_urns=suppressed_urns
+        recovered_urns,
+        active_findings,
+        walk_result,
+        also_drifting_urns=suppressed_urns,
+        unreachable_urns=unreachable_urns,
     )
 
 
@@ -504,6 +519,12 @@ def cmd_check(args: argparse.Namespace) -> int:
         # strip a live drift flag off an asset that is genuinely broken (the exact stale/wrong-
         # tag class retraction exists to kill), so a suppressed dataset can never be recovered.
         suppressed = set(report.suppressed_urns)
+        # Datasets whose live fetch RAISED this run are unknown-state, not recovered: they
+        # never entered `scored_urns` (so they're already out of `recovered` below), but their
+        # downstream models must still be protected from retraction — we could not confirm the
+        # upstream cleared, so clearing the model could strip a live flag off compromised
+        # training data. Threaded into plan_retract via `unreachable_urns`.
+        unreachable = [urn for urn, _ in report.unreachable_urns]
         recovered = [
             u for u in report.scored_urns if u not in drifted and u not in suppressed
         ]
@@ -511,7 +532,11 @@ def cmd_check(args: argparse.Namespace) -> int:
             _emit("_retract: no recovered datasets this run._")
         elif getattr(args, "catalog_dry_run", False):
             r_plan = _plan_retract_only(
-                recovered, report.findings, walk_result, suppressed_urns=report.suppressed_urns
+                recovered,
+                report.findings,
+                walk_result,
+                suppressed_urns=report.suppressed_urns,
+                unreachable_urns=unreachable,
             )
             _render_plan_preview(r_plan, as_json=args.json, retract=True)
         else:
@@ -522,6 +547,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     walk_result,
                     args.gms,
                     suppressed_urns=report.suppressed_urns,
+                    unreachable_urns=unreachable,
                 )
             except Exception as exc:
                 print(f"ogle check: retract failed: {exc}", file=sys.stderr)

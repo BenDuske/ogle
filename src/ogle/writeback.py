@@ -391,6 +391,7 @@ def plan_retract(
     severity_tags: bool = True,
     kind_tags: bool = True,
     also_drifting_urns: Iterable[str] = (),
+    unreachable_urns: Iterable[str] = (),
 ) -> WritebackPlan:
     """Plan removal of Ogle's tags from entities whose drift has cleared.
 
@@ -413,6 +414,17 @@ def plan_retract(
     recovers). Without this, retraction would strip a live drift flag off a model whose
     training data is compromised — the same stale/wrong-tag class this exists to kill.
 
+    ``unreachable_urns`` are dataset URNs whose live fetch RAISED this run (the walker's
+    ``WalkResult.errored_urns``) — UNKNOWN state, not confirmed-recovered. Ogle could not
+    diff them, so they might still be drifting; treating them as recovered would be a guess.
+    They are folded into the SAME protection set as the still-drifting datasets: an
+    unreachable upstream protects its downstream models from retraction and can never itself
+    be retracted. Without this, a model fed by one recovered upstream AND one unreachable
+    upstream would have its flag stripped even though its training data may still be
+    compromised — the identical stale/wrong-tag bug as the muted-but-drifting case, one seam
+    over. (A caller that already excludes unreachable datasets from ``recovered_urns`` — the
+    CLI does, since they never enter ``scored_urns`` — still needs this to protect the models.)
+
     Tags removed per entity: the flat ``tag_urn`` always; when ``severity_tags`` (default
     True), every severity variant too; when ``kind_tags`` (default True), every kind variant
     too — so `--write-back-kind`'s `ogle-kind-<kind>` tags are cleaned up on recovery instead
@@ -423,7 +435,13 @@ def plan_retract(
     Empty ``recovered_urns`` -> empty plan. If ``walk_result`` is None, only datasets are
     retracted (no model mapping to follow).
     """
-    still_drifting: Set[str] = {f.urn for f in active_findings} | set(also_drifting_urns)
+    # "Do not clear, and protect anything downstream" set: confirmed still-drifting
+    # (findings), muted-but-drifting held-out datasets, AND unreachable (unknown-state)
+    # datasets. All three share the same two invariants — never retracted, always protect
+    # their downstream models — so they merge into one set here.
+    still_drifting: Set[str] = (
+        {f.urn for f in active_findings} | set(also_drifting_urns) | set(unreachable_urns)
+    )
 
     dataset_to_models: Dict[str, List[str]] = (
         walk_result.dataset_to_models if walk_result is not None else {}
