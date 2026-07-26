@@ -28,6 +28,7 @@ from ogle.scorer import (
     _empirical_winf,
     _empirical_ks,
     _empirical_js,
+    _empirical_psi,
     _empirical_cvm,
     _empirical_ad,
     _empirical_cramer,
@@ -1763,6 +1764,60 @@ def test_js_band_cutoffs():
     assert _js_band(0.5) == "large"
 
 
+def test_empirical_psi_is_zero_for_identical_quantiles():
+    q = [(0.1, 10.0), (0.25, 12.0), (0.5, 15.0), (0.75, 18.0), (0.9, 20.0)]
+    assert _empirical_psi(q, q) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_empirical_psi_is_non_negative_and_grows_with_separation():
+    """Jeffreys is non-negative and a bigger population move reads a bigger PSI (a ranking signal)."""
+    base = [(0.1, 10.0), (0.25, 12.0), (0.5, 15.0), (0.75, 18.0), (0.9, 20.0)]
+    small = [(0.1, 11.0), (0.25, 13.0), (0.5, 16.0), (0.75, 19.0), (0.9, 21.0)]
+    big = [(0.1, 40.0), (0.25, 42.0), (0.5, 45.0), (0.75, 48.0), (0.9, 50.0)]
+    psi_small = _empirical_psi(base, small)
+    psi_big = _empirical_psi(base, big)
+    assert psi_small is not None and psi_big is not None
+    assert psi_small >= 0.0
+    assert psi_big > psi_small
+
+
+def test_empirical_psi_is_symmetric_in_its_two_sides():
+    """Union-of-knots partition + per-side renorm makes swapping base/current a no-op, like Jeffreys."""
+    b = [(0.1, 10.0), (0.5, 20.0), (0.9, 30.0)]
+    c = [(0.1, 12.0), (0.5, 24.0), (0.9, 41.0)]
+    assert _empirical_psi(b, c) == pytest.approx(_empirical_psi(c, b), abs=1e-12)
+
+
+def test_empirical_psi_is_unbounded_where_js_saturates():
+    """On disjoint supports JS pins to its [0,1] ceiling; histogram-PSI keeps climbing past it."""
+    b = [(0.1, 0.0), (0.5, 1.0), (0.9, 2.0)]
+    c = [(0.1, 100.0), (0.5, 101.0), (0.9, 102.0)]
+    js = _empirical_js(b, c)
+    psi = _empirical_psi(b, c)
+    assert js == pytest.approx(1.0, abs=1e-9)
+    assert psi is not None and psi > 1.0  # runs past the divergence JS caps at
+
+
+def test_empirical_psi_none_without_a_quantile_set_on_a_side():
+    q = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_psi(None, q) is None
+    assert _empirical_psi(q, None) is None
+    assert _empirical_psi((), q) is None
+
+
+def test_empirical_psi_none_when_no_shared_probability_band():
+    """Non-overlapping sampled levels -> no fabricated divergence, mirroring JS/KS/W1."""
+    b = [(0.1, 1.0), (0.2, 2.0)]
+    c = [(0.8, 1.0), (0.9, 2.0)]
+    assert _empirical_psi(b, c) is None
+
+
+def test_empirical_psi_reads_on_the_same_band_scale_as_gaussian_psi():
+    """The histogram PSI is classified by the same industry 0.1/0.25 cutoffs as the parametric twin."""
+    q = [(0.1, 10.0), (0.25, 12.0), (0.5, 15.0), (0.75, 18.0), (0.9, 20.0)]
+    assert _psi_band(_empirical_psi(q, q)) == "stable"  # identical -> 0 -> stable
+
+
 def test_mean_finding_carries_empirical_js_beside_ks():
     """A flagged mean move with quantiles is annotated with JS + its band, alongside KS."""
     q_base = {"amount": [(0.25, 93.0), (0.5, 100.0), (0.75, 107.0)]}
@@ -2832,6 +2887,10 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert entry["js"] == pytest.approx(_empirical_js(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["js"] >= ScoreConfig.shape_js_threshold
     assert entry["js_band"] == _js_band(entry["js"])
+    # Histogram-PSI rides beside JS as its unbounded twin on the same quantile bins.
+    assert entry["hpsi"] == pytest.approx(_empirical_psi(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
+    assert entry["hpsi_band"] == _psi_band(entry["hpsi"])
+    assert entry["hpsi"] >= 0.0  # Jeffreys is non-negative
     # KS + CvM + in-units W1 ride along as corroboration.
     assert entry["ks"] == pytest.approx(_empirical_ks(_SHAPE_BASE_Q, _SHAPE_CUR_Q))
     assert entry["ks_band"] == _ks_band(entry["ks"])
@@ -2866,6 +2925,7 @@ def test_shape_fires_on_moment_invariant_divergence():
     assert f"V={entry['kuiper']:.2f}" in shape.message
     assert f"W2emp={entry['w2_emp']:g}" in shape.message
     assert f"Winf={entry['winf_emp']:g}" in shape.message
+    assert f"hPSI={entry['hpsi']:.2f}" in shape.message
 
 
 def test_shape_silent_when_shape_barely_moved():

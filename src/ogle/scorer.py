@@ -22,6 +22,14 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .signature import DatasetSignature, parse_iso_epoch
 
 
+# Per-bin fraction floor for histogram-PSI (`_empirical_psi`): a bin one side never populates
+# would make the Jeffreys `ln(cur%/base%)` term diverge, so each renormalized fraction is floored
+# to this small epsilon before the ratio — keeping an empty-bin term large-but-finite (a strong
+# drift signal) instead of infinite. The parametric `_gaussian_psi` needs no such floor; this is
+# the one "epsilon fudge" the histogram form carries and the Gaussian twin sidesteps.
+PSI_BIN_FLOOR = 1e-4
+
+
 class DriftKind(str, Enum):
     SCHEMA = "schema"
     VOLUME = "volume"
@@ -1401,6 +1409,83 @@ def _empirical_js(
     return js
 
 
+def _empirical_psi(
+    base_q: Optional[Sequence[Tuple[float, float]]],
+    cur_q: Optional[Sequence[Tuple[float, float]]],
+) -> Optional[float]:
+    """Histogram Population Stability Index between two empirical quantile distributions.
+
+    The *empirical* twin of `_gaussian_psi`, and the unbounded companion of `_empirical_js` — the
+    last member of the empirical distance family the Devpost roadmap names ("the remaining
+    empirical frontier is histogram-PSI from raw sample bins"). Where the Gaussian PSI models each
+    side as the Gaussian its mean+stdev imply and reads Jeffreys off that closed form, this reads
+    the raw quantile histogram DataHub sampled — so, like every empirical sibling, it sees the skew
+    and multimodal shifts a two-moment summary idealizes away. It is literally the definition the
+    `_gaussian_psi` docstring quotes made real:
+
+        PSI = sum over bins of (cur% - base%) * ln(cur% / base%)
+
+    that sum being the *symmetric* KL (Jeffreys divergence) `KL(base‖cur) + KL(cur‖base)` of the
+    two binned distributions. JS reads the same two histograms against their shared mixture and
+    stays bounded in [0, 1]; PSI reads them directly against each other and runs unbounded, so it
+    keeps *ranking* two already-far-apart moves after JS has saturated — the empirical replay of
+    exactly why an operator wants Hellinger *and* the Gaussian PSI. Reported on the same 0.1 / 0.25
+    industry scale (`_psi_band`) the Gaussian twin uses, so the two PSIs read on one ruler.
+
+    Binned on the SAME partition JS uses — the union of both sides' sampled quantile values, each
+    bin's mass the CDF rise across it (`_cdf_at`), each side renormalized to sum to 1 over the
+    shared support — so histogram-PSI and JS are the bounded/unbounded pair on one identical
+    histogram, differing only in the divergence taken. Because that partition is symmetric in the
+    two sides and each is normalized independently, swapping base and current leaves the value
+    unchanged: `_empirical_psi(a, b) == _empirical_psi(b, a)` exactly, the histogram echo of the
+    Gaussian Jeffreys' own symmetry.
+
+    The one thing the closed-form Gaussian PSI is free of and this is not: the zero-bin problem.
+    A bin one side never populates makes `ln(cur%/base%)` diverge, so each renormalized fraction is
+    floored to `PSI_BIN_FLOOR` (1e-4) before the ratio — the "epsilon fudge" the `_gaussian_psi`
+    docstring notes its parametric form sidesteps, kept small and explicit here. That floor bounds
+    an empty-bin term at a large-but-finite value rather than infinity, which is the intended PSI
+    behavior (an unpopulated bin *is* a strong drift signal) without letting one sampling gap peg
+    the score to inf. One caveat the reader of the band should carry: the industry 0.1/0.25 cutoffs
+    were written for fixed-domain PSI over many samples, and a histogram built from the handful of
+    quantile knots DataHub samples runs hotter than that — a modest but support-shifting move can
+    already read "moderate". It is non-gating enrichment (the shape finding is gated by JS, not
+    this), so read hPSI as a *ranking* signal beside the bounded JS, not a calibrated verdict.
+
+    Guarded exactly like JS/KS/W1: needs a shared probability band both sides sampled (`lo < hi`),
+    at least one bin between two distinct values, and non-degenerate total mass on each side;
+    otherwise None, so it rides alongside the Gaussian PSI (which still fires from the moments)
+    rather than replacing it. Pure enrichment, never gates a finding; unsigned like its siblings —
+    it measures how separated, not which way; direction lives on Cohen's d.
+    """
+    if not base_q or not cur_q:
+        return None
+    lo = max(base_q[0][0], cur_q[0][0])
+    hi = min(base_q[-1][0], cur_q[-1][0])
+    if hi <= lo:
+        return None  # no shared probability band — can't compare like-for-like
+    xs = sorted({v for _, v in base_q} | {v for _, v in cur_q})
+    if len(xs) < 2:
+        return None  # need at least one bin between two distinct values
+    p_mass: List[float] = []
+    q_mass: List[float] = []
+    for x0, x1 in zip(xs, xs[1:]):
+        p_mass.append(_cdf_at(base_q, x1) - _cdf_at(base_q, x0))
+        q_mass.append(_cdf_at(cur_q, x1) - _cdf_at(cur_q, x0))
+    p_tot = sum(p_mass)
+    q_tot = sum(q_mass)
+    if p_tot <= 0 or q_tot <= 0:
+        return None  # a side with no mass over the shared range tells us nothing comparable
+    floor = PSI_BIN_FLOOR
+    psi = 0.0
+    for pm, qm in zip(p_mass, q_mass):
+        p = max(pm / p_tot, floor)  # floor each fraction so an empty bin is large, not infinite
+        q = max(qm / q_tot, floor)
+        psi += (q - p) * math.log(q / p)
+    # Jeffreys is non-negative; clamp the tiny negative a floored float sum can leave behind.
+    return max(0.0, psi)
+
+
 def _empirical_kuiper(
     base_q: Optional[Sequence[Tuple[float, float]]],
     cur_q: Optional[Sequence[Tuple[float, float]]],
@@ -2452,6 +2537,14 @@ def score_shape(
         if js < cfg.shape_js_threshold:
             continue
         entry: Dict[str, float] = {"js": js, "js_band": _js_band(js)}
+        # The unbounded twin of that bounded JS: histogram-PSI over the SAME quantile bins. JS
+        # saturates toward 1 once the two populations barely overlap; PSI keeps climbing on the
+        # industry's 0.1/0.25 scale, so a genuine split still *ranks* above a merely-large one.
+        # Same partition and guards as JS, so it appears with it (empirical echo of Hellinger+PSI).
+        hpsi = _empirical_psi(base_q, cur_q)
+        if hpsi is not None:
+            entry["hpsi"] = hpsi
+            entry["hpsi_band"] = _psi_band(hpsi)
         # Corroborate the bounded JS with the other two empirical readings. KS is the max CDF gap
         # (bounded, nonparametric — a clean two-population split reads high here even when the
         # variance held). W1 reads the move in the field's own units; its band needs a spread on
@@ -2584,6 +2677,9 @@ def score_shape(
 
     def _annotate(p: str) -> str:
         base = f"{p} (JS={worsened[p]['js']:.2f} {worsened[p]['js_band']}"
+        hpsi = worsened[p].get("hpsi")
+        if hpsi is not None:
+            base += f", hPSI={hpsi:.2f} {worsened[p]['hpsi_band']}"
         ks = worsened[p].get("ks")
         if ks is not None:
             base += f", KS={ks:.2f} {worsened[p]['ks_band']}"

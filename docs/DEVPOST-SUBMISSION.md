@@ -97,8 +97,10 @@ once — the CDF gap read as its worst point (Kolmogorov-Smirnov), its both-dire
 (Kuiper), and its typical magnitude under every {L1,L2}×{value-axis,mass} measure
 (Cramér-von Mises, Cramér/energy, mass-L1, plus the mean-removed Watson U² and Cr0 shape
 twins), and the same move in the feature's own units as the transport ladder W1 (mean
-displacement) ≤ W2 (RMS) ≤ W∞ (worst quantile), the horizontal dual of KS. The remaining
-empirical frontier is histogram-PSI from raw sample bins. After that: swapping the
+displacement) ≤ W2 (RMS) ≤ W∞ (worst quantile), the horizontal dual of KS. Closing that
+empirical family, histogram-PSI now reads the same quantile bins as the bounded JS but as
+its unbounded Jeffreys twin — the industry drift number on the 0.1/0.25 scale, still
+ranking two population moves after JS has saturated. After that: swapping the
 `BaselineStore` onto the salience-ranked Aegis MemoryAgent so past false positives and
 real incidents sharpen future walks, agent-to-agent Ogle deployments that share incident
 memory across teams, and publishing Ogle's DataHub Skill wrapper back upstream as an OSS
