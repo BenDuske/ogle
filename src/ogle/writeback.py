@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set
 
-from .scorer import DriftFinding
+from .scorer import DriftFinding, DriftKind
 from .walker import WalkResult
 
 # ---------------------------------------------------------------------------------------
@@ -364,10 +364,23 @@ def apply(plan: WritebackPlan, backend: WritebackBackend) -> WritebackResult:
 #: behind is exactly the untrustworthy-tag bug retraction exists to fix.
 _RETRACT_SEVERITIES = ("high", "medium", "low", "unknown")
 
+#: The kinds `plan_writeback(kind_tags=True)` could have stamped. Retraction targets ALL
+#: of them (like the severities) so a recovered entity is fully un-flagged no matter which
+#: kind(s) it carried on a prior tick. Derived from `DriftKind` so a NEW drift dimension is
+#: auto-covered by retraction — a hardcoded list would silently strand the new kind's tag,
+#: which is exactly the stale-tag bug retraction exists to prevent. `"unknown"` mirrors the
+#: degenerate fallback `kind_tag_urn` emits for an empty/unknown kind (same as severities).
+_RETRACT_KINDS = tuple(k.value for k in DriftKind) + ("unknown",)
 
-def all_ogle_tag_urns(tag_urn: str = OGLE_DRIFT_TAG) -> Set[str]:
-    """Every tag URN Ogle could have written: the flat tag plus each severity variant."""
-    return {tag_urn} | {severity_tag_urn(s) for s in _RETRACT_SEVERITIES}
+
+def all_ogle_tag_urns(tag_urn: str = OGLE_DRIFT_TAG, *, kind_tags: bool = True) -> Set[str]:
+    """Every tag URN Ogle could have written: the flat tag, each severity variant, and
+    (when ``kind_tags``, the default) each kind variant. This is the full "un-flag" set —
+    retraction over-lists from it because removing an absent tag is a harmless no-op."""
+    urns = {tag_urn} | {severity_tag_urn(s) for s in _RETRACT_SEVERITIES}
+    if kind_tags:
+        urns |= {kind_tag_urn(k) for k in _RETRACT_KINDS}
+    return urns
 
 
 def plan_retract(
@@ -376,6 +389,7 @@ def plan_retract(
     walk_result: Optional[WalkResult] = None,
     tag_urn: str = OGLE_DRIFT_TAG,
     severity_tags: bool = True,
+    kind_tags: bool = True,
 ) -> WritebackPlan:
     """Plan removal of Ogle's tags from entities whose drift has cleared.
 
@@ -390,8 +404,11 @@ def plan_retract(
         still-drifting one keeps its flag. Clearing it there would hide a live incident.
 
     Tags removed per entity: the flat ``tag_urn`` always; when ``severity_tags`` (default
-    True), every severity variant too. Removal of an absent tag is a harmless no-op in
-    ``apply_retract`` (it lands in ``unchanged``), so over-listing is safe.
+    True), every severity variant too; when ``kind_tags`` (default True), every kind variant
+    too — so `--write-back-kind`'s `ogle-kind-<kind>` tags are cleaned up on recovery instead
+    of stranded. Removal of an absent tag is a harmless no-op in ``apply_retract`` (it lands
+    in ``unchanged``), so over-listing is safe — retraction fully un-flags a recovered entity
+    regardless of which write-back flags stamped it on a prior tick.
 
     Empty ``recovered_urns`` -> empty plan. If ``walk_result`` is None, only datasets are
     retracted (no model mapping to follow).
@@ -419,7 +436,9 @@ def plan_retract(
     remove_tags: List[str] = [tag_urn]
     if severity_tags:
         remove_tags.extend(severity_tag_urn(s) for s in _RETRACT_SEVERITIES)
-    # Preserve order, drop dupes (flat tag could collide with a severity variant if a
+    if kind_tags:
+        remove_tags.extend(kind_tag_urn(k) for k in _RETRACT_KINDS)
+    # Preserve order, drop dupes (flat tag could collide with a severity/kind variant if a
     # caller passed an odd tag_urn).
     ordered_tags: List[str] = []
     seen_tags: Set[str] = set()

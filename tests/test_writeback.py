@@ -496,10 +496,49 @@ def test_retract_plans_flat_and_all_severity_tags_by_default():
     assert removed == all_ogle_tag_urns()
 
 
-def test_retract_flat_only_when_severity_tags_false():
-    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+def test_retract_flat_only_when_severity_and_kind_tags_false():
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False, kind_tags=False)
     removed = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
     assert removed == {OGLE_DRIFT_TAG}
+
+
+def test_all_ogle_tag_urns_includes_every_kind_by_default():
+    urns = all_ogle_tag_urns()
+    for kind in DriftKind:
+        assert kind_tag_urn(kind) in urns
+    # ...and the degenerate 'unknown' fallback, mirroring the severity set.
+    assert kind_tag_urn("unknown") in urns
+    # kind_tags=False drops them (severity-only un-flag set).
+    assert all(kind_tag_urn(k) not in all_ogle_tag_urns(kind_tags=False) for k in DriftKind)
+
+
+def test_retract_plans_kind_tags_by_default():
+    """Every `ogle-kind-<kind>` variant is targeted for removal by default so a prior
+    `--write-back-kind` run's tags are cleaned up on recovery, not stranded."""
+    plan = plan_retract([DS_CUSTOMERS])
+    removed = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    for kind in DriftKind:
+        assert kind_tag_urn(kind) in removed
+
+
+def test_retract_omits_kind_tags_when_disabled():
+    plan = plan_retract([DS_CUSTOMERS], kind_tags=False)
+    removed = {a.tag_urn for a in plan.actions if a.entity_urn == DS_CUSTOMERS}
+    assert all(kind_tag_urn(k) not in removed for k in DriftKind)
+
+
+def test_retract_strips_stranded_kind_tag_end_to_end():
+    """The bug this fix closes: a `--write-back-kind` stamp survives recovery unless
+    retraction also targets the kind namespace. Write flat+kind, then retract, and the
+    entity must be fully un-flagged — no stale `ogle-kind-schema` left behind."""
+    write_plan = plan_writeback([_finding(DS_CUSTOMERS, kind=DriftKind.SCHEMA)], kind_tags=True)
+    backend = FakeWritebackBackend()
+    apply(write_plan, backend)
+    assert backend.tags[DS_CUSTOMERS] == {OGLE_DRIFT_TAG, "urn:li:tag:ogle-kind-schema"}
+
+    retract_plan = plan_retract([DS_CUSTOMERS])
+    apply_retract(retract_plan, backend)
+    assert backend.tags[DS_CUSTOMERS] == set()
 
 
 def test_retract_skips_dataset_still_drifting():
@@ -541,7 +580,7 @@ def test_apply_retract_removes_present_tag_and_leaves_others():
 def test_apply_retract_idempotent_when_tag_absent():
     """Re-running on an already-clean entity writes nothing and reports unchanged."""
     backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {"urn:li:tag:pii"}})
-    plan = plan_retract([DS_CUSTOMERS], severity_tags=False)
+    plan = plan_retract([DS_CUSTOMERS], severity_tags=False, kind_tags=False)
     result = apply_retract(plan, backend)
     assert result.applied == []
     assert [a.tag_urn for a in result.unchanged] == [OGLE_DRIFT_TAG]
