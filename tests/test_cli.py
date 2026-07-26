@@ -548,6 +548,54 @@ def test_render_report_surfaces_unreachable_tail():
     ]
 
 
+def test_unreachable_count_phrase_splits_datasets_from_models():
+    """A flaky model's top-level fetch lands in the SAME errored_urns list as an unreachable
+    dataset (walker.walk_model). The count phrase must split them by URN entity type so a
+    model is never miscounted as a table."""
+    from ogle.cli import _unreachable_count_phrase
+
+    # pure datasets -> unchanged wording (back-compat with the existing tail contract)
+    assert _unreachable_count_phrase(
+        [("urn:li:dataset:(a)", "x"), ("urn:li:dataset:(b)", "y")]
+    ) == "2 dataset(s) unreachable this run"
+    # pure models -> named as models, never as datasets
+    assert _unreachable_count_phrase(
+        [("urn:li:mlModel:(m)", "boom")]
+    ) == "1 model(s) unreachable this run"
+    # mixed -> both counted separately, datasets first
+    assert _unreachable_count_phrase(
+        [("urn:li:dataset:(a)", "x"), ("urn:li:mlModel:(m)", "boom")]
+    ) == "1 dataset(s) & 1 model(s) unreachable this run"
+    # an unrecognized entity type degrades to the neutral 'asset(s)', not a wrong 'dataset(s)'
+    assert _unreachable_count_phrase(
+        [("urn:li:chart:(c)", "z")]
+    ) == "1 asset(s) unreachable this run"
+
+
+def test_render_report_counts_flaky_model_as_model_not_dataset():
+    """End-to-end through render_report: a mixed unreachable list (one table + one flaky
+    model) must read '1 dataset(s) & 1 model(s)', not the old blanket '2 dataset(s)'."""
+    from ogle.cli import render_report
+    from ogle.pipeline import DriftReport
+
+    report = DriftReport(
+        findings=[],
+        incident=None,
+        narrative="No drift detected.",
+        scored_urns=["urn:li:dataset:(a)"],
+        unreachable_urns=[
+            ("urn:li:dataset:(b)", "TimeoutError: read timed out"),
+            ("urn:li:mlModel:(fraud_scorer)", "HTTPError: 503"),
+        ],
+    )
+    out = render_report(report, as_json=False)
+    assert "1 dataset(s) & 1 model(s) unreachable this run" in out
+    # the flaky model is never mislabeled as a dataset in the count
+    assert "2 dataset(s) unreachable this run" not in out
+    # both still get named + errored in the listing (URNs are self-describing there)
+    assert "urn:li:mlModel:(fraud_scorer) — HTTPError: 503" in out
+
+
 def test_render_report_no_unreachable_tail_when_all_reachable():
     """No fetch failures -> no unreachable line (the tail stays quiet, not '0 unreachable')."""
     from ogle.cli import render_report

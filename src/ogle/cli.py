@@ -248,6 +248,34 @@ def _plan_retract_only(
 # ---------------------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------------------
+def _unreachable_count_phrase(unreachable_urns) -> str:
+    """'N dataset(s)[ & M model(s)] unreachable this run', split by URN entity type.
+
+    A flaky model's OWN top-level fetch (props/features/deployment) lands in the same
+    ``WalkResult.errored_urns`` list as an unreachable dataset — see ``walker.walk_model``,
+    which degrades a raising model to an ``errored_urns`` entry so it flows into the same
+    unreachable machinery. A blanket ``len(...) dataset(s)`` therefore miscounts a flaky
+    model as a table. The URN is self-describing (``urn:li:mlModel:`` vs ``urn:li:dataset:``),
+    so split on the prefix and keep the count honest. Pure/no-I/O so it stays unit-testable.
+    """
+    datasets = models = other = 0
+    for urn, _msg in unreachable_urns:
+        if urn.startswith("urn:li:mlModel:"):
+            models += 1
+        elif urn.startswith("urn:li:dataset:"):
+            datasets += 1
+        else:
+            other += 1
+    parts = []
+    if datasets:
+        parts.append(f"{datasets} dataset(s)")
+    if models:
+        parts.append(f"{models} model(s)")
+    if other:
+        parts.append(f"{other} asset(s)")
+    return f"{' & '.join(parts)} unreachable this run"
+
+
 def render_report(report: DriftReport, *, as_json: bool) -> str:
     """Human markdown by default; machine JSON with --json."""
     if as_json:
@@ -262,9 +290,10 @@ def render_report(report: DriftReport, *, as_json: bool) -> str:
     if report.suppressed_urns:
         tail.append(f"silenced {len(report.suppressed_urns)} muted dataset(s)")
     if report.unreachable_urns:
-        # An outage signal, not drift: these datasets couldn't be fetched, so a resilient
+        # An outage signal, not drift: these assets couldn't be fetched, so a resilient
         # walk continued past them — say so plainly rather than let it vanish silently.
-        tail.append(f"{len(report.unreachable_urns)} dataset(s) unreachable this run")
+        # Split datasets from flaky models so the count stays honest (see helper).
+        tail.append(_unreachable_count_phrase(report.unreachable_urns))
     if tail:
         lines.append("")
         lines.append("_" + "; ".join(tail) + "._")
