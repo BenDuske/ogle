@@ -3073,3 +3073,37 @@ def test_build_score_config_rejects_out_of_range_shape_threshold():
         build_score_config(shape_threshold=1.5)
     # A valid band round-trips onto the config.
     assert build_score_config(shape_threshold=0.2).shape_js_threshold == 0.2
+
+
+# Every union-of-knots divergence has the same third guard: past the "quantile set on both
+# sides" and "shared probability band" checks, it still needs at least TWO distinct pooled
+# VALUES — one bin between them — to integrate a CDF gap over. A field that is constant across
+# every row (a boolean flag stuck at one value, a defaulted column) yields a quantile function
+# whose values are all identical; pooled with an equally-constant baseline the knot set collapses
+# to a single value and there is no bin to score. The contract there is "no spread → no measurable
+# divergence → None" — NOT a fabricated 0.0 (which would read as "measured, and they match") and
+# NOT a ZeroDivisionError from an empty integral. The per-function suites pin identical→0,
+# missing-side→None, and no-shared-band→None, but none exercise this single-distinct-value branch,
+# so a refactor could turn a degenerate constant field into a bogus score or a crash unnoticed.
+_DEGENERATE_DIVERGENCES = [
+    ("cvm", _empirical_cvm),
+    ("ad", _empirical_ad),
+    ("watson", _empirical_watson),
+    ("massl1", _empirical_massl1),
+    ("cramer_shape", _empirical_cramer_shape),
+    ("js", _empirical_js),
+    ("psi", _empirical_psi),
+]
+
+
+@pytest.mark.parametrize("name, func", _DEGENERATE_DIVERGENCES, ids=[n for n, _ in _DEGENERATE_DIVERGENCES])
+def test_empirical_divergence_none_for_single_distinct_value(name, func):
+    # Shared probability band (0.1..0.9 overlaps itself), so this is NOT the no-shared-band guard
+    # — it reaches the len(pooled values) < 2 check with a lone distinct value on both sides.
+    const_q = [(0.1, 5.0), (0.5, 5.0), (0.9, 5.0)]
+    assert func(const_q, const_q) is None
+    # Same-shaped input that DOES carry two distinct values scores (not None), proving the guard
+    # keys on the degenerate value set, not on the shape/length of the quantile list.
+    distinct_b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]
+    distinct_c = [(0.1, 2.0), (0.5, 7.0), (0.9, 12.0)]
+    assert func(distinct_b, distinct_c) is not None
