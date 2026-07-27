@@ -339,17 +339,25 @@ def gate_should_fail(report: DriftReport, fail_on: Optional[str]) -> bool:
 def unreachable_gate_fail(report: DriftReport, threshold: Optional[int]) -> bool:
     """CI exit-code gate for BLIND spots — the outage twin of `gate_should_fail`.
 
-    Ogle can't diff a dataset it couldn't fetch, so a run that hit unreachable datasets was
-    partly (or, if every fetch failed, wholly) blind. Without this gate a total GMS outage —
-    every dataset raising — produces no findings, no incident, and exits 0: to a scheduled
-    wrapper that reads exactly as "all clear, no drift," the very silently-blind failure Ogle
-    exists to catch, turned on Ogle's own read path.
+    Ogle can't diff an asset it couldn't fetch, so a run that hit unreachable datasets (or flaky
+    models — see below) was partly (or, if every fetch failed, wholly) blind. Without this gate a
+    total GMS outage — every fetch raising — produces no findings, no incident, and exits 0: to a
+    scheduled wrapper that reads exactly as "all clear, no drift," the very silently-blind failure
+    Ogle exists to catch, turned on Ogle's own read path.
 
     Pure — no I/O — so the page/no-page decision stays unit-testable alongside `gate_should_fail`.
 
     * `threshold is None` (default) -> always False: the gate is opt-in, so the historical
       exit contract (0 = no new drift) is unchanged for anyone who doesn't ask for it.
-    * `threshold = N` (>= 1) -> True iff at least N datasets were unreachable this run.
+    * `threshold = N` (>= 1) -> True iff at least N *assets* were unreachable this run.
+
+    "Assets", not "datasets": `unreachable_urns` is a mixed set. `walker.walk_model` degrades a
+    model whose own top-level fetch raised into an `errored_urns` entry, so a flaky MODEL lands
+    here alongside an unreachable dataset (the same mixing `_unreachable_count_phrase` splits for
+    the honest report tail). That is deliberate for THIS gate — a model Ogle couldn't fetch is a
+    blind spot exactly like a dataset it couldn't fetch, and the whole point is to page on blind
+    spots — so both count toward the threshold. Do not narrow this to datasets-only: that would
+    let a total model-side outage slip past the very gate meant to catch a blind run.
 
     Offline (`--signatures`) mode has no live fetch to fail, so `unreachable_urns` is always
     empty there and this gate can never trip — it is meaningful only on a live `--gms` walk.
@@ -3273,10 +3281,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help=(
-            "CI gate: exit 1 when at least N datasets were unreachable this run (live fetch "
-            "raised). Bare flag means N=1. Ogle can't diff a table it couldn't read, so a "
-            "GMS outage otherwise exits 0 ('all clear') — use this so a scheduled monitor "
-            "treats a blind run as a failure, not health. Off by default; no effect offline."
+            "CI gate: exit 1 when at least N assets (datasets or models) were unreachable this "
+            "run (live fetch raised). Bare flag means N=1. Ogle can't diff an asset it couldn't "
+            "read, so a GMS outage otherwise exits 0 ('all clear') — use this so a scheduled "
+            "monitor treats a blind run as a failure, not health. Off by default; no effect offline."
         ),
     )
     check.add_argument(

@@ -326,6 +326,34 @@ def test_unreachable_gate_fail_pure_helper():
     assert unreachable_gate_fail(_report(3), 3) is True      # 3 >= 3 floor
 
 
+def test_unreachable_gate_fail_counts_flaky_models_not_just_datasets():
+    """Regression anchor: a flaky MODEL is a blind spot too and must count toward the gate.
+
+    `walker.walk_model` degrades a model whose top-level fetch raised into an `errored_urns`
+    entry, so `unreachable_urns` is a mixed dataset+model set. The blind-spot gate pages on
+    ANY unfetchable asset — narrowing it to `urn:li:dataset:` only would let a total model-side
+    outage slip past the gate meant to catch a blind run. Pin the mixed-asset semantics so no
+    future 'count only datasets' refactor can quietly re-open that hole. Fault-injection:
+    replacing `len(report.unreachable_urns)` with a datasets-only count fails this test.
+    """
+    from ogle.cli import unreachable_gate_fail
+    from ogle.pipeline import DriftReport
+
+    def _mixed(urns):
+        return DriftReport(
+            findings=[], incident=None, narrative="",
+            unreachable_urns=[(u, "IOError: boom") for u in urns],
+        )
+
+    model = "urn:li:mlModel:(urn:li:dataPlatform:mlflow,m,PROD)"
+    dataset = "urn:li:dataset:(urn:li:dataPlatform:snowflake,d,PROD)"
+    # A single flaky model alone trips the bare-flag (N=1) gate — it is a blind spot.
+    assert unreachable_gate_fail(_mixed([model]), 1) is True
+    # One dataset + one model = 2 blind assets: meets an N=2 floor even though neither type
+    # reaches 2 on its own. A datasets-only count would read 1 here and wrongly pass.
+    assert unreachable_gate_fail(_mixed([dataset, model]), 2) is True
+
+
 def test_fail_on_unreachable_registered_and_parsed():
     parser = build_parser()
     # Absent -> None (gate off); bare -> 1; explicit count preserved.
