@@ -548,6 +548,63 @@ def test_captured_example_alert_matches_live_render():
     assert captured_block == live_block
 
 
+def test_captured_freshness_alert_matches_live_render():
+    """`examples/alerts/freshness-stall.md` must stay byte-faithful to real output.
+
+    Freshness is Ogle's headline 9th dimension — the silent stall the other eight can't see —
+    and the demo showcases it in section 3, but until now it had no committed capture of its
+    own (only the loud/silent `churn-orders-drift.md` companion). That file is advertised as
+    "Real captured output"; pin it the same way `test_captured_example_alert_matches_live_render`
+    pins the churn alert. Reproduce the exact deterministic scenario `ogle demo` runs for its
+    section 3 — a byte-for-byte-unchanged source whose profile stamp stalled ~3.75 days back,
+    checked against a 24h SLA at a fixed clock — and assert the rendered block equals the
+    committed example verbatim (minus its HTML-comment header). Any change to the freshness
+    finding's wording now fails here until the capture is regenerated.
+    """
+    import re
+    from pathlib import Path
+
+    from ogle.cli import _DEMO_DIR, build_score_config, render_report
+    from ogle.pipeline import run_drift_check
+    from ogle.signature import parse_iso_epoch
+
+    fresh_urn = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.events_hourly,PROD)"
+    fresh_fields = [
+        ("event_id", "BIGINT"),
+        ("customer_id", "BIGINT"),
+        ("event_ts", "TIMESTAMP"),
+    ]
+    fresh_nulls = {"customer_id": 0.0}
+    store = BaselineStore.load(_DEMO_DIR / "__demo_never_written__.json")
+    healthy_source = build_signature(
+        fresh_urn,
+        schema_fields=fresh_fields,
+        row_count=8_400_000,
+        field_null_fractions=fresh_nulls,
+        computed_at="2026-07-22T18:00:00Z",
+    )
+    stale_source = build_signature(
+        fresh_urn,
+        schema_fields=fresh_fields,
+        row_count=8_400_000,
+        field_null_fractions=fresh_nulls,
+        computed_at="2026-07-19T02:00:00Z",
+    )
+    now = parse_iso_epoch("2026-07-22T20:00:00Z")
+    cfg = build_score_config(freshness_max_age_seconds=24 * 3600)
+    run_drift_check(store, [healthy_source], serving_urns=[fresh_urn], now=now)
+    drift = run_drift_check(
+        store, [stale_source], cfg=cfg, serving_urns=[fresh_urn], now=now
+    )
+    live_block = render_report(drift, as_json=False).strip()
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "alerts" / "freshness-stall.md"
+    text = example.read_text(encoding="utf-8").replace("\r\n", "\n")
+    captured_block = re.sub(r"(?s)^<!--.*?-->\n", "", text).strip()
+
+    assert captured_block == live_block
+
+
 def test_readme_quickstart_signatures_pair_runs_verbatim(tmp_path, capsys):
     """The README Quickstart hands a judge two literal commands over the BUNDLED fixtures:
 

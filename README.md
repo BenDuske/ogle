@@ -92,7 +92,10 @@ once, one loudly (schema/volume/quality) and one silently in its value distribut
 (distribution/mean/stdev/range), 7 of Ogle's 9 dimensions in a single alert — run the
 offline demo below; it's the same drift-check code path, fully reproducible without Docker,
 and its captured alert lives in
-[`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md).
+[`examples/alerts/churn-orders-drift.md`](examples/alerts/churn-orders-drift.md). The demo's
+section 3 then fires the 9th dimension standalone — freshness, the silent stall the other
+eight can't see — captured in
+[`examples/alerts/freshness-stall.md`](examples/alerts/freshness-stall.md).
 
 ### Without Docker (offline signatures)
 
