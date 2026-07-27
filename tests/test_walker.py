@@ -252,6 +252,38 @@ def test_build_signature_skips_null_fractions_out_of_range():
     assert set(sig.field_null_fractions) == {"ok"}
 
 
+def test_build_signature_skips_unparseable_fraction_string():
+    """A non-numeric nullProportion (DataHub can emit a stray "n/a"/"" for a null-only
+    column) hits _coerce_fraction's ValueError guard and is dropped, never guessed — a
+    junk profile entry can't blind the fields that DO parse."""
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile("ok", 0.3),
+            FakeFieldProfile("junk_str", "n/a"),  # ValueError -> skipped
+            FakeFieldProfile("empty_str", ""),    # ValueError -> skipped
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_null_fractions) == {"ok"}
+    assert sig.field_null_fractions["ok"] == pytest.approx(0.3)
+
+
+def test_build_signature_skips_field_profile_with_no_path():
+    """A fieldProfile row with no fieldPath (a malformed/partial profile) is skipped
+    entirely rather than keyed under an empty path, and it does not stop the sibling
+    rows on the same dataset from being folded in."""
+    profile = FakeProfile(
+        rowCount=1,
+        fieldProfiles=[
+            FakeFieldProfile(None, 0.4),   # no path -> skipped whole row
+            FakeFieldProfile("real", 0.1),
+        ],
+    )
+    sig = build_signature_from_aspects("urn:li:dataset:x", None, profile)
+    assert set(sig.field_null_fractions) == {"real"}
+
+
 def test_build_signature_folds_unique_fractions():
     """uniqueProportion on a field profile lands in field_unique_fractions."""
     profile = FakeProfile(
