@@ -2,7 +2,12 @@
 
 import pytest
 
-from ogle.signature import DatasetSignature, SchemaField, build_signature
+from ogle.signature import (
+    DatasetSignature,
+    SchemaField,
+    build_signature,
+    parse_iso_epoch,
+)
 
 
 def test_schema_hash_is_order_independent():
@@ -350,3 +355,54 @@ def test_from_dict_without_quantiles_is_backward_compatible():
     }
     restored = DatasetSignature.from_dict(legacy)
     assert restored.field_quantiles == {}
+
+
+# ---- parse_iso_epoch: the single clock-free reader behind staleness + the freshness dimension ----
+
+# Oracle epochs computed the tz-explicit way, so these assertions hold on any host timezone.
+from datetime import datetime, timezone
+
+_UTC_MIDNIGHT_2026_07_16 = datetime(2026, 7, 16, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+
+
+def test_parse_iso_epoch_reads_trailing_z_as_utc():
+    assert parse_iso_epoch("2026-07-16T00:00:00Z") == _UTC_MIDNIGHT_2026_07_16
+
+
+def test_parse_iso_epoch_reads_lowercase_z_as_utc():
+    """DataHub stamps are usually upper-case Z, but the normalization is case-insensitive."""
+    assert parse_iso_epoch("2026-07-16T00:00:00z") == _UTC_MIDNIGHT_2026_07_16
+
+
+def test_parse_iso_epoch_explicit_utc_offset_matches_z():
+    assert parse_iso_epoch("2026-07-16T00:00:00+00:00") == _UTC_MIDNIGHT_2026_07_16
+
+
+def test_parse_iso_epoch_naive_stamp_is_assumed_utc():
+    """A stamp with no offset must be read as UTC, not the host's local time — otherwise the
+    freshness SLA and the CLI's capture-age would drift by the host's UTC offset. Fault-injection:
+    dropping the tzinfo=UTC coercion makes `.timestamp()` read the host's local zone, so this
+    equality fails on any box that isn't already UTC."""
+    assert parse_iso_epoch("2026-07-16T00:00:00") == _UTC_MIDNIGHT_2026_07_16
+    # …and it agrees with the explicit-offset form to the second.
+    assert parse_iso_epoch("2026-07-16T00:00:00") == parse_iso_epoch("2026-07-16T00:00:00+00:00")
+
+
+def test_parse_iso_epoch_honors_a_non_utc_offset():
+    """A real offset is respected: -05:00 midnight is five hours *after* UTC midnight."""
+    assert parse_iso_epoch("2026-07-16T00:00:00-05:00") == _UTC_MIDNIGHT_2026_07_16 + 5 * 3600
+
+
+def test_parse_iso_epoch_tolerates_surrounding_whitespace():
+    assert parse_iso_epoch("  2026-07-16T00:00:00Z  ") == _UTC_MIDNIGHT_2026_07_16
+
+
+def test_parse_iso_epoch_degrades_to_none_on_unparseable_input():
+    """Free-form provenance: anything that isn't an ISO instant returns None so the caller
+    treats the age as *unknown* rather than guessing."""
+    for junk in ("not-a-date", "", "   ", "2026-13-99", "yesterday"):
+        assert parse_iso_epoch(junk) is None
+
+
+def test_parse_iso_epoch_none_input_is_none():
+    assert parse_iso_epoch(None) is None
