@@ -602,8 +602,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Make a blind-spot-only failure legible: an exit 1 with no incident would otherwise look
     # like a bug rather than the outage gate doing its job.
     if blind_fail and not drift_fail and not args.json:
+        # Same honest split as the report tail (see _unreachable_count_phrase): a flaky
+        # model degraded into errored_urns must not be miscounted as a dataset here either.
         _emit(
-            f"_exit 1: {len(report.unreachable_urns)} dataset(s) unreachable this run "
+            f"_exit 1: {_unreachable_count_phrase(report.unreachable_urns)} "
             f"(--fail-on-unreachable {args.fail_on_unreachable})._"
         )
     return 1 if (drift_fail or blind_fail) else 0

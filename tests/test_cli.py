@@ -4777,6 +4777,38 @@ def test_fail_on_unreachable_fails_a_blind_run(tmp_path, capsys, monkeypatch):
     assert "exit 1: 1 dataset(s) unreachable this run (--fail-on-unreachable 1)" in out
 
 
+def test_fail_on_unreachable_exit_message_splits_a_flaky_model(tmp_path, capsys, monkeypatch):
+    """The exit-1 WHY message must use the same honest URN split as the report tail. A flaky
+    model degraded into errored_urns (walker.walk_model) must read as a model, not a dataset,
+    even in this separate rendering path — the fix that landed in render_report's tail applies
+    here too."""
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(CUSTOMERS_URN)}).save()
+    healthy = [_sig(CUSTOMERS_URN)]  # scored, no drift -> only the outage can trip exit 1
+    model_urn = "urn:li:mlModel:(urn:li:dataPlatform:mlflow,churn,PROD)"
+    wr = WalkResult(
+        signatures=healthy,
+        serving_dataset_urns=frozenset(),
+        errored_urns=[
+            (ORDERS_URN, "HTTPError: 503 Service Unavailable"),
+            (model_urn, "HTTPError: 503 Service Unavailable"),
+        ],
+    )
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: (healthy, [], wr),
+    )
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover",
+               "--fail-on-unreachable"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "exit 1: 1 dataset(s) & 1 model(s) unreachable this run (--fail-on-unreachable 1)" in out
+    # Guard against the old blanket miscount ("2 dataset(s)") ever returning here.
+    assert "2 dataset(s) unreachable this run" not in out
+
+
 def test_fail_on_unreachable_below_threshold_still_exits_0(tmp_path, capsys, monkeypatch):
     """A threshold above the actual unreachable count does not trip — 1 unreachable < floor 2."""
     store = tmp_path / "b.json"
