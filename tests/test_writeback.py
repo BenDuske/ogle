@@ -556,6 +556,20 @@ def test_retract_clears_downstream_model_when_fully_recovered():
     assert entities == {DS_CUSTOMERS, MODEL_CHURN}
 
 
+def test_retract_dedups_an_entity_reached_as_both_a_recovered_dataset_and_a_mapped_model():
+    """The planner's `emitted` guard: one URN can surface in BOTH roles — a recovered dataset
+    AND a "model" listed downstream of another recovered dataset (degenerate lineage where
+    `dataset_to_models` points at a URN that also recovered on its own). It must be planned for
+    removal exactly once: no duplicate (entity, tag) action, so retraction stays idempotent and
+    never fires two identical clear calls at the backend for the same flag."""
+    walk = _walk({DS_CUSTOMERS: [DS_ORDERS]})  # DS_ORDERS reached as a "model" of DS_CUSTOMERS...
+    plan = plan_retract([DS_CUSTOMERS, DS_ORDERS], walk_result=walk)  # ...and recovered on its own
+    pairs = [(a.entity_urn, a.tag_urn) for a in plan.actions]
+    assert len(pairs) == len(set(pairs))  # no duplicate (entity, tag) removal actions
+    orders_tags = [a.tag_urn for a in plan.actions if a.entity_urn == DS_ORDERS]
+    assert sorted(orders_tags) == sorted(all_ogle_tag_urns())  # exactly one full tag set, not two
+
+
 def test_retract_protects_model_still_downstream_of_active_drift():
     """MODEL_CHURN is fed by both a recovered and a still-drifting dataset -> keep its flag."""
     walk = _walk({DS_CUSTOMERS: [MODEL_CHURN], DS_ORDERS: [MODEL_CHURN, MODEL_DEMAND]})
