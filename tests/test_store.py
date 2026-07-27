@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from ogle import store as store_mod
 from ogle.signature import DatasetSignature, build_signature
 from ogle.store import STORE_VERSION, BaselineStore
 
@@ -627,6 +628,31 @@ def test_save_is_atomic_no_tmp_left_behind(tmp_path):
     leftovers = list(tmp_path.glob(".ogle-store-*.tmp"))
     assert leftovers == []
     assert p.exists()
+
+
+def test_failed_save_leaves_no_tmp_orphan_and_spares_prior_good_file(tmp_path, monkeypatch):
+    # A crash at the os.replace step (disk full, permissions, power loss mid-swap) must
+    # NOT leak a .ogle-store-*.tmp turd into the store dir, and must leave the prior good
+    # file byte-for-byte intact — the whole point of the temp-then-replace dance.
+    p = tmp_path / "store.json"
+    good = BaselineStore(path=p)
+    good.put_baseline(_sig(field_null_fractions={"email": 0.1}))
+    good.save()
+    original = p.read_bytes()
+
+    doomed = BaselineStore(path=p)
+    doomed.put_baseline(_sig(field_null_fractions={"email": 0.9}))  # would-be new content
+
+    def boom(_src, _dst):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(store_mod.os, "replace", boom)
+    with pytest.raises(OSError, match="no space left"):
+        doomed.save()
+
+    assert list(tmp_path.glob(".ogle-store-*.tmp")) == []  # finally-block cleanup ran
+    assert p.read_bytes() == original  # prior good baseline untouched
+    assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN).field_null_fractions == {"email": 0.1}
 
 
 def test_save_creates_parent_dirs(tmp_path):
