@@ -548,6 +548,38 @@ def test_captured_example_alert_matches_live_render():
     assert captured_block == live_block
 
 
+def test_readme_quickstart_signatures_pair_runs_verbatim(tmp_path, capsys):
+    """The README Quickstart hands a judge two literal commands over the BUNDLED fixtures:
+
+        ogle check --store demo.json --signatures examples/demo/healthy-signatures.json   # exit 0
+        ogle check --store demo.json --signatures examples/demo/drifted-signatures.json  # exit 1
+
+    Every other check-path test in this file feeds SYNTHESIZED signature files, so the exact
+    `examples/demo/*.json` files a judge actually runs are never exercised through `main()` —
+    only through `run_drift_check` directly (the render test above). That leaves the documented
+    command pair — the real fixtures, by their committed paths, through the true CLI entrypoint
+    with their promised exit codes — unpinned. A rename of a fixture, a regression in the
+    `--signatures` loader, or a drift in the exit-code contract would silently break the first
+    thing a judge types. Pin it: seed exits 0, the re-check exits 1 AND pages the HIGH
+    serving-path headline the README promises.
+    """
+    from pathlib import Path
+
+    demo_dir = Path(__file__).resolve().parents[1] / "examples" / "demo"
+    healthy = demo_dir / "healthy-signatures.json"
+    drifted = demo_dir / "drifted-signatures.json"
+    assert healthy.exists() and drifted.exists()  # the paths the README cites must exist
+
+    store = tmp_path / "demo.json"
+    seed_rc = main(["check", "--store", str(store), "--signatures", str(healthy)])
+    assert seed_rc == 0  # first run seeds baselines, no drift
+
+    drift_rc = main(["check", "--store", str(store), "--signatures", str(drifted)])
+    assert drift_rc == 1  # the drifted re-check must alert
+    out = capsys.readouterr().out
+    assert "🔴 HIGH drift across 2 datasets on a serving path" in out
+
+
 def test_render_report_surfaces_unreachable_tail():
     """A resilient walk that skipped past unreachable datasets must SAY so in the tail —
     an outage signal shouldn't vanish just because the walk survived it."""
