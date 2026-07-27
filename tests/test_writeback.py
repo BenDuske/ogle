@@ -633,6 +633,41 @@ def test_retract_protects_model_downstream_of_unreachable_dataset():
     assert DS_ORDERS not in {a.entity_urn for a in plan2.actions}
 
 
+def test_retract_never_clears_a_top_level_unreachable_model():
+    """A model whose OWN top-level fetch raised this run is `unreachable` — unknown-state, not
+    confirmed-recovered. The walker records it in `errored_urns` (-> `unreachable_urns`) and,
+    crucially, emits NO `dataset_to_models` edge for it (walker.py:480 returns before the edge is
+    built), so it can never surface as a downstream value of a recovered dataset. This pins that
+    walker<->writeback invariant inside writeback's own suite: even if the map still carries a
+    genuinely-recovered sibling model, the unreachable one keeps its flag. A future refactor that
+    ever let an unreachable model leak into `dataset_to_models` would trip this test, not silently
+    strip a live drift flag off a model we couldn't actually re-verify."""
+    # DS_ORDERS recovered and legitimately feeds MODEL_DEMAND (edge present). MODEL_CHURN was
+    # unreachable at its own top level -> deliberately absent from dataset_to_models, exactly as
+    # the walker would leave it.
+    walk = _walk({DS_ORDERS: [MODEL_DEMAND]})
+    plan = plan_retract(
+        [DS_ORDERS],
+        active_findings=[],
+        walk_result=walk,
+        unreachable_urns=[MODEL_CHURN],
+    )
+    entities = {a.entity_urn for a in plan.actions}
+    assert DS_ORDERS in entities        # genuinely recovered dataset cleared
+    assert MODEL_DEMAND in entities     # its normal downstream model cleared alongside it
+    assert MODEL_CHURN not in entities  # top-level unreachable -> unknown-state -> protected
+    # Belt-and-suspenders: even if a caller degenerately leaks the unreachable model into BOTH
+    # recovered_urns AND a downstream edge, `still_drifting` (which unions unreachable_urns) must
+    # keep it flagged — the model-clearing path must not race the recovered-dataset guard.
+    walk2 = _walk({DS_ORDERS: [MODEL_DEMAND, MODEL_CHURN]})
+    plan2 = plan_retract(
+        [DS_ORDERS, MODEL_CHURN],
+        walk_result=walk2,
+        unreachable_urns=[MODEL_CHURN],
+    )
+    assert MODEL_CHURN not in {a.entity_urn for a in plan2.actions}
+
+
 def test_apply_retract_removes_present_tag_and_leaves_others():
     backend = FakeWritebackBackend(tags={DS_CUSTOMERS: {OGLE_DRIFT_TAG, "urn:li:tag:pii"}})
     plan = plan_retract([DS_CUSTOMERS], severity_tags=False)

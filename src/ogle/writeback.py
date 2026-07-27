@@ -493,7 +493,17 @@ def plan_retract(
     cleared_models: Set[str] = set()
     for ds_urn in recovered:
         for model_urn in dataset_to_models.get(ds_urn, ()):
-            if model_urn in protected_models or model_urn in cleared_models:
+            # `still_drifting` is the same never-retract set the recovered-dataset loop honors
+            # (line ~454). Enforce it on the model path too: a model that is ITSELF still drifting
+            # or unreachable (unknown-state) must keep its flag even when this upstream recovered.
+            # The live walker never emits an edge to a top-level-unreachable model, so this is a
+            # no-op there — but it makes writeback honor its own "unreachable -> never retracted"
+            # contract locally instead of relying on the walker's construction to hold forever.
+            if (
+                model_urn in protected_models
+                or model_urn in cleared_models
+                or model_urn in still_drifting
+            ):
                 continue
             cleared_models.add(model_urn)
             _push(model_urn, reason=f"recovered: upstream {ds_urn} cleared")
