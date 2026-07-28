@@ -5011,6 +5011,67 @@ def test_write_back_catalog_dry_run_previews_without_applying(tmp_path, capsys, 
     assert f"`{ds}`" in out and f"`{model}`" in out  # dataset + downstream model both planned
 
 
+def test_write_back_skip_notice_stays_off_stdout_in_json_mode(tmp_path, capsys, monkeypatch):
+    """`--write-back --json` on a no-new-incident run must keep stdout PARSEABLE.
+
+    render_report already wrote the JSON payload to stdout; the "write-back skipped" notice is
+    prose. Emitting it to stdout (as the code used to, unconditionally) trails markdown after the
+    JSON and breaks a monitor's `json.loads`. It must ride stderr in JSON mode — the same
+    side-effect-notice convention `watch --json` uses — while a human still sees why nothing
+    was tagged.
+    """
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    # Seed CUSTOMERS healthy, then arm a live walk that returns the SAME signature -> no drift,
+    # no new incident -> write-back skips.
+    healthy = _write_sigs(tmp_path / "healthy.json", [_sig(CUSTOMERS_URN)], serving=[CUSTOMERS_URN])
+    main(["check", "--store", str(store), "--signatures", str(healthy)])  # seed baseline
+    capsys.readouterr()
+    steady = _sig(CUSTOMERS_URN)  # identical to baseline -> healthy re-check
+    wr = WalkResult(signatures=[steady], serving_dataset_urns={CUSTOMERS_URN})
+    monkeypatch.setattr(
+        "ogle.cli._walk_live",
+        lambda gms, models, discover: ([steady], sorted(wr.serving_dataset_urns), wr),
+    )
+
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--write-back", "--json",
+    ])
+    captured = capsys.readouterr()
+
+    assert rc == 0  # healthy run, nothing to page
+    payload = json.loads(captured.out)  # stdout must be pure JSON — fails pre-fix
+    assert payload["should_alert"] is False
+    assert "write-back skipped" not in captured.out  # prose is NOT on stdout
+    assert "write-back skipped" in captured.err  # ...it moved to stderr
+
+
+def test_retract_skip_notice_stays_off_stdout_in_json_mode(tmp_path, capsys, monkeypatch):
+    """`--retract-cleared --json` with no recovered datasets must keep stdout PARSEABLE.
+
+    Same JSON-purity contract as write-back: the "no recovered datasets" notice is prose that
+    used to trail markdown after the report JSON on stdout. On a drift-only run (the single
+    scored dataset is drifting, so nothing recovered) it must ride stderr in JSON mode.
+    """
+    store = tmp_path / "b.json"
+    _seed_and_drift(tmp_path, store, monkeypatch)  # arms a live walk with fresh CUSTOMERS drift
+    capsys.readouterr()
+
+    rc = main([
+        "check", "--store", str(store), "--gms", "http://x", "--discover",
+        "--retract-cleared", "--json",
+    ])
+    captured = capsys.readouterr()
+
+    assert rc == 1  # fresh incident fires
+    payload = json.loads(captured.out)  # stdout must be pure JSON — fails pre-fix
+    assert payload["should_alert"] is True
+    assert "no recovered" not in captured.out  # prose is NOT on stdout
+    assert "no recovered datasets" in captured.err  # ...it moved to stderr
+
+
 def test_write_back_catalog_dry_run_json_sets_flag(tmp_path, capsys, monkeypatch):
     """JSON preview carries `dry_run: true` so a wrapper can tell it from a real apply."""
     store = tmp_path / "b.json"

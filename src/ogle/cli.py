@@ -515,7 +515,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     # scheduler doesn't reapply the same tag on every tick.
     if args.write_back:
         if not report.should_alert:
-            _emit("_write-back skipped: no new incident this run._")
+            # A monitor consuming --json parses stdout; this markdown notice would corrupt
+            # the payload (render_report already emitted the JSON above). Route it to stderr
+            # in JSON mode — the same side-effect-notice convention watch --json uses — so
+            # stdout stays pure JSON while a human still sees why write-back did nothing.
+            _emit(
+                "_write-back skipped: no new incident this run._",
+                stream=sys.stderr if args.json else None,
+            )
         elif walk_result is None:
             print(
                 "ogle check: --write-back requires a live walk (--gms/--models/--discover);"
@@ -584,7 +591,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             u for u in report.scored_urns if u not in drifted and u not in suppressed
         ]
         if not recovered:
-            _emit("_retract: no recovered datasets this run._")
+            # Same JSON-purity contract as the write-back skip above: keep stdout parseable
+            # for a --json consumer by routing this prose notice to stderr in JSON mode.
+            _emit(
+                "_retract: no recovered datasets this run._",
+                stream=sys.stderr if args.json else None,
+            )
         elif getattr(args, "catalog_dry_run", False):
             r_plan = _plan_retract_only(
                 recovered,
