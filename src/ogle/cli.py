@@ -1727,6 +1727,25 @@ def _incident_matches_owner(rec: dict, needle: str) -> bool:
     return any(probe in str(o).lower() for o in owners)
 
 
+def _incident_is_unowned(rec: dict) -> bool:
+    """True if an incident has NO recorded owner display name — orphaned drift.
+
+    The inverse of the `--owner NAME` people axis: instead of "which drift is mine to
+    page?", this answers "which drift has NOBODY to page?" — the orphaned set an on-call
+    lead sweeps to assign an owner before it silently rots. It surfaces exactly the records
+    `--owner NAME` can never match and always drops: a bare-ping/offline capture, or a
+    legacy record predating owner tracking, both of which carry an unknown owner set. An
+    `owners` field that is absent, not a list, empty, or whose entries all stringify to
+    blank/whitespace (a user slip, not a real name) all count as unowned — the same
+    all-whitespace-is-not-a-name rule `_incident_matches_owner` uses on the query side, so
+    the two selectors partition the incident set cleanly with no record in both or neither.
+    """
+    owners = rec.get("owners")
+    if not isinstance(owners, list):
+        return True
+    return not any(str(o).strip() for o in owners)
+
+
 def _incident_passes(
     rec: dict,
     min_rank: Optional[int],
@@ -1738,6 +1757,7 @@ def _incident_passes(
     standing_before: Optional[float] = None,
     kind: Optional[str] = None,
     owner: Optional[str] = None,
+    unowned: bool = False,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -1771,6 +1791,10 @@ def _incident_passes(
     bare-ping capture or a legacy record predating owner tracking) has an unknown owner set
     and can't be proven owned by anyone, so it's dropped rather than guessed — same rule as
     `kind`.
+    `unowned` (False = no orphan filter) is the mirror of `owner`: keeps only incidents with
+    NO recorded owner — the orphaned drift nobody is on the hook for. It surfaces exactly the
+    set `owner` drops, so the two never make sense together (an incident can't be both owned
+    by NAME and unowned); the CLI rejects the pairing before this point.
     All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
@@ -1784,6 +1808,8 @@ def _incident_passes(
     if needle is not None and not _incident_matches_needle(rec, needle):
         return False
     if owner is not None and not _incident_matches_owner(rec, owner):
+        return False
+    if unowned and not _incident_is_unowned(rec):
         return False
     if stale_before is not None:
         ls = rec.get("last_seen")
@@ -2159,6 +2185,16 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     needle = getattr(args, "grep", None)
     kind = getattr(args, "kind", None)
     owner = getattr(args, "owner", None)
+    unowned = getattr(args, "unowned", False)
+
+    # `--owner NAME` and `--unowned` are opposite halves of the people axis — one asks "which
+    # drift is mine to page?", the other "which drift has nobody to page?". ANDing them can
+    # only ever return the empty set (no incident is both owned by NAME and ownerless), so a
+    # request for both is a user mistake, not a valid narrowing. Reject it up front (exit 2)
+    # rather than silently emit "no incidents", which would read as "all clear".
+    if owner is not None and unowned:
+        _emit("_--owner and --unowned are opposites — pass one, not both._")
+        return 2
 
     # `--stale AGE`: keep only drift last seen longer ago than AGE (e.g. `--stale 7d`) — the
     # resolve/forget candidates that stopped recurring. Parsed against a single `now` so the
@@ -2212,6 +2248,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         or standing_before is not None
         or kind is not None
         or owner is not None
+        or unowned
     )
     records = [
         r
@@ -2227,6 +2264,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             standing_before,
             kind,
             owner,
+            unowned,
         )
     ]
 
@@ -3786,6 +3824,14 @@ def build_parser() -> argparse.ArgumentParser:
         "display name) — the on-call 'which drift is mine to page?' query, e.g. `--owner "
         "alice --fingerprints | ogle resolve -`. Drops incidents with no recorded owner "
         "(offline/bare-ping captures and legacy records).",
+    )
+    incidents.add_argument(
+        "--unowned",
+        action="store_true",
+        help="Only show incidents with NO recorded owner — the orphaned drift nobody is on "
+        "the hook for, the on-call lead's 'which drift needs an owner assigned?' sweep. The "
+        "exact complement of --owner NAME (mutually exclusive with it); surfaces the "
+        "offline/bare-ping captures and legacy records --owner drops.",
     )
     incidents.add_argument(
         "--stale",

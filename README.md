@@ -591,6 +591,7 @@ ogle incidents --kind freshness         # only incidents including one drift dim
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
 ogle incidents --owner alice            # only drift owned by alice — "which incidents are mine to page?"
+ogle incidents --unowned                # only drift with NO owner — "which incidents need an owner assigned?"
 ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
 ogle incidents --fresh 1h               # only drift seen within the last hour (currently-active set)
 ogle incidents --fresh 7d --stale 1h    # window: seen between 7d and 1h ago (--fresh + --stale compose)
@@ -635,7 +636,12 @@ substring of any owner display name (`--owner alice` finds "Alice Smith") and co
 other filter and `--fingerprints`, so `ogle incidents --owner alice --fingerprints | ogle resolve -`
 clears exactly one operator's drift. An incident with no recorded owner can't be proven owned by
 anyone, so a named `--owner` drops it — the same "never guess" rule `--kind` applies to un-dimensioned
-records.
+records. `--unowned` is the mirror image: it keeps *only* the ownerless incidents — the orphaned
+drift nobody is on the hook for — turning the on-call lead's "which drift still needs an owner
+assigned?" sweep into one command. It surfaces exactly the offline/bare-ping captures and legacy
+records `--owner` drops, so the two flags partition the store cleanly (every incident is owned-by-NAME
+or unowned, never both); asking for both at once can only return the empty set, so Ogle rejects the
+pairing rather than emit a misleading "all clear."
 
 Each incident line carries the **age of its most recent sighting** (`last seen 3h ago`, or
 `just now` for a fresh one) when Ogle has a timestamp for it — the temporal signal that tells a

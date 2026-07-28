@@ -2200,6 +2200,81 @@ def test_incidents_owner_registered_in_help():
     assert build_parser().parse_args(["incidents"]).owner is None
 
 
+# ---- `ogle incidents --unowned`: the "which drift has nobody to page?" filter --------
+def test_incidents_unowned_keeps_only_ownerless(tmp_path, capsys):
+    # --unowned surfaces exactly the incidents with no recorded owner — the orphaned set.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("owned", severity="high", title="drift", owners=["alice"])
+    s.record_incident("bare", severity="high", title="drift")  # captured offline, no owners
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--unowned", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["bare"]
+
+
+def test_incidents_unowned_treats_blank_owner_as_ownerless(tmp_path, capsys):
+    # An all-whitespace owner is a user slip, not a real name — so it counts as unowned,
+    # mirroring the empty-owner rule --owner uses on the query side.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("blank", severity="high", title="drift", owners=["   "])
+    s.record_incident("real", severity="high", title="drift", owners=["alice"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--unowned", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["blank"]
+
+
+def test_incidents_unowned_and_owner_are_mutually_exclusive(tmp_path, capsys):
+    # The two halves of the people axis can only AND to the empty set, so pairing them is a
+    # user mistake — rejected with exit 2, not a misleading silent "no incidents".
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp", severity="high", title="drift", owners=["alice"])
+    s.save()
+    rc = main(["incidents", "--store", str(store_path), "--owner", "alice", "--unowned"])
+    assert rc == 2
+    assert "opposites" in capsys.readouterr().out.lower()
+
+
+def test_incidents_unowned_partitions_the_store_with_owner(tmp_path, capsys):
+    # --owner NAME and --unowned are exact complements: every incident lands in exactly one.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("owned", severity="high", title="drift", owners=["alice"])
+    s.record_incident("bare", severity="high", title="drift")
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--owner", "alice", "--fingerprints"]) == 0
+    owned = capsys.readouterr().out.split()
+    assert main(["incidents", "--store", str(store_path), "--unowned", "--fingerprints"]) == 0
+    unowned = capsys.readouterr().out.split()
+    assert set(owned) == {"owned"}
+    assert set(unowned) == {"bare"}
+    assert set(owned).isdisjoint(unowned)  # no record in both halves
+
+
+def test_incidents_unowned_composes_with_min_severity(tmp_path, capsys):
+    # --unowned AND --min-severity: both the ownerless-ness and the severity floor must hold.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("hi", severity="high", title="drift")   # unowned, high
+    s.record_incident("lo", severity="low", title="drift")    # unowned, low
+    s.save()
+    rc = main(["incidents", "--store", str(store_path),
+               "--unowned", "--min-severity", "high", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["hi"]  # the low-severity orphan is dropped by the floor
+
+
+def test_incidents_unowned_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--unowned"])
+    assert ns.unowned is True
+    # Default is False (no orphan filter) when the flag is omitted.
+    assert build_parser().parse_args(["incidents"]).unowned is False
+
+
 # ---- `ogle incidents --summary`: aggregate rollup of the memory ---------------------
 def test_incidents_summary_json_shape(tmp_path, capsys):
     # The rollup counts by severity, serving-path, recurrence, and total sightings.
