@@ -372,8 +372,9 @@ so an incident spanning two dimensions counts in both and the label sum can exce
 `ogle_incidents_remembered` — graph it to see whether e.g. a freshness-drift spike is driving the
 total, or alert `{kind="freshness"} > 0` on any stalled feed; `{kind="unknown"}` holds legacy
 incidents with no recorded dimension),
-`ogle_muted_active` (split into
-`ogle_muted_permanent` + the snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
+`ogle_muted_active` (split into the two always-emitted count gauges
+`ogle_muted_permanent` + `ogle_muted_snoozed` — `permanent + snoozed == active` — plus the
+orthogonal snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
 incident staleness ages (`ogle_incidents_last_seen_{min,max}_age_seconds`), the incident
 standing ages (`ogle_incidents_first_seen_{min,max}_age_seconds` — the longevity twin: alert
 `ogle_incidents_first_seen_max_age_seconds` climbing past a weeks threshold to page on a
@@ -414,10 +415,15 @@ an orphaning watch-list without a scrape, and the snapshot and the gauge can nev
 a *permanent* mute is a chosen **standing blind spot** — drift on that dataset is suppressed with
 no end date, so a serving table quietly muted months ago keeps hiding real drift forever.
 `ogle_muted_permanent` surfaces that count on its own (alert if it creeps up on serving assets),
-while `ogle_muted_snooze_next_expiry_seconds` counts down to the soonest *snooze* lapsing so you
-can anticipate drift returning to the page. The two split the active total exactly
-(`permanent + snoozed == ogle_muted_active`); the countdown emits **no sample** when nothing is
-snoozed rather than a fabricated `0` that would read as "expiring right now".
+and its twin `ogle_muted_snoozed` counts the datasets under a self-expiring *snooze* — both are
+always emitted (honest `0`) and split the active total exactly
+(`permanent + snoozed == ogle_muted_active`), matching the `muted_permanent`/`muted_snoozed`
+fields `status --json` exposes, so a scrape can graph transient silence piling up without a
+derived `active − permanent` recording rule. Separately, `ogle_muted_snooze_next_expiry_seconds`
+counts down to the soonest snooze lapsing so you can anticipate drift returning to the page —
+that countdown emits **no sample** when nothing is snoozed rather than a fabricated `0` that
+would read as "expiring right now" (the always-present *count* above is how you tell `0 snoozed`
+from "no snooze pending").
 
 **The page-worthy cell is serving × severity.** The single alert that matters most for a
 production ML monitor is "a *high-severity* drift is hitting a *serving* path right now" — a

@@ -97,6 +97,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_sightings",
         "ogle_muted_active",
         "ogle_muted_permanent",
+        "ogle_muted_snoozed",
         "ogle_muted_snooze_next_expiry_seconds",
         "ogle_incidents_last_seen_min_age_seconds",
         "ogle_incidents_last_seen_max_age_seconds",
@@ -777,9 +778,12 @@ def test_render_permanent_emits_honest_zero_and_countdown_absent_when_no_snooze(
         mute_breakdown={"permanent": 0, "snoozed": 0, "next_expiry_seconds": None},
     )
     samples, types, helps = _parse_prom(text)
-    # Permanent is a count → honest 0 always emitted.
+    # Permanent AND snoozed are counts → honest 0 always emitted (parity with each other and
+    # with `status --json`'s muted_permanent/muted_snoozed split).
     assert samples["ogle_muted_permanent"] == "0"
-    # Countdown family declared for a stable scrape shape, but no sample without a snooze.
+    assert samples["ogle_muted_snoozed"] == "0"
+    # Countdown family declared for a stable scrape shape, but no sample without a snooze —
+    # distinct from the always-present snoozed COUNT above (WHEN vs HOW-MANY).
     assert "ogle_muted_snooze_next_expiry_seconds" in helps
     assert types["ogle_muted_snooze_next_expiry_seconds"] == "gauge"
     assert "ogle_muted_snooze_next_expiry_seconds" not in samples
@@ -795,6 +799,9 @@ def test_render_emits_permanent_count_and_snooze_countdown():
     )
     samples, _, _ = _parse_prom(text)
     assert samples["ogle_muted_permanent"] == "2"
+    assert samples["ogle_muted_snoozed"] == "1"
+    # permanent + snoozed == muted_active (3) — the split reconstructs the total.
+    assert samples["ogle_muted_active"] == "3"
     assert samples["ogle_muted_snooze_next_expiry_seconds"] == "3600"
 
 
@@ -808,6 +815,7 @@ def test_render_omits_breakdown_defaults_to_zero_permanent():
     )
     samples, _, helps = _parse_prom(text)
     assert samples["ogle_muted_permanent"] == "0"
+    assert samples["ogle_muted_snoozed"] == "0"
     assert "ogle_muted_snooze_next_expiry_seconds" in helps
 
 
@@ -820,9 +828,41 @@ def test_metrics_cli_reports_permanent_mute_as_blind_spot(tmp_path, capsys):
     assert main(["metrics", "--store", str(store_path)]) == 0
     samples, _, _ = _parse_prom(capsys.readouterr().out)
     assert samples["ogle_muted_permanent"] == "1"
+    assert samples["ogle_muted_snoozed"] == "1"  # the far-future snooze, counted explicitly
     assert samples["ogle_muted_active"] == "2"  # permanent + active snooze
     # The countdown is present and positive (snooze lapses in the far future).
     assert float(samples["ogle_muted_snooze_next_expiry_seconds"]) > 0
+
+
+def test_muted_snoozed_gauge_reaches_parity_with_status_json_split(tmp_path, capsys):
+    """The Prometheus twin must expose the SAME permanent/snoozed split `status --json` does.
+
+    `status --json` surfaces muted_permanent AND muted_snoozed as first-class fields because
+    collapsing them hides which is which; the Prometheus renderer used to emit only permanent
+    (leaving snoozed to be derived as active - permanent). Pin that the two machine renderings
+    now agree number-for-number on the same store.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = _seed_store(store_path)
+    s.mute(CUSTOMERS_URN)  # permanent
+    s.mute(ORDERS_URN, until=9_999_999_999.0)  # far-future snooze
+    s.save()
+
+    # Prometheus side.
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    prom, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # JSON side, same store.
+    assert main(["status", "--store", str(store_path), "--json"]) == 0
+    st = json.loads(capsys.readouterr().out)["status"]
+
+    assert prom["ogle_muted_permanent"] == str(st["muted_permanent"])
+    assert prom["ogle_muted_snoozed"] == str(st["muted_snoozed"])
+    assert prom["ogle_muted_active"] == str(st["muted"])
+    # The split is exhaustive on both sides.
+    assert int(prom["ogle_muted_permanent"]) + int(prom["ogle_muted_snoozed"]) == int(
+        prom["ogle_muted_active"]
+    )
 
 
 # ---- incidents by drift dimension (by_kind) ----------------------------------------

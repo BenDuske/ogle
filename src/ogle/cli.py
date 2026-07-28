@@ -2686,13 +2686,23 @@ def _render_prometheus(
     )
     # Split the mute count by kind: a permanent mute is a STANDING blind spot (drift
     # suppressed with no end date — alert if this creeps up on serving tables), while a
-    # snooze self-expires. `permanent + snoozed` == ogle_muted_active. Permanent is a count
-    # so an honest 0 is emitted; the snooze countdown emits only when something is snoozed.
+    # snooze self-expires. `permanent + snoozed` == ogle_muted_active. BOTH are emitted as
+    # count gauges so an honest 0 is always present — parity with `status --json`'s
+    # muted_permanent/muted_snoozed split, which surfaces them separately because collapsing
+    # them hides which is which. The snooze countdown below is the orthogonal WHEN gauge (it
+    # emits only when something is snoozed); this snoozed COUNT is the always-present HOW-MANY,
+    # so a scrape can graph transient silence accumulating without a derived active-minus-
+    # permanent recording rule and can tell "0 snoozed" from a missing series.
     mb = mute_breakdown or {"permanent": 0, "snoozed": 0, "next_expiry_seconds": None}
     family(
         "ogle_muted_permanent",
         "Datasets muted permanently (indefinite silence — a standing blind spot).",
         [(None, mb["permanent"])],
+    )
+    family(
+        "ogle_muted_snoozed",
+        "Datasets under an active snooze (temporary silence that self-expires).",
+        [(None, mb["snoozed"])],
     )
     next_expiry = mb.get("next_expiry_seconds")
     expiry_samples: list = []
