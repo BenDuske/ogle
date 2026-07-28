@@ -408,6 +408,24 @@ def cmd_check(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # `--write-back` / `--retract-cleared` can only act against a live graph (they need the
+    # DataHub lineage and a backend to write). Reject them in offline (`--signatures`) mode UP
+    # FRONT — before the store is loaded, scored, and saved — so an invalid invocation is a
+    # clean no-op. The old guards fired only AFTER `run_drift_check` had already recorded the
+    # incident and `store.save()` had advanced the baselines: a rejected offline `--write-back`
+    # on real drift would silently consume the incident's newness AND move the baseline past the
+    # drift, so a corrected live re-run could neither re-detect nor flag it. Fail-fast here keeps
+    # the store pristine. (The late `walk_result is None` guards remain as defense-in-depth.)
+    if getattr(args, "signatures", None) and (
+        getattr(args, "write_back", False) or getattr(args, "retract_cleared", False)
+    ):
+        flag = "--write-back" if getattr(args, "write_back", False) else "--retract-cleared"
+        print(
+            f"ogle check: {flag} requires a live walk (--gms/--models/--discover);"
+            " offline mode has no way to reach DataHub.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         cfg = build_score_config(
             volume_threshold=getattr(args, "volume_threshold", None),

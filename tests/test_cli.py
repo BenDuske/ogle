@@ -4717,6 +4717,32 @@ def test_retract_cleared_offline_is_input_error(tmp_path, capsys):
     assert "requires a live walk" in capsys.readouterr().err
 
 
+def test_write_back_offline_is_input_error_without_mutating_store(tmp_path, capsys):
+    """Offline --write-back is rejected (no live graph) — and must leave the store PRISTINE.
+
+    Regression: the offline guard used to fire only after `run_drift_check` had recorded the
+    incident and `store.save()` had advanced the baselines. A rejected offline `--write-back`
+    on real drift therefore silently consumed the incident's newness AND moved the baseline
+    past the drift, so a corrected live re-run could neither re-detect nor flag it. The fix
+    rejects up front, so the SAME drift is still a NEW incident on the next run.
+    """
+    store = tmp_path / "b.json"
+    # Seed a baseline for the drift run to diff against.
+    seed = _write_sigs(tmp_path / "seed.json", [_sig(row_count=1000)])
+    assert main(["check", "--store", str(store), "--signatures", str(seed)]) == 0
+    capsys.readouterr()
+
+    # A collapsed row count is real drift; offline + --write-back -> usage error (exit 2).
+    drifted = _write_sigs(tmp_path / "drift.json", [_sig(row_count=5)])
+    rc = main(["check", "--store", str(store), "--signatures", str(drifted), "--write-back"])
+    assert rc == 2
+    assert "requires a live walk" in capsys.readouterr().err
+
+    # The rejection was a clean no-op: the same drift is STILL a new incident (exit 1), not
+    # swallowed by an advanced baseline / already-recorded fingerprint.
+    assert main(["check", "--store", str(store), "--signatures", str(drifted)]) == 1
+
+
 def test_retract_cleared_passes_recovered_datasets_to_retract(tmp_path, capsys, monkeypatch):
     """Live run: healthy scored datasets (not drifting) are the recovered set handed to retract."""
     from ogle.walker import WalkResult
