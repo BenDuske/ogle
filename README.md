@@ -39,14 +39,20 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
    divergence), and the 2-Wasserstein (the move in the feature's own units) fold a feature's
    location *and* scale shift into one number, and where a signature ships sample quantiles a set
    of **empirical** distances ride alongside to catch skew/multimodal shifts the Gaussian summaries
-   idealize away, all read nonparametrically off the raw quantile functions: a 1-Wasserstein (the
-   mass move in the feature's own units), a two-sample Kolmogorov-Smirnov statistic (`sup|ΔCDF|`,
+   idealize away, all read nonparametrically off the raw quantile functions: an empirical transport ladder — the 1-, 2- and ∞-Wasserstein (`W1 ≤ W2 ≤ W∞`: the mass's mean
+   move, its RMS move with the far-moved mass counted double, and the single worst quantile
+   displacement — the transport-side twin of KS), all in the feature's own units, plus a two-sample Kolmogorov-Smirnov statistic (`sup|ΔCDF|`,
    the worst-point separation), its L2 twin the Cramér-von Mises RMS gap (the *typical* separation
    over the mass that is actually there — near KS for a broad consistent shift, far below it for a
    lone spike), its tail-weighted twin the Anderson-Darling separation (the same CvM energy divided
    by the mixture variance `H(1-H)`, so the extreme quantiles count for far more than their little
    mass — a tail thickening that the body-weighted CvM and the sup-norm KS both miss lights AD up;
-   `AD ≥ 2·CvM` always, and unlike its `[0,1]`-capped cousins AD is unbounded above), the Kuiper
+   `AD ≥ 2·CvM` always, and unlike its `[0,1]`-capped cousins AD is unbounded above), the Watson U² separation (CvM's *mean-removed* twin — it subtracts the
+   average CDF gap before squaring, so a one-sided level offset largely cancels while a *crossing*
+   gap passes through, isolating pure shape from location), the Cramér energy separation (CvM read
+   over the *value axis* `dx` rather than the mixture mass `dH`, so a gap opening across a long,
+   thinly-populated span — a tail stretching out — counts fully instead of being discounted for its
+   thin mass), the Kuiper
    statistic (`D+ + D-`, KS's both-directions cousin — it sums the worst up- and down-gaps instead
    of KS's single larger one, so a distribution that *crosses*, e.g. both tails fattening while the
    center thins at fixed mean and spread, rises above KS; `Kuiper ≥ KS` always), and a bounded
