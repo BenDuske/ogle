@@ -2383,8 +2383,15 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # kind tracking rather than faking a dimension.
         rk = r.get("kinds")
         kpart = f" · {', '.join(rk)}" if isinstance(rk, list) and rk else ""
+        # "Who to page" — owner display names captured from the live walk's Ownership aspect
+        # (union across the incident's datasets). Turns a remembered incident from an opaque
+        # fingerprint into an actionable page: the operator sees whom to route it to without
+        # re-walking DataHub. Omitted on unowned/legacy/offline-recorded incidents (empty
+        # list) rather than faking an owner; JSON carries the same field verbatim.
+        ro = r.get("owners")
+        opart = f" · 👤 {', '.join(ro)}" if isinstance(ro, list) and ro else ""
         _emit(
-            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{kpart}{fpart}{apart}  `{r['fingerprint']}`"
+            f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{kpart}{opart}{fpart}{apart}  `{r['fingerprint']}`"
         )
     if gate_rc and not args.json:
         _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")

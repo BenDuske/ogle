@@ -99,6 +99,31 @@ def test_recorded_incident_carries_drift_kinds():
     assert rec["kinds"] == ["schema", "volume"]  # sorted, both dimensions present
 
 
+def test_recorded_incident_carries_owner_attribution():
+    """The pipeline unions the incident's per-dataset owners into memory so `ogle incidents`
+    can name who to page for remembered drift. Two datasets with distinct owners record both,
+    deduped + sorted; an offline (owner-less) re-check must not blank that capture."""
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN, row_count=1000))
+    store.put_baseline(_sig(urn=ORDERS_URN, row_count=1000))
+    report = run_drift_check(
+        store,
+        [_sig(urn=CUSTOMERS_URN, row_count=0), _sig(urn=ORDERS_URN, row_count=0)],
+        owners={CUSTOMERS_URN: ["growth-team"], ORDERS_URN: ["growth-team", "data-eng"]},
+    )
+    assert report.incident is not None
+    (rec,) = store.incidents()
+    assert rec["owners"] == ["data-eng", "growth-team"]  # union, deduped, sorted
+    # A later owner-less sighting (e.g. an offline --signatures run) must not erase it.
+    run_drift_check(
+        store,
+        [_sig(urn=CUSTOMERS_URN, row_count=0), _sig(urn=ORDERS_URN, row_count=0)],
+        update_baselines=False,
+    )
+    (rec2,) = store.incidents()
+    assert rec2["owners"] == ["data-eng", "growth-team"]
+
+
 def test_serving_path_escalates_severity():
     store = BaselineStore()
     store.put_baseline(_sig(row_count=1000))

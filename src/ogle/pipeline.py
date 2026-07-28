@@ -153,6 +153,16 @@ def run_drift_check(
             datasets=len(incident.urns),
             serving=incident.serving_impacted,
             kinds={f.kind.value for f in incident.findings},
+            # "Who to page" attribution: the union of owner display names across every
+            # dataset in the incident (incident.owners is urn -> names). Persisted as
+            # provenance so `ogle incidents` can name the owner of remembered drift, not
+            # just count fingerprints. Only supplied when a live walk carried ownership —
+            # None in offline mode leaves any earlier capture intact (see record_incident).
+            owners=(
+                {name for names in incident.owners.values() for name in names}
+                if incident.owners
+                else None
+            ),
             now=now,
         )
 

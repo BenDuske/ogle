@@ -239,6 +239,70 @@ def test_incident_without_kinds_omits_the_key(tmp_path):
     assert "kinds" not in raw["seen_incidents"]["fp"]
 
 
+def test_record_incident_stores_owners_sorted_and_deduped():
+    # The "who to page" attribution is stored deduped + sorted for a stable, diffable record
+    # (parity with kinds) — a dataset owned by the same person twice collapses to one name.
+    store = BaselineStore()
+    store.record_incident(
+        "fp", severity="high", title="drift", owners=["carol", "alice", "carol"]
+    )
+    (rec,) = store.incidents()
+    assert rec["owners"] == ["alice", "carol"]
+
+
+def test_record_incident_refreshes_owners_to_latest_sighting():
+    # Ownership can be re-assigned between sightings; the latest wins (parity with kinds/severity).
+    store = BaselineStore()
+    store.record_incident("fp", severity="low", title="drift", owners=["old-team"])
+    store.record_incident("fp", severity="high", title="drift", owners=["new-team"])
+    (rec,) = store.incidents()
+    assert rec["count"] == 2
+    assert rec["owners"] == ["new-team"]
+
+
+def test_bare_record_incident_does_not_blank_prior_owners():
+    # An owner-less run (offline --signatures, or a metadata-less dedup ping) must not erase the
+    # attribution an earlier live walk captured — owners=None leaves the prior capture intact.
+    store = BaselineStore()
+    store.record_incident("fp", severity="medium", title="drift", owners=["data-eng"])
+    store.record_incident("fp")  # bare ping — no owners
+    (rec,) = store.incidents()
+    assert rec["owners"] == ["data-eng"]
+
+
+def test_record_incident_empty_owners_list_clears_attribution():
+    # An explicit [] means "supplied, but the datasets are now unowned" — distinct from None
+    # (not supplied). The latest-sighting refresh applies, so it clears a prior owner set; the
+    # cleared (empty) attribution then omits the `owners` key entirely (additive contract), so
+    # the dict view drops it rather than carrying an empty list.
+    store = BaselineStore()
+    store.record_incident("fp", severity="medium", title="drift", owners=["data-eng"])
+    store.record_incident("fp", severity="medium", title="drift", owners=[])
+    assert store.seen_incidents["fp"].owners == []  # in-memory record cleared
+    (rec,) = store.incidents()
+    assert "owners" not in rec  # empty -> omitted from the dict view
+
+
+def test_incident_owners_roundtrip_through_disk(tmp_path):
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", title="drift", owners=["alice", "bob"])
+    s1.save()
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec["owners"] == ["alice", "bob"]
+
+
+def test_incident_without_owners_omits_the_key(tmp_path):
+    # An unowned incident must not emit an empty `owners` list — old and new Ogle round-trip
+    # identical bytes for an owner-less record (the additive-provenance contract).
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", title="drift")
+    s1.save()
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    assert "owners" not in raw["seen_incidents"]["fp"]
+
+
 def test_legacy_bare_count_record_loads(tmp_path):
     # A store file written by an older Ogle (count only, no provenance keys) must load and
     # surface as an incident with empty/defaulted provenance — never crash.

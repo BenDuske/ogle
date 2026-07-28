@@ -619,6 +619,17 @@ on the serving path in a line. Incidents remembered by an older Ogle (before kin
 unknown dimension set, so any `--kind` drops them rather than guessing — the same "never guess" rule
 the timed filters follow.
 
+Each incident line also names **who to page** (`👤 growth-team, data-eng`) — the owner display
+names Ogle captured from DataHub's Ownership aspect during the walk, unioned across every dataset in
+the incident. That attribution used to live only in the transient alert narrative and was lost the
+moment the run ended; it is now persisted as incident provenance, so `ogle incidents` turns a
+remembered fingerprint into an actionable page without re-walking DataHub, and `--json` carries the
+same `owners` list. Like every provenance field it reflects the *latest* sighting (re-assigning an
+owner refreshes it) but is deliberately **never** part of the dedup fingerprint — changing an owner
+is not drift and must not re-page an open incident. An unowned dataset, an offline (`--signatures`)
+run with no ownership source, or an incident remembered by an older Ogle simply omits the marker
+rather than faking an owner.
+
 Each incident line carries the **age of its most recent sighting** (`last seen 3h ago`, or
 `just now` for a fresh one) when Ogle has a timestamp for it — the temporal signal that tells a
 recurring, still-happening problem apart from one that quietly stopped. Incidents remembered by an

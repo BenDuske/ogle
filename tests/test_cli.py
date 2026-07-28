@@ -1726,6 +1726,40 @@ def test_incidents_json_shape(tmp_path, capsys):
     assert entry["serving"] is True
 
 
+def test_incidents_renders_owner_attribution(tmp_path, capsys):
+    # A remembered incident with recorded owners shows the "who to page" names on its line, so
+    # an operator can route the page without re-walking DataHub.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident(
+        "fp1", severity="high", title="HIGH drift", datasets=1, owners=["alice", "bob"]
+    )
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "👤 alice, bob" in out
+
+
+def test_incidents_json_carries_owners(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp1", severity="high", title="drift", owners=["data-eng"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["incidents"][0]
+    assert entry["owners"] == ["data-eng"]
+
+
+def test_incidents_unowned_omits_owner_marker(tmp_path, capsys):
+    # An owner-less incident must not print a bare "👤" — omitted, not faked (parity with kinds).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp1", severity="high", title="drift")
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    assert "👤" not in capsys.readouterr().out
+
+
 def test_incidents_sorted_worst_severity_first(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)
