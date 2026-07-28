@@ -3090,6 +3090,7 @@ _DEGENERATE_DIVERGENCES = [
     ("ad", _empirical_ad),
     ("watson", _empirical_watson),
     ("massl1", _empirical_massl1),
+    ("cramer", _empirical_cramer),
     ("cramer_shape", _empirical_cramer_shape),
     ("js", _empirical_js),
     ("psi", _empirical_psi),
