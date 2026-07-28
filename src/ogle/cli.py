@@ -1705,6 +1705,28 @@ def _incident_matches_needle(rec: dict, needle: str) -> bool:
     return probe in title or probe in fingerprint
 
 
+def _incident_matches_owner(rec: dict, needle: str) -> bool:
+    """True if `needle` (case-insensitive) is a substring of any of the incident's owners.
+
+    The people axis behind `ogle incidents --owner`: an on-call operator asks "which
+    remembered drift is mine to page?" against the owner display names the walk persisted
+    onto each incident (the `owners` provenance added alongside kinds). Substring, not exact
+    — `--owner alice` matches "Alice Smith" without typing the full display name, mirroring
+    `--grep`. An incident with no recorded owners (a bare-ping/offline capture, or a legacy
+    record predating owner tracking) has an unknown owner set and so can NEVER match a named
+    owner — it's dropped, not guessed, the same rule `--kind` applies to un-dimensioned
+    records. An all-whitespace owner is a user slip, treated as "no match" rather than a
+    wildcard, matching the `--grep` needle rule.
+    """
+    probe = needle.strip().lower()
+    if not probe:
+        return False
+    owners = rec.get("owners")
+    if not isinstance(owners, list):
+        return False
+    return any(probe in str(o).lower() for o in owners)
+
+
 def _incident_passes(
     rec: dict,
     min_rank: Optional[int],
@@ -1715,6 +1737,7 @@ def _incident_passes(
     fresh_after: Optional[float] = None,
     standing_before: Optional[float] = None,
     kind: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> bool:
     """True if a remembered incident survives the `ogle incidents` triage filters.
 
@@ -1742,6 +1765,12 @@ def _incident_passes(
     include it — isolate one failure mode (e.g. only `freshness` incidents). A record with no
     recorded kinds (legacy, predating kind tracking) has an unknown dimension set, so it's
     dropped rather than guessed — same rule as the timed filters above.
+    `owner` (None = no owner filter) keeps only incidents one of whose recorded owner display
+    names contains it (case-insensitive substring) — the on-call "which drift is mine to
+    page?" query over the owner provenance the walk persists. A record with no owners (a
+    bare-ping capture or a legacy record predating owner tracking) has an unknown owner set
+    and can't be proven owned by anyone, so it's dropped rather than guessed — same rule as
+    `kind`.
     All filters are ANDed; passing none keeps everything.
     """
     if serving_only and not rec.get("serving"):
@@ -1753,6 +1782,8 @@ def _incident_passes(
     if min_count is not None and int(rec.get("count", 0)) < min_count:
         return False
     if needle is not None and not _incident_matches_needle(rec, needle):
+        return False
+    if owner is not None and not _incident_matches_owner(rec, owner):
         return False
     if stale_before is not None:
         ls = rec.get("last_seen")
@@ -2127,6 +2158,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
     min_count = getattr(args, "min_count", None)
     needle = getattr(args, "grep", None)
     kind = getattr(args, "kind", None)
+    owner = getattr(args, "owner", None)
 
     # `--stale AGE`: keep only drift last seen longer ago than AGE (e.g. `--stale 7d`) — the
     # resolve/forget candidates that stopped recurring. Parsed against a single `now` so the
@@ -2179,6 +2211,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         or fresh_after is not None
         or standing_before is not None
         or kind is not None
+        or owner is not None
     )
     records = [
         r
@@ -2193,6 +2226,7 @@ def cmd_incidents(args: argparse.Namespace) -> int:
             fresh_after,
             standing_before,
             kind,
+            owner,
         )
     ]
 
@@ -3743,6 +3777,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Only show incidents whose title or fingerprint contains TEXT "
         "(case-insensitive) — find specific drift in a large memory.",
+    )
+    incidents.add_argument(
+        "--owner",
+        metavar="NAME",
+        default=None,
+        help="Only show incidents owned by NAME (case-insensitive substring of an owner "
+        "display name) — the on-call 'which drift is mine to page?' query, e.g. `--owner "
+        "alice --fingerprints | ogle resolve -`. Drops incidents with no recorded owner "
+        "(offline/bare-ping captures and legacy records).",
     )
     incidents.add_argument(
         "--stale",

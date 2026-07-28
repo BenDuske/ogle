@@ -2116,6 +2116,90 @@ def test_incidents_grep_registered_in_help():
     assert build_parser().parse_args(["incidents"]).grep is None
 
 
+# ---- `ogle incidents --owner`: the "which drift is mine to page?" filter -------------
+def test_incidents_owner_matches(tmp_path, capsys):
+    # --owner keeps only incidents one of whose recorded owners contains the name.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_a", severity="high", title="orders drift", owners=["alice", "bob"])
+    s.record_incident("fp_b", severity="high", title="customers drift", owners=["carol"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--owner", "alice", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fp_a"]  # carol's incident is not alice's to page
+
+
+def test_incidents_owner_is_case_insensitive_substring(tmp_path, capsys):
+    # A partial, differently-cased name still matches a full owner display name.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_a", severity="high", title="drift", owners=["Alice Smith"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--owner", "ALICE", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["fp_a"]  # "ALICE" is a substring of "Alice Smith"
+
+
+def test_incidents_owner_composes_with_min_severity(tmp_path, capsys):
+    # --owner AND --min-severity: both the ownership and the severity floor must hold.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("hi", severity="high", title="drift", owners=["alice"])
+    s.record_incident("lo", severity="low", title="drift", owners=["alice"])
+    s.save()
+    rc = main(["incidents", "--store", str(store_path),
+               "--owner", "alice", "--min-severity", "high", "--json"])
+    assert rc == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["hi"]  # both alice's; the low one is below the floor
+
+
+def test_incidents_owner_drops_unowned(tmp_path, capsys):
+    # An incident with no recorded owners can't be proven owned by anyone, so a named
+    # --owner filter drops it rather than guessing (parity with --kind on legacy records).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("owned", severity="high", title="drift", owners=["alice"])
+    s.record_incident("bare", severity="high", title="drift")  # captured offline, no owners
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--owner", "alice", "--json"]) == 0
+    fps = [e["fingerprint"] for e in json.loads(capsys.readouterr().out)["incidents"]]
+    assert fps == ["owned"]  # the owner-less bare-ping incident is dropped
+
+
+def test_incidents_owner_empty_matches_nothing(tmp_path, capsys):
+    # An all-whitespace owner is a user slip, not a wildcard — it matches nothing.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fp_a", severity="high", title="drift", owners=["alice"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--owner", "   ", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["incidents"] == []
+
+
+def test_incidents_owner_fingerprints_feed_resolve(tmp_path):
+    # The scriptable payoff: `incidents --owner NAME --fingerprints` selects one operator's
+    # drift so `resolve` can clear exactly their incidents in one pipe.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("mine", severity="high", title="drift", owners=["alice"])
+    s.record_incident("theirs", severity="high", title="drift", owners=["bob"])
+    s.save()
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert main(["incidents", "--store", str(store_path),
+                     "--owner", "alice", "--fingerprints"]) == 0
+    assert buf.getvalue().split() == ["mine"]  # only alice's fingerprint, ready for resolve
+
+
+def test_incidents_owner_registered_in_help():
+    ns = build_parser().parse_args(["incidents", "--owner", "alice"])
+    assert ns.owner == "alice"
+    # Default is None (no owner filter) when the flag is omitted.
+    assert build_parser().parse_args(["incidents"]).owner is None
+
+
 # ---- `ogle incidents --summary`: aggregate rollup of the memory ---------------------
 def test_incidents_summary_json_shape(tmp_path, capsys):
     # The rollup counts by severity, serving-path, recurrence, and total sightings.

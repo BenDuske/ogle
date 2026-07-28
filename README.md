@@ -590,6 +590,7 @@ ogle incidents --serving-only           # only incidents that touch a serving pa
 ogle incidents --kind freshness         # only incidents including one drift dimension (schema/volume/quality/distribution/mean/stdev/range/freshness)
 ogle incidents --min-count 3            # only chronic/flapping drift seen 3+ times
 ogle incidents --grep customers         # find drift by keyword (title or fingerprint, case-insensitive)
+ogle incidents --owner alice            # only drift owned by alice — "which incidents are mine to page?"
 ogle incidents --stale 7d               # only drift NOT seen in the last 7 days (resolve candidates)
 ogle incidents --fresh 1h               # only drift seen within the last hour (currently-active set)
 ogle incidents --fresh 7d --stale 1h    # window: seen between 7d and 1h ago (--fresh + --stale compose)
@@ -628,7 +629,13 @@ same `owners` list. Like every provenance field it reflects the *latest* sightin
 owner refreshes it) but is deliberately **never** part of the dedup fingerprint — changing an owner
 is not drift and must not re-page an open incident. An unowned dataset, an offline (`--signatures`)
 run with no ownership source, or an incident remembered by an older Ogle simply omits the marker
-rather than faking an owner.
+rather than faking an owner. Because the owners are persisted, `--owner <name>` turns them into a
+triage filter — the on-call "which drift is mine to page?" query — matching a case-insensitive
+substring of any owner display name (`--owner alice` finds "Alice Smith") and composing with every
+other filter and `--fingerprints`, so `ogle incidents --owner alice --fingerprints | ogle resolve -`
+clears exactly one operator's drift. An incident with no recorded owner can't be proven owned by
+anyone, so a named `--owner` drops it — the same "never guess" rule `--kind` applies to un-dimensioned
+records.
 
 Each incident line carries the **age of its most recent sighting** (`last seen 3h ago`, or
 `just now` for a fresh one) when Ogle has a timestamp for it — the temporal signal that tells a
