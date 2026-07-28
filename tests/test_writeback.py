@@ -868,3 +868,44 @@ def test_writeback_backend_read_then_write_round_trip(stub_writeback_sdk):
 
     emitted_urns = {assoc.tag for assoc in graph.emitted[0].aspect.tags}
     assert emitted_urns == {OGLE_DRIFT_TAG, _SEV_HIGH}   # merged, nothing dropped
+
+
+def test_writeback_backend_builds_live_graph_from_gms_server_when_graph_none(
+    stub_writeback_sdk, monkeypatch
+):
+    """graph=None -> construct a live DataHubGraph(DataHubGraphConfig(server=gms_server)).
+
+    Mirror of the walker backend pin. This is the WRITE seam's live-adapter construction:
+    every other writeback test injects a fake graph, so the lazy SDK-client import — the
+    only line that reaches for a real DataHub client on the mutating path — was uncovered.
+    Pin that graph=None threads the caller's gms_server verbatim into the built config.
+    """
+    import sys
+    import types
+
+    built = {}
+
+    class FakeDataHubGraphConfig:
+        def __init__(self, server):
+            self.server = server
+
+    class FakeDataHubGraph:
+        def __init__(self, config):
+            built["config"] = config
+
+    client_mod = types.ModuleType("datahub.ingestion.graph.client")
+    client_mod.DataHubGraph = FakeDataHubGraph
+    client_mod.DataHubGraphConfig = FakeDataHubGraphConfig
+    monkeypatch.setitem(sys.modules, "datahub.ingestion", types.ModuleType("datahub.ingestion"))
+    monkeypatch.setitem(
+        sys.modules, "datahub.ingestion.graph", types.ModuleType("datahub.ingestion.graph")
+    )
+    monkeypatch.setitem(sys.modules, "datahub.ingestion.graph.client", client_mod)
+
+    from ogle.writeback import DataHubWritebackBackend
+
+    backend = DataHubWritebackBackend(graph=None, gms_server="http://gms.example:9090")
+
+    assert isinstance(backend._graph, FakeDataHubGraph)
+    assert isinstance(built["config"], FakeDataHubGraphConfig)
+    assert built["config"].server == "http://gms.example:9090"

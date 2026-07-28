@@ -1122,3 +1122,44 @@ def test_datahubbackend_discover_returns_only_serving_models(stub_datahub_sdk):
 
     assert backend.discover_deployed_models() == [serving]
     assert graph.filter_arg == ["mlModel"]  # enumerated the right entity type
+
+
+def test_datahubbackend_builds_live_graph_from_gms_server_when_graph_none(
+    stub_datahub_sdk, monkeypatch
+):
+    """graph=None -> construct a live DataHubGraph(DataHubGraphConfig(server=gms_server)).
+
+    Every other backend test injects a fake graph, so the lazy live-adapter construction
+    path — the ONE line that actually reaches for the SDK's client at runtime — was never
+    exercised. Pin it: the SDK client is imported lazily (only when graph is None) and the
+    caller's gms_server is threaded verbatim into the config the graph is built from.
+    """
+    import sys
+    import types
+
+    built = {}
+
+    class FakeDataHubGraphConfig:
+        def __init__(self, server):
+            self.server = server
+
+    class FakeDataHubGraph:
+        def __init__(self, config):
+            built["config"] = config
+
+    client_mod = types.ModuleType("datahub.ingestion.graph.client")
+    client_mod.DataHubGraph = FakeDataHubGraph
+    client_mod.DataHubGraphConfig = FakeDataHubGraphConfig
+    # Parent packages must resolve before the `from ... import` reaches the stub.
+    monkeypatch.setitem(sys.modules, "datahub.ingestion", types.ModuleType("datahub.ingestion"))
+    monkeypatch.setitem(
+        sys.modules, "datahub.ingestion.graph", types.ModuleType("datahub.ingestion.graph")
+    )
+    monkeypatch.setitem(sys.modules, "datahub.ingestion.graph.client", client_mod)
+
+    backend = DataHubBackend(graph=None, gms_server="http://gms.example:9090")
+
+    # The live graph was constructed, and our server flowed through the config verbatim.
+    assert isinstance(backend._graph, FakeDataHubGraph)
+    assert isinstance(built["config"], FakeDataHubGraphConfig)
+    assert built["config"].server == "http://gms.example:9090"
