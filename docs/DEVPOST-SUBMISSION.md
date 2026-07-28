@@ -109,7 +109,7 @@ pip install -e ".[dev]"
 pytest -q
 
 # 2. Offline demo — one keyless command, zero setup (the flagship judge path)
-ogle demo                       # seeds healthy, re-checks drifted, prints the alert; exit 0
+ogle demo                       # seeds healthy, re-checks drifted, fires the HIGH alert; exit 1 (drift found)
 
 #    …what `ogle demo` runs under the hood, if you want to drive it by hand
 #    (uses a scratch --store you own; the drift check exits 1 by design):
