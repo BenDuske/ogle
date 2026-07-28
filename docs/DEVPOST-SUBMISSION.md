@@ -108,7 +108,11 @@ wrapper back upstream as an OSS contribution.
 pip install -e ".[dev]"
 pytest -q
 
-# 2. Offline demo — reproduces the sample drift alert end-to-end
+# 2. Offline demo — one keyless command, zero setup (the flagship judge path)
+ogle demo                       # seeds healthy, re-checks drifted, prints the alert; exit 0
+
+#    …what `ogle demo` runs under the hood, if you want to drive it by hand
+#    (uses a scratch --store you own; the drift check exits 1 by design):
 ogle check --store demo.json --signatures examples/demo/healthy-signatures.json   # seeds, exit 0
 ogle check --store demo.json --signatures examples/demo/drifted-signatures.json   # alerts, exit 1
 
@@ -118,8 +122,10 @@ python scripts/inject-ml-lineage.py --gms http://localhost:8080
 ogle check --gms http://localhost:8080 --discover --store live.json
 ```
 
-The offline demo in step 2 needs no DataHub and no API key; its captured output is
-`examples/alerts/churn-orders-drift.md`. See `docs/live-verification.md` for a full
+`ogle demo` in step 2 needs no DataHub and no API key — it's the same drift-check
+code path as a live walk, and its section-2 alert is captured verbatim in
+`examples/alerts/churn-orders-drift.md`. The two explicit `ogle check` lines below it
+are the same demo driven by hand. See `docs/live-verification.md` for a full
 transcript of the live path against the DataHub quickstart.
 
 ---
