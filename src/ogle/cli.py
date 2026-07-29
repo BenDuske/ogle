@@ -2131,6 +2131,16 @@ def _incident_summary(records: List[dict]) -> dict:
     # count, not a partition. Uses the shared `_incident_is_unowned` predicate so it can never
     # disagree with the `unowned` tally or the `ogle incidents --unowned` filter.
     serving_unowned = 0
+    # Serving ∩ unowned ∩ recurring — the APEX page, the single worst incident class there is:
+    # drift on a live serving path that ALSO keeps coming back AND names no owner (a deployed
+    # model repeatedly fed drifted data, never resolved, with nobody on the hook). The triple
+    # intersection is NOT derivable from the two pairwise counts above — serving_recurring and
+    # serving_unowned can overlap by anywhere from 0 to the smaller of the two, so a consumer
+    # holding both still can't tell how many serving incidents are BOTH chronic AND orphaned.
+    # Reuses the exact same predicates (serving flag, count>=2, `_incident_is_unowned`) as the
+    # marginals feeding it, so it can never exceed serving_recurring or serving_unowned. A
+    # standalone risk count, not a partition — the one to page first above every other class.
+    serving_unowned_recurring = 0
     total_sightings = 0
     # Orphaned-drift tally — incidents with NO recorded owner display name (the set
     # `ogle incidents --unowned` surfaces and `--owner NAME` can never match). Not a
@@ -2157,15 +2167,24 @@ def _incident_summary(records: List[dict]) -> dict:
             serving_by_severity[key] += 1
         count = int(r.get("count", 0))
         total_sightings += count
-        if count >= 2:
+        # Evaluate each axis once so the pairwise and triple intersections below can never
+        # disagree with their marginals — same serving flag, same >=2 recurring test, same
+        # `_incident_is_unowned` predicate the standalone `unowned` tally uses.
+        is_serving = bool(r.get("serving"))
+        is_recurring = count >= 2
+        is_unowned = _incident_is_unowned(r)
+        if is_recurring:
             recurring += 1
             recurring_by_severity[key] += 1
-            if r.get("serving"):
+            if is_serving:
                 serving_recurring += 1
-        if _incident_is_unowned(r):
+        if is_unowned:
             unowned += 1
-            if r.get("serving"):
+            if is_serving:
                 serving_unowned += 1
+        # Apex triple: serving AND recurring AND unowned — worst class, paged first.
+        if is_serving and is_recurring and is_unowned:
+            serving_unowned_recurring += 1
         # Roster tally — +1 to each distinct real owner the incident names (shared
         # `_incident_owner_names` dedups within the record and drops blanks, so the roster and
         # the `unowned` count above can never disagree on who is a real owner).
@@ -2194,6 +2213,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "recurring_by_severity": recurring_by_severity,
         "serving_recurring": serving_recurring,
         "serving_unowned": serving_unowned,
+        "serving_unowned_recurring": serving_unowned_recurring,
         "by_kind": by_kind,
         "unowned": unowned,
         "by_owner": {display: cnt for display, cnt in owner_acc.values()},
@@ -2701,6 +2721,16 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # "assign an owner NOW, production is affected" signal, so it earns its own line.
         if summary.get("serving_unowned"):
             _emit(f"- 🆘 serving + unowned (page now): {summary['serving_unowned']}")
+        # Apex triple callout — serving-path drift that is chronic AND orphaned all at once (a
+        # live model repeatedly fed drifted data, never resolved, with nobody on the hook). The
+        # single worst class, non-derivable from the two pairwise counts above (they can overlap
+        # by any amount), so it earns its own line. Printed only when nonzero — 0 needs no noise,
+        # a positive count is the page-before-everything-else signal.
+        if summary.get("serving_unowned_recurring"):
+            _emit(
+                f"- 💀 serving + unowned + recurring (apex, page first): "
+                f"{summary['serving_unowned_recurring']}"
+            )
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:
             _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -3103,6 +3133,19 @@ def _render_prometheus(
         "ogle_incidents_serving_unowned",
         "Remembered incidents both on a serving path AND unowned (orphaned production drift, page now).",
         [(None, inc.get("serving_unowned", 0))],
+    )
+    # Serving ∩ unowned ∩ recurring — the apex: incidents on a serving path that ALSO recur AND
+    # name no owner (a deployed model repeatedly fed drifted data, never resolved, nobody on the
+    # hook). The triple intersection NOT derivable from ogle_incidents_serving_recurring +
+    # ogle_incidents_serving_unowned — those two pairwise gauges can overlap by any amount, so a
+    # dashboard holding both still can't tell how many serving incidents are BOTH chronic AND
+    # orphaned. Alert `ogle_incidents_serving_unowned_recurring > 0` for the page-before-all
+    # signal. Standalone count (not a partition, so no label); `.get` default keeps a legacy
+    # summary dict from crashing the scrape.
+    family(
+        "ogle_incidents_serving_unowned_recurring",
+        "Remembered incidents on a serving path AND recurring AND unowned (apex worst class, page first).",
+        [(None, inc.get("serving_unowned_recurring", 0))],
     )
     family(
         "ogle_muted_active",
@@ -3582,6 +3625,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     # drifted data with nobody on the hook — the assign-an-owner-NOW page.
     if inc.get("serving_unowned"):
         recurring_part += f" · 🆘 serving+unowned: {inc['serving_unowned']}"
+    # Apex triple appended inline when present: serving-path drift that is BOTH chronic AND
+    # orphaned — the same count `metrics` emits as ogle_incidents_serving_unowned_recurring, in
+    # the human snapshot. Omitted at zero (no noise), surfaced with a 💀 when a live model is
+    # being fed drifted data repeatedly, unresolved, with nobody on the hook — the single class
+    # to page before every other.
+    if inc.get("serving_unowned_recurring"):
+        recurring_part += f" · 💀 serving+unowned+recurring: {inc['serving_unowned_recurring']}"
     serving_line += recurring_part + f" · total sightings: {inc['total_sightings']}"
     _emit(serving_line)
     # Drift-DIMENSION texture: which failure modes the remembered incidents carry (schema/

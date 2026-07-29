@@ -298,7 +298,13 @@ first, ties alphabetical), and is skipped when nothing is owned — orphaned dri
 *and* unowned (production being fed drifted data with **nobody on the hook** to fix it — the
 assign-an-owner-NOW page) that the `serving-path` and `unowned` marginals **can't** reconstruct
 because neither reveals their overlap; shown only when nonzero, mirrored inline on `status` and by
-the `ogle_incidents_serving_unowned` gauge, with `--json` carrying it as `serving_unowned` — and
+the `ogle_incidents_serving_unowned` gauge, with `--json` carrying it as `serving_unowned` — an
+**apex** callout (`💀 serving + unowned + recurring (apex, page first): N`), the *triple*
+intersection of serving *and* recurring *and* unowned (a live model repeatedly fed drifted data,
+never resolved, with **nobody on the hook** — the single class to page before every other) that the
+two pairwise counts above **can't** reconstruct because they can overlap by any amount; shown only
+when nonzero, mirrored inline on `status` and by the `ogle_incidents_serving_unowned_recurring`
+gauge, with `--json` carrying it as `serving_unowned_recurring` — and
 **muted** — which, when anything is silenced, splits into `⛔ N permanent`
 (a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
 same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't
@@ -487,6 +493,15 @@ genuinely non-derivable from its two marginals (`ogle_incidents_serving` and
 `ogle_incidents_unowned` can both read `1` while their overlap is **zero**), so it earns its own
 gauge; alert `ogle_incidents_serving_unowned > 0` for an assign-an-owner-NOW page, and it surfaces
 in the human `status` / `incidents --summary` lines as `🆘 serving+unowned: N`, shown only when nonzero.
+
+Crossing all three axes at once gives the **apex** class: `ogle_incidents_serving_unowned_recurring`
+counts incidents that are on a serving path **and** recurring **and** unowned — a live model
+repeatedly fed drifted data, never resolved, with nobody on the hook. The *triple* intersection is
+non-derivable even from the two pairwise gauges above (`ogle_incidents_serving_recurring` and
+`ogle_incidents_serving_unowned` can both read `1` while their overlap is **zero**), so it earns its
+own gauge; alert `ogle_incidents_serving_unowned_recurring > 0` for the page-before-everything
+signal, and it surfaces in the human `status` / `incidents --summary` lines as
+`💀 serving+unowned+recurring: N`, shown only when nonzero.
 
 ### Corruption-resilient store (unattended-safe)
 

@@ -98,6 +98,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_sightings",
         "ogle_incidents_unowned",
         "ogle_incidents_serving_unowned",
+        "ogle_incidents_serving_unowned_recurring",
         "ogle_muted_active",
         "ogle_muted_permanent",
         "ogle_muted_snoozed",
@@ -253,6 +254,59 @@ def test_serving_unowned_gauge_zero_on_empty_store(tmp_path, capsys):
     assert main(["metrics", "--store", str(store_path)]) == 0
     samples, _, _ = _parse_prom(capsys.readouterr().out)
     assert samples["ogle_incidents_serving_unowned"] == "0"
+
+
+def test_serving_unowned_recurring_gauge_is_the_triple_not_a_derivation(tmp_path, capsys):
+    """The apex triple can't be reconstructed from the two pairwise gauges alone.
+
+    A serving+recurring-but-owned incident next to a serving+unowned-but-seen-once one gives
+    serving_recurring=1 and serving_unowned=1, yet ZERO incidents are all three — the
+    "production fed drifted data repeatedly with nobody to page" class is empty. Only the triple
+    gauge tells that truth; a min() or derivation over the two pairwise marginals reports 1.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # serving + recurring but OWNED
+    for _ in range(2):
+        s.record_incident("rec", severity="high", title="REC", datasets=1, serving=True,
+                           owners=["Alice"])
+    # serving + unowned but seen ONCE (not recurring)
+    s.record_incident("orph", severity="high", title="ORPH", datasets=1, serving=True, owners=[])
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    # Both pairwise gauges look "present"...
+    assert samples["ogle_incidents_serving_recurring"] == "1"
+    assert samples["ogle_incidents_serving_unowned"] == "1"
+    # ...but their triple overlap is empty — the truth a min()/derivation would get wrong.
+    assert samples["ogle_incidents_serving_unowned_recurring"] == "0"
+
+
+def test_serving_unowned_recurring_gauge_counts_the_real_triple(tmp_path, capsys):
+    # One incident that is serving AND recurring AND unowned — the apex page.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(3):
+        s.record_incident("apex", severity="high", title="APEX", datasets=1, serving=True,
+                           owners=[])
+    # serving + unowned but seen once → pairwise yes, triple no
+    s.record_incident("once", severity="low", title="ONCE", datasets=1, serving=True, owners=[])
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_serving_unowned"] == "2"
+    assert samples["ogle_incidents_serving_unowned_recurring"] == "1"
+
+
+def test_serving_unowned_recurring_gauge_zero_on_empty_store(tmp_path, capsys):
+    # Honest 0 (always emitted), so `ogle_incidents_serving_unowned_recurring > 0` is a stable
+    # apex-alert series that exists even when nothing is triply-bad rather than vanishing.
+    store_path = tmp_path / "baselines.json"
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_serving_unowned_recurring"] == "0"
 
 
 def test_serving_by_severity_disambiguates_flat_totals(tmp_path, capsys):

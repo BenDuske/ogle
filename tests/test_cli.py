@@ -2455,6 +2455,84 @@ def test_status_omits_serving_unowned_when_zero(tmp_path, capsys):
     assert "serving+unowned" not in capsys.readouterr().out
 
 
+def test_incidents_summary_serving_unowned_recurring_apex_callout(tmp_path, capsys):
+    # The apex class — serving-path drift that ALSO recurs AND is orphaned — earns its own 💀
+    # callout. "apex" is high, serving, seen 3×, no owner → the one incident that is all three.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(3):
+        s.record_incident("apex", severity="high", title="Apex", serving=True, owners=[])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "💀 serving + unowned + recurring (apex, page first): 1" in out
+
+
+def test_incidents_summary_serving_unowned_recurring_suppressed_when_zero(tmp_path, capsys):
+    # No incident is serving AND recurring AND unowned → the 💀 line is omitted (no noise),
+    # mirroring the pairwise callouts' zero-suppression.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(3):
+        s.record_incident("owned", severity="high", title="O", serving=True, owners=["Al"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "🔥 serving + recurring" in out          # it IS serving+recurring…
+    assert "serving + unowned + recurring" not in out  # …but owned, so NOT the apex triple
+
+
+def test_incidents_summary_triple_not_derivable_from_pairwise_counts(tmp_path, capsys):
+    # The triple is genuinely non-derivable: a store can have serving_recurring>0 AND
+    # serving_unowned>0 while their overlap (the triple) is ZERO. "rec" is serving+recurring but
+    # owned; "orph" is serving+unowned but seen once → serving_recurring=1, serving_unowned=1,
+    # yet serving_unowned_recurring=0. A naive min(serving_recurring, serving_unowned) would
+    # wrongly claim 1.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(2):
+        s.record_incident("rec", severity="high", title="R", serving=True, owners=["Al"])  # 2×, owned
+    s.record_incident("orph", severity="high", title="O", serving=True, owners=[])  # 1×, orphan
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["serving_recurring"] == 1 and summary["serving_unowned"] == 1
+    assert summary["serving_unowned_recurring"] == 0
+
+
+def test_incidents_summary_json_exposes_serving_unowned_recurring(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(2):
+        s.record_incident("apex", severity="high", title="Apex", serving=True, owners=[])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["serving_unowned_recurring"] == 1
+
+
+def test_status_surfaces_serving_unowned_recurring_inline(tmp_path, capsys):
+    # Parity with metrics/summary: `status` appends the apex triple to its serving-path line
+    # when nonzero.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    for _ in range(2):
+        s.record_incident("apex", severity="high", title="Apex", serving=True, owners=[])
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    assert "💀 serving+unowned+recurring: 1" in capsys.readouterr().out
+
+
+def test_status_omits_serving_unowned_recurring_when_zero(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", serving=True, owners=[])  # serving+unowned, 1×
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "🆘 serving+unowned: 1" in out              # it IS serving+unowned…
+    assert "serving+unowned+recurring" not in out       # …but seen once, so NOT the apex triple
+
+
 def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)
