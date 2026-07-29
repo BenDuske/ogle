@@ -2515,6 +2515,52 @@ def test_incidents_summary_by_owner_respects_filters(tmp_path, capsys):
     assert summary["by_owner"] == {"Alice": 1}
 
 
+def test_incidents_summary_serving_recurring_callout(tmp_path, capsys):
+    # The worst class — drift on a serving path that ALSO recurs — earns its own 🔥 callout.
+    # _seed_recurring_incidents: chronic (high, serving, 5×) is BOTH serving and recurring;
+    # twice (medium, 2×, not serving) recurs but isn't serving; once (low, 1×) is neither →
+    # serving_recurring == 1, and the callout names exactly that one incident.
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "🔥 serving + recurring (worst): 1" in capsys.readouterr().out
+
+
+def test_incidents_summary_serving_recurring_not_min_of_serving_and_recurring(tmp_path, capsys):
+    # The intersection is genuinely non-derivable: a store can have serving>0 AND recurring>0
+    # while their overlap is ZERO. Here "serv" serves but is seen once (not recurring) and "rec"
+    # recurs but never served → serving=1, recurring=1, but serving_recurring=0, so the callout
+    # is suppressed. A naive min(serving, recurring) would have wrongly claimed 1.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("serv", severity="high", title="S", datasets=1, serving=True)  # 1×, serving
+    for _ in range(3):
+        s.record_incident("rec", severity="high", title="R", datasets=1)  # 3×, not serving
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["serving"] == 1 and summary["recurring"] == 1
+    assert summary["serving_recurring"] == 0
+
+
+def test_incidents_summary_serving_recurring_suppressed_when_zero(tmp_path, capsys):
+    # No incident is both serving AND recurring → the 🔥 line is omitted entirely (no noise),
+    # mirroring the unowned line's zero-suppression.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("serv", severity="high", title="S", datasets=1, serving=True)  # serving, 1×
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "serving + recurring" not in capsys.readouterr().out
+
+
+def test_incidents_summary_json_exposes_serving_recurring(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    _seed_recurring_incidents(store_path)
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["serving_recurring"] == 1
+
+
 def test_incidents_summary_surfaces_open_drift_age(tmp_path, capsys):
     # Parity with `status`: the --summary rollup must surface how long the (filtered) drift has
     # sat — stalest first (resolve/forget candidate), freshest trailing (live-incident signal),
@@ -3642,6 +3688,32 @@ def test_status_serving_split_suppressed_when_nothing_serves(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "serving-path: 0 ·" in out  # bare count, immediately followed by the recurring sep
     assert "serving-path: 0 (" not in out
+
+
+def test_status_serving_recurring_callout(tmp_path, capsys):
+    # The status snapshot appends a 🔥 serving+recurring count when the worst class is present —
+    # the human twin of ogle_incidents_serving_recurring. Here "chronic" is high, serving, and
+    # seen twice (both serving AND recurring) → the inline callout reads 1.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("chronic", severity="high", title="C", datasets=2, serving=True)
+    s.record_incident("chronic", severity="high", title="C", datasets=2, serving=True)  # 2× → recurs
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "🔥 serving+recurring: 1" in capsys.readouterr().out
+
+
+def test_status_serving_recurring_suppressed_when_zero(tmp_path, capsys):
+    # A serving-but-not-recurring incident leaves the intersection empty → no 🔥 callout on the
+    # status line (zero-suppressed like the --summary twin).
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("serv", severity="high", title="S", datasets=1, serving=True)  # serving, 1×
+    s.save()
+    rc = main(["status", "--store", str(store)])
+    assert rc == 0
+    assert "serving+recurring" not in capsys.readouterr().out
 
 
 def test_status_by_dimension_line(tmp_path, capsys):

@@ -1920,6 +1920,13 @@ def _incident_summary(records: List[dict]) -> dict:
     by_kind["unknown"] = 0
     serving = 0
     recurring = 0
+    # Serving ∩ recurring — the worst single class: drift on a live serving path that ALSO
+    # keeps coming back (a deployed model repeatedly fed drifted data, never resolved). This
+    # is the missing pairwise intersection of {serving, recurring}: it is NOT derivable from
+    # serving_by_severity + recurring_by_severity (those cross each axis with severity, not with
+    # each other), so a scrape that has both still can't tell whether the serving drift and the
+    # recurring drift are the SAME incidents or disjoint. Standalone risk count, not a partition.
+    serving_recurring = 0
     total_sightings = 0
     # Orphaned-drift tally — incidents with NO recorded owner display name (the set
     # `ogle incidents --unowned` surfaces and `--owner NAME` can never match). Not a
@@ -1949,6 +1956,8 @@ def _incident_summary(records: List[dict]) -> dict:
         if count >= 2:
             recurring += 1
             recurring_by_severity[key] += 1
+            if r.get("serving"):
+                serving_recurring += 1
         if _incident_is_unowned(r):
             unowned += 1
         # Roster tally — +1 to each distinct real owner the incident names (shared
@@ -1977,6 +1986,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_by_severity": serving_by_severity,
         "recurring": recurring,
         "recurring_by_severity": recurring_by_severity,
+        "serving_recurring": serving_recurring,
         "by_kind": by_kind,
         "unowned": unowned,
         "by_owner": {display: cnt for display, cnt in owner_acc.values()},
@@ -2440,6 +2450,12 @@ def cmd_incidents(args: argparse.Namespace) -> int:
                 f"🟡 {rbs['low']} · • {rbs['unknown']})"
             )
         _emit(recurring_line)
+        # Serving ∩ recurring callout — the worst class (serving-path drift that also recurs),
+        # the pairwise intersection the two severity cross-tabs above can't express. Printed only
+        # when nonzero (like the unowned line): 0 needs no noise, but a positive count is the
+        # top-priority page — "a live model is being fed drifted data, repeatedly, unresolved."
+        if summary.get("serving_recurring"):
+            _emit(f"- 🔥 serving + recurring (worst): {summary['serving_recurring']}")
         # Drift-DIMENSION texture — parity with `status`'s "by dimension" line and the
         # ogle_incidents_by_kind gauge. NON-exclusive (an incident spanning two dimensions shows
         # in both), so it need not sum to `total`; only nonzero REAL dimensions are listed and the
@@ -2816,6 +2832,18 @@ def _render_prometheus(
         "ogle_incidents_recurring_by_severity",
         "Remembered recurring incidents, by severity (seen ≥2× AND severity).",
         [({"severity": s}, rbs[s]) for s in ("high", "medium", "low", "unknown")],
+    )
+    # Serving ∩ recurring — the worst class: incidents on a serving path that ALSO recur (a
+    # deployed model repeatedly fed drifted data, never resolved). The pairwise intersection
+    # NOT derivable from ogle_incidents_serving_by_severity + _recurring_by_severity (both cross
+    # with severity, neither with each other), so a dashboard holding both still can't tell if
+    # the serving drift and the recurring drift are the same incidents. Alert
+    # `ogle_incidents_serving_recurring > 0` for the top-priority page. Standalone count (not a
+    # partition, so no severity label); `.get` default keeps a legacy summary dict from crashing.
+    family(
+        "ogle_incidents_serving_recurring",
+        "Remembered incidents both on a serving path AND recurring (worst class, top page).",
+        [(None, inc.get("serving_recurring", 0))],
     )
     # Drift-DIMENSION breakdown — incidents carrying each kind (schema/volume/quality/
     # distribution/freshness). Unlike the severity splits this is NOT exclusive: an incident
@@ -3315,6 +3343,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             f" (🔴 {rbs['high']} · 🟠 {rbs['medium']} · "
             f"🟡 {rbs['low']} · • {rbs['unknown']})"
         )
+    # Worst-class intersection appended inline when present: serving-path drift that ALSO
+    # recurs — the same count `metrics` emits as ogle_incidents_serving_recurring, in the human
+    # snapshot. Omitted at zero (no noise), surfaced with a 🔥 when a live model is being fed
+    # drifted data repeatedly and unresolved — the single highest-priority page.
+    if inc.get("serving_recurring"):
+        recurring_part += f" · 🔥 serving+recurring: {inc['serving_recurring']}"
     serving_line += recurring_part + f" · total sightings: {inc['total_sightings']}"
     _emit(serving_line)
     # Drift-DIMENSION texture: which failure modes the remembered incidents carry (schema/

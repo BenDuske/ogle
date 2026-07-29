@@ -279,7 +279,11 @@ total sightings** — where the serving-path count, when anything is serving, ap
 severity split `(🔴 high · 🟠 medium · 🟡 low · • unknown)` so the load-bearing 🔴 *high-serving*
 page (a deployed model being fed drifted data right now) can't hide inside a flat total, the same
 cross-tab the `ogle_incidents_serving_by_severity` gauge exposes (the four buckets sum back to
-`serving-path`) — a **by-dimension** line (`🏷️ by dimension: schema 2 · freshness 1`) naming which
+`serving-path`) — a **worst-class** callout (`🔥 serving+recurring: N`), the pairwise intersection
+of serving *and* recurring (a live model being fed drifted data **repeatedly**, unresolved — the
+top-priority page) that the two per-severity cross-tabs **can't** reconstruct because each crosses
+its axis with severity, not with the other; shown only when nonzero and mirrored by the
+`ogle_incidents_serving_recurring` gauge — a **by-dimension** line (`🏷️ by dimension: schema 2 · freshness 1`) naming which
 failure modes the incidents carry, the human twin of `ogle_incidents_by_kind` (**non-exclusive** — a
 two-dimension incident shows in both — so it needn't sum to the total; the `unknown` bucket for
 legacy incidents is omitted here and the line is skipped entirely when nothing is attributed) — a
@@ -374,6 +378,11 @@ Prometheus reserves for counters): `ogle_up`, `ogle_watching_datasets` / `_field
 `ogle_incidents_serving_by_severity{severity="…"}`) / `_recurring` (split by severity in
 `ogle_incidents_recurring_by_severity{severity="…"}` — chronic ∩ severity; alert
 `{severity="high"} > 0` for high-severity drift that keeps coming back) / `_sightings`,
+`ogle_incidents_serving_recurring` (the worst class — incidents both on a serving path **and**
+recurring, a deployed model repeatedly fed drifted data and never resolved; the pairwise
+intersection **not** derivable from the two per-severity cross-tabs above, since each crosses its
+axis with severity rather than with the other, so alert `ogle_incidents_serving_recurring > 0` for
+the top-priority page),
 the drift-dimension breakdown `ogle_incidents_by_kind{kind="schema|volume|quality|distribution|mean|stdev|range|freshness|unknown"}`
 (which failure mode the incidents carry — the gauge twin of `incidents --kind`; **non-exclusive**,
 so an incident spanning two dimensions counts in both and the label sum can exceed
@@ -454,6 +463,14 @@ back" can't tell a benign low-severity flap from high-severity drift that recurr
 resolved — the festering-hot class. Alert `ogle_incidents_recurring_by_severity{severity="high"} > 0`;
 the four buckets carry honest `0`s and sum to `ogle_incidents_recurring`. Both cross-tabs also
 appear in the human `status` / `incidents --summary` lines (`🔁 recurring: N (🔴 … · 🟠 … · 🟡 … · • …)`).
+
+Crossing the two *base* axes with each other instead of with severity gives the worst class:
+`ogle_incidents_serving_recurring` counts incidents that are **both** on a serving path and
+recurring — a live model fed drifted data repeatedly and never resolved. It is genuinely
+non-derivable from the two per-severity cross-tabs (a store can read `serving 1` + `recurring 1`
+while their overlap is **zero**), so it earns its own gauge; alert
+`ogle_incidents_serving_recurring > 0` for the top-priority page, and it surfaces in the human
+`status` / `incidents --summary` lines as `🔥 serving+recurring: N`, shown only when nonzero.
 
 ### Corruption-resilient store (unattended-safe)
 

@@ -93,6 +93,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_serving_by_severity",
         "ogle_incidents_recurring",
         "ogle_incidents_recurring_by_severity",
+        "ogle_incidents_serving_recurring",
         "ogle_incidents_by_kind",
         "ogle_incidents_sightings",
         "ogle_incidents_unowned",
@@ -162,6 +163,42 @@ def test_metrics_values_match_store(tmp_path, capsys):
     assert samples['ogle_incidents_recurring_by_severity{severity="medium"}'] == "0"
     assert samples['ogle_incidents_recurring_by_severity{severity="low"}'] == "0"
     assert samples['ogle_incidents_recurring_by_severity{severity="unknown"}'] == "0"
+    # serving ∩ recurring: "hi" is the one incident that is BOTH serving and recurring (2×);
+    # md/lo are neither serving nor recurring → the worst-class gauge reads 1.
+    assert samples["ogle_incidents_serving_recurring"] == "1"
+
+
+def test_serving_recurring_gauge_is_the_intersection_not_a_derivation(tmp_path, capsys):
+    """serving_recurring can't be reconstructed from serving + recurring alone.
+
+    A serving-but-once incident next to a recurring-but-never-served one gives serving=1 and
+    recurring=1, yet ZERO incidents are both — the doubly-bad "live model fed drifted data,
+    repeatedly" class is empty. Only the intersection gauge tells that truth.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("serv", severity="high", title="SERV", datasets=1, serving=True)  # 1×
+    s.record_incident("rec", severity="high", title="REC", datasets=1, serving=False)
+    s.record_incident("rec", severity="high", title="REC", datasets=1, serving=False)  # 2×
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # Both flat totals look "present"...
+    assert samples["ogle_incidents_serving"] == "1"
+    assert samples["ogle_incidents_recurring"] == "1"
+    # ...but their intersection is empty — the truth a min()/derivation would get wrong.
+    assert samples["ogle_incidents_serving_recurring"] == "0"
+
+
+def test_serving_recurring_gauge_zero_on_empty_store(tmp_path, capsys):
+    # Honest 0 (always emitted), so `ogle_incidents_serving_recurring > 0` is a stable alert
+    # series that exists even when nothing is hot rather than vanishing.
+    store_path = tmp_path / "baselines.json"
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_serving_recurring"] == "0"
 
 
 def test_serving_by_severity_disambiguates_flat_totals(tmp_path, capsys):
