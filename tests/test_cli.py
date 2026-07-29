@@ -4864,6 +4864,163 @@ def test_diff_json_identical_exits_zero(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["diff"]["identical"] is True
 
 
+def _seed_diff_rich(store_path):
+    """One watched dataset with a full numeric profile on `id`, so known→known moves on
+    every moment dimension (unique/mean/stdev/min/max/quantile) can be exercised — not just
+    the unknown→known appearance path that the bare `_seed_diff` baseline is limited to."""
+    BaselineStore(
+        path=store_path,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+                field_unique_fractions={"id": 1.0},
+                field_means={"id": 50.0},
+                field_stdevs={"id": 5.0},
+                field_mins={"id": 0.0},
+                field_maxes={"id": 100.0},
+                field_quantiles={"id": [(0.5, 50.0), (0.9, 90.0)]},
+                computed_at="2026-07-01T00:00:00Z",
+            )
+        },
+    ).save()
+    return store_path
+
+
+def _rich_cand(tmp_path, **overrides):
+    """A candidate signature matching `_seed_diff_rich`'s baseline except for `overrides`,
+    so a single dimension can be moved in isolation and everything else stays identical."""
+    base = dict(
+        schema_fields=[("id", "int"), ("email", "string")],
+        row_count=1000,
+        field_null_fractions={"email": 0.25},
+        field_unique_fractions={"id": 1.0},
+        field_means={"id": 50.0},
+        field_stdevs={"id": 5.0},
+        field_mins={"id": 0.0},
+        field_maxes={"id": 100.0},
+        field_quantiles={"id": [(0.5, 50.0), (0.9, 90.0)]},
+        computed_at="2026-07-01T00:00:00Z",
+    )
+    base.update(overrides)
+    return _write_sigs(tmp_path / "c.json", [_sig(**base)])
+
+
+def test_diff_rich_baseline_identical_exits_zero(tmp_path, capsys):
+    """A candidate identical across every profiled dimension is `identical` — the expanded
+    diff must not manufacture drift from the extra moment fields it now compares."""
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path)
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 0
+    assert "no drift" in capsys.readouterr().out.lower()
+
+
+def test_diff_unique_fraction_move_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_unique_fractions={"id": 0.40})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "`id` : 100.0% → 40.0% unique" in capsys.readouterr().out
+
+
+def test_diff_mean_move_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_means={"id": 75.0})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "**means:**" in out
+    assert "`id` : 50 → 75" in out
+
+
+def test_diff_stdev_move_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_stdevs={"id": 12.5})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "**stdevs:**" in out
+    assert "`id` : 5 → 12.5" in out
+
+
+def test_diff_range_move_exits_one(tmp_path, capsys):
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_maxes={"id": 250.0})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "**ranges (min/max):**" in out
+    assert "`id` : [0, 100] → [0, 250]" in out
+
+
+def test_diff_shape_move_exits_one(tmp_path, capsys):
+    """A quantile CDF reshaping while mean+stdev hold is the residual `shape` signal."""
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_quantiles={"id": [(0.5, 55.0), (0.9, 88.0)]})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "**distribution shape (quantiles):**" in out
+    assert "`id` : shape shifted (mean/stdev held)" in out
+
+
+def test_diff_moment_float_jitter_not_reported(tmp_path, capsys):
+    """A sub-`isclose` re-profiling wobble on a moment must not surface as drift."""
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, field_means={"id": 50.0 + 1e-11})
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 0
+    assert "no drift" in capsys.readouterr().out.lower()
+
+
+def test_diff_freshness_advance_on_identical_data_exits_zero(tmp_path, capsys):
+    """Same data, newer profile timestamp = a healthy refresh, NOT drift — exit 0, but the
+    advance is surfaced so a legible 'refreshed' line replaces a bare 'no drift'."""
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(tmp_path, computed_at="2026-07-15T00:00:00Z")
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no drift" in out.lower()
+    assert "profile refreshed 2026-07-01T00:00:00Z → 2026-07-15T00:00:00Z" in out
+
+
+def test_diff_rich_json_carries_new_dimensions(tmp_path, capsys):
+    """The --json contract exposes every new dimension key so scripts can read them."""
+    store = tmp_path / "s.json"
+    _seed_diff_rich(store)
+    cand = _rich_cand(
+        tmp_path,
+        field_unique_fractions={"id": 0.40},
+        field_means={"id": 75.0},
+        field_stdevs={"id": 12.5},
+        field_maxes={"id": 250.0},
+        field_quantiles={"id": [(0.5, 55.0), (0.9, 88.0)]},
+        computed_at="2026-07-15T00:00:00Z",
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand),
+               "--json"])
+    assert rc == 1
+    d = json.loads(capsys.readouterr().out)["diff"]
+    assert d["unique_fraction_changed"][0]["path"] == "id"
+    assert d["mean_changed"][0] == {"path": "id", "old": 50.0, "new": 75.0}
+    assert d["stdev_changed"][0] == {"path": "id", "old": 5.0, "new": 12.5}
+    assert d["range_changed"][0]["path"] == "id"
+    assert d["range_changed"][0]["max_new"] == 250.0
+    assert d["shape_changed"] == ["id"]
+    assert d["computed_at"]["changed"] is True
+
+
 def test_diff_registered_in_help_signatures_required():
     ns = build_parser().parse_args(
         ["diff", CUSTOMERS_URN, "--signatures", "x.json"]

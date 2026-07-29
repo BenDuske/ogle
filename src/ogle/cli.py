@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -1456,18 +1457,116 @@ def _fmt_frac(v: Optional[float]) -> str:
     return f"{v * 100:.1f}%" if v is not None else "unknown"
 
 
+def _fmt_num(v: Optional[float]) -> str:
+    """A numeric moment (mean/stdev/min/max) for display, or `unknown` when unmeasured.
+
+    Uses `:g` so integers stay clean (5.0 → `5`) and long floats don't sprawl, while a
+    missing value renders `unknown` rather than a fabricated 0 — same "not measured ≠ zero"
+    rule as `_fmt_frac`.
+    """
+    return f"{v:g}" if v is not None else "unknown"
+
+
+def _moment_moved(o: Optional[float], n: Optional[float]) -> bool:
+    """Did a single numeric moment (mean/stdev/min/max) move between two sightings?
+
+    A value appearing or disappearing (known↔unknown) is a move; two known values move
+    only when they differ beyond float-representation noise (`isclose` rel_tol 1e-9). Unlike
+    the bounded fractions, a moment is an unbounded real, so no absolute percentage-point band
+    generalizes — comparison is exact up to float jitter.
+    """
+    if o is None and n is None:
+        return False
+    if o is None or n is None:
+        return True
+    return not math.isclose(o, n, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _moment_moves(
+    old_map: Dict[str, float], new_map: Dict[str, float], common: Sequence[str]
+) -> List[dict]:
+    """Per-field numeric-moment moves (mean or stdev) over fields present in BOTH signatures.
+
+    Any genuine move is investigative signal an operator wants after a page — this is why
+    `diff` surfaces a sub-pager-threshold mean shift that `check` itself, gated at ±25%
+    (`mean_rel_threshold`), would not page on. `diff` answers "what changed?", not "is it bad
+    enough to page?".
+    """
+    moves = []
+    for p in common:
+        o = old_map.get(p)
+        n = new_map.get(p)
+        if _moment_moved(o, n):
+            moves.append({"path": p, "old": o, "new": n})
+    return moves
+
+
+def _fraction_moves(
+    old_map: Dict[str, float], new_map: Dict[str, float], common: Sequence[str]
+) -> List[dict]:
+    """Per-field fraction moves (null-rate or unique-rate) over fields present in BOTH
+    signatures.
+
+    A fraction appearing/disappearing (known↔unknown) is a change; two known fractions must
+    move by more than a rounded 0.1 percentage point to count, which drops re-profiling float
+    jitter so a re-profiled-but-stable column doesn't show as drift. Fields added or removed
+    already carry their null/unique story on the add/remove line, so only *surviving* fields
+    are compared here (no double-counting).
+    """
+    moves = []
+    for p in common:
+        o = old_map.get(p)
+        n = new_map.get(p)
+        if o is None and n is None:
+            continue
+        if o is None or n is None or round(o * 100, 1) != round(n * 100, 1):
+            moves.append({"path": p, "old": o, "new": n})
+    return moves
+
+
+def _quantiles_differ(
+    o: Optional[Sequence[Tuple[float, float]]], n: Optional[Sequence[Tuple[float, float]]]
+) -> bool:
+    """Do two per-field quantile CDFs differ? A quantile set appearing/disappearing or
+    changing length counts; otherwise every (point, value) pair must hold to float noise."""
+    if bool(o) != bool(n):
+        return True
+    if not o and not n:
+        return False
+    if len(o) != len(n):
+        return True
+    for (oq, ov), (nq, nv) in zip(o, n):
+        if not math.isclose(oq, nq, rel_tol=1e-9, abs_tol=1e-12) or not math.isclose(
+            ov, nv, rel_tol=1e-9, abs_tol=1e-12
+        ):
+            return True
+    return False
+
+
 def _diff_signatures(old: DatasetSignature, new: DatasetSignature) -> dict:
     """Pure structural diff of two signatures (old baseline vs new candidate).
 
-    Returns the four field-level deltas plus row-count/schema-hash facets. Split out from
-    the command so the comparison logic is unit-testable with no store or file I/O.
+    Split out from the command so the comparison logic is unit-testable with no store or
+    file I/O. Covers every dimension the scorer scores, so a candidate `diff` reports as
+    `identical` is genuinely one Ogle would NOT page on — the investigative view and the
+    pager can no longer disagree:
 
-    Null-fraction changes are reported ONLY for fields present in both signatures — a
-    field that was added or removed already carries its null story on the add/remove line,
-    so re-reporting it here would be double-counting. A null fraction that appears or
-    disappears on a *surviving* field (known↔unknown) is a real change and is kept. The
-    0.1-percentage-point rounding gate drops float noise so a re-profiled-but-stable
-    column doesn't show as drift.
+      * SCHEMA   — fields added / removed / retyped, and the schema-hash flip.
+      * VOLUME   — row-count delta.
+      * QUALITY  — per-field null-fraction moves (0.1pp jitter gate).
+      * CATEGORICAL — per-field unique-fraction moves (same 0.1pp gate).
+      * MEAN / STDEV — per-field numeric-moment moves (covariate shift, variance stall).
+      * RANGE    — per-field min/max envelope moves.
+      * SHAPE    — per-field quantile-CDF change (the residual a held mean+stdev misses).
+
+    Field-level moves (null/unique/mean/stdev/range/shape) are reported ONLY for fields
+    present in BOTH signatures — a field that was added or removed already carries its story
+    on the add/remove line, so re-reporting it there would double-count.
+
+    Freshness (`computed_at`) is surfaced as an *informational* facet but is deliberately
+    kept OUT of `identical`: a healthy re-profile ADVANCES the profile timestamp, so folding
+    it in would make every normal refresh read as drift. The pager's freshness rule is an
+    absolute-age SLA against `now`, which a baseline-vs-candidate delta has no basis to judge.
     """
     old_fields = {f.path: f.native_type for f in old.schema_fields}
     new_fields = {f.path: f.native_type for f in new.schema_fields}
@@ -1487,16 +1586,38 @@ def _diff_signatures(old: DatasetSignature, new: DatasetSignature) -> dict:
         if old_fields[p] != new_fields[p]
     ]
 
-    null_changed = []
+    null_changed = _fraction_moves(
+        old.field_null_fractions, new.field_null_fractions, common
+    )
+    unique_changed = _fraction_moves(
+        old.field_unique_fractions, new.field_unique_fractions, common
+    )
+    mean_changed = _moment_moves(old.field_means, new.field_means, common)
+    stdev_changed = _moment_moves(old.field_stdevs, new.field_stdevs, common)
+
+    # RANGE is the min/max envelope together — one line per field whose min OR max escaped,
+    # carrying both bounds so the reader sees the whole envelope move at a glance.
+    range_changed = []
     for p in common:
-        o = old.field_null_fractions.get(p)
-        n = new.field_null_fractions.get(p)
-        if o is None and n is None:
-            continue
-        # A fraction appearing/disappearing is a change; two known fractions must move by
-        # more than a rounded 0.1pp to count (drops re-profiling float jitter).
-        if o is None or n is None or round(o * 100, 1) != round(n * 100, 1):
-            null_changed.append({"path": p, "old": o, "new": n})
+        mino, minn = old.field_mins.get(p), new.field_mins.get(p)
+        maxo, maxn = old.field_maxes.get(p), new.field_maxes.get(p)
+        min_moved, max_moved = _moment_moved(mino, minn), _moment_moved(maxo, maxn)
+        if min_moved or max_moved:
+            range_changed.append(
+                {
+                    "path": p,
+                    "min_old": mino, "min_new": minn, "min_changed": min_moved,
+                    "max_old": maxo, "max_new": maxn, "max_changed": max_moved,
+                }
+            )
+
+    # SHAPE is the moment-invariant residual: a quantile CDF that reshaped while its mean and
+    # stdev held. Reported as the sorted list of surviving fields whose quantiles moved.
+    shape_changed = [
+        p
+        for p in common
+        if _quantiles_differ(old.field_quantiles.get(p), new.field_quantiles.get(p))
+    ]
 
     row_changed = old.row_count != new.row_count
     row_delta = (
@@ -1505,8 +1626,19 @@ def _diff_signatures(old: DatasetSignature, new: DatasetSignature) -> dict:
         else None
     )
     hash_changed = old.schema_hash != new.schema_hash
+    freshness_changed = old.computed_at != new.computed_at
+    # `computed_at` (freshness) is intentionally absent below — a healthy refresh advances it.
     identical = not (
-        added or removed or type_changed or null_changed or row_changed
+        added
+        or removed
+        or type_changed
+        or null_changed
+        or unique_changed
+        or mean_changed
+        or stdev_changed
+        or range_changed
+        or shape_changed
+        or row_changed
     )
 
     return {
@@ -1515,6 +1647,16 @@ def _diff_signatures(old: DatasetSignature, new: DatasetSignature) -> dict:
         "fields_removed": removed,
         "fields_type_changed": type_changed,
         "null_fraction_changed": null_changed,
+        "unique_fraction_changed": unique_changed,
+        "mean_changed": mean_changed,
+        "stdev_changed": stdev_changed,
+        "range_changed": range_changed,
+        "shape_changed": shape_changed,
+        "computed_at": {
+            "old": old.computed_at,
+            "new": new.computed_at,
+            "changed": freshness_changed,
+        },
         "row_count": {
             "old": old.row_count,
             "new": new.row_count,
@@ -1536,9 +1678,13 @@ def cmd_diff(args: argparse.Namespace) -> int:
     touches the store. Where `ogle check` walks live, scores, and *remembers*, `diff`
     answers the narrower investigative question after a page: "what EXACTLY changed on this
     table?" It reads the same offline signatures file `check --signatures` consumes (so the
-    dump you'd feed a dry-run doubles as the diff input) and prints the field-level delta —
-    fields added / removed / retyped, null-fraction moves, row-count change, and whether the
-    schema hash flipped.
+    dump you'd feed a dry-run doubles as the diff input) and prints the field-level delta
+    across every dimension the scorer weighs — schema (fields added / removed / retyped +
+    the hash flip), row-count, null- and unique-fraction moves, the numeric moments (mean,
+    stdev, min/max range), and distribution shape — plus an informational profile-timestamp
+    line. Because it covers all of them, a candidate it calls `identical` is one `check`
+    would NOT page on: the investigative view can no longer say "no drift" on the covariate
+    shift that fired the page.
 
     Exit codes are the scriptable drift verdict: 0 = identical to baseline (no drift),
     1 = differences found, 2 = can't compare (URN not watched, URN absent from the
@@ -1585,7 +1731,16 @@ def cmd_diff(args: argparse.Namespace) -> int:
         return 0 if d["identical"] else 1
 
     if d["identical"]:
-        _emit(f"**diff `{urn}`** — identical to baseline (no drift).")
+        ca = d["computed_at"]
+        if ca["changed"]:
+            # Same data, newer profile — a healthy refresh, not drift. Surface the advance so
+            # "no drift" doesn't hide that the timestamp moved (or, on a stall, that it didn't).
+            _emit(
+                f"**diff `{urn}`** — identical to baseline (no drift); profile refreshed "
+                f"{ca['old'] or 'unknown'} → {ca['new'] or 'unknown'}."
+            )
+        else:
+            _emit(f"**diff `{urn}`** — identical to baseline (no drift).")
         return 0
 
     _emit(f"**diff `{urn}`** — baseline → candidate")
@@ -1620,6 +1775,46 @@ def cmd_diff(args: argparse.Namespace) -> int:
         _emit("**null fractions:**")
         for f in d["null_fraction_changed"]:
             _emit(f"- `{f['path']}` : {_fmt_frac(f['old'])} → {_fmt_frac(f['new'])} null")
+
+    if d["unique_fraction_changed"]:
+        _emit("**unique fractions:**")
+        for f in d["unique_fraction_changed"]:
+            _emit(f"- `{f['path']}` : {_fmt_frac(f['old'])} → {_fmt_frac(f['new'])} unique")
+
+    if d["mean_changed"]:
+        _emit("**means:**")
+        for f in d["mean_changed"]:
+            _emit(f"- `{f['path']}` : {_fmt_num(f['old'])} → {_fmt_num(f['new'])}")
+
+    if d["stdev_changed"]:
+        _emit("**stdevs:**")
+        for f in d["stdev_changed"]:
+            _emit(f"- `{f['path']}` : {_fmt_num(f['old'])} → {_fmt_num(f['new'])}")
+
+    if d["range_changed"]:
+        _emit("**ranges (min/max):**")
+        for f in d["range_changed"]:
+            _emit(
+                f"- `{f['path']}` : "
+                f"[{_fmt_num(f['min_old'])}, {_fmt_num(f['max_old'])}] → "
+                f"[{_fmt_num(f['min_new'])}, {_fmt_num(f['max_new'])}]"
+            )
+
+    if d["shape_changed"]:
+        _emit("**distribution shape (quantiles):**")
+        for p in d["shape_changed"]:
+            _emit(f"- `{p}` : shape shifted (mean/stdev held)")
+
+    # Freshness is informational (not part of the drift verdict): show the profile-timestamp
+    # move so a stall — computed_at that DIDN'T advance — is legible even when it's the only
+    # thing an operator wanted to confirm.
+    ca = d["computed_at"]
+    if ca["changed"]:
+        _emit(
+            f"- profile timestamp: {ca['old'] or 'unknown'} → {ca['new'] or 'unknown'}"
+        )
+    elif ca["old"] is not None:
+        _emit(f"- profile timestamp: unchanged ({ca['old']})")
 
     return 1
 

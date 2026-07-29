@@ -572,12 +572,21 @@ ogle diff "urn:li:dataset:(dbt,shop.orders,PROD)" --signatures fresh.json --json
 ogle diff X --signatures fresh.json && echo "no drift"                              # scriptable gate (exit 0/1)
 ```
 
-The diff calls out fields **added** (`➕`), **removed** (`➖`), and **retyped** (`🔀 int → bigint`),
-**null-fraction** moves on surviving fields (`25.0% → 60.0% null`, with a 0.1pp rounding gate so
-re-profiling jitter isn't reported as drift), the **row-count** change with its delta, and whether the
-**schema hash** flipped. Exit codes are the drift verdict — **0** identical, **1** differences found,
-**2** can't compare (URN not watched, absent from the file, or a malformed file) — so preconditions
-stay off the 0/1 path and `ogle diff X --signatures f.json && …` branches cleanly.
+The diff covers **every dimension the scorer weighs**, so a candidate it reports as `identical` is
+genuinely one `check` would not page on — the investigative view can no longer disagree with the pager.
+It calls out fields **added** (`➕`), **removed** (`➖`), and **retyped** (`🔀 int → bigint`); the
+**row-count** change with its delta; **null-** and **unique-fraction** moves on surviving fields
+(`25.0% → 60.0% null`, with a 0.1pp rounding gate so re-profiling jitter isn't reported as drift); the
+numeric **means** and **stdevs** (`50 → 75`); the min/max **ranges** (`[0, 100] → [0, 250]`); the
+distribution **shape** (a quantile CDF that reshaped while its mean and stdev held — the residual a
+held mean+stdev misses); and whether the **schema hash** flipped. The **profile timestamp**
+(`computed_at`) is shown as an *informational* line but is deliberately kept out of the drift verdict:
+a healthy re-profile advances it, so a candidate that's identical apart from a newer timestamp still
+reports `no drift` (with the refresh surfaced). Moment moves use an `isclose` gate, so float-representation
+wobble on a re-profiled-but-stable column doesn't read as drift. Exit codes are the drift verdict —
+**0** identical, **1** differences found, **2** can't compare (URN not watched, absent from the file, or
+a malformed file) — so preconditions stay off the 0/1 path and `ogle diff X --signatures f.json && …`
+branches cleanly.
 
 ### Pruning the watch-list (`ogle forget`)
 
