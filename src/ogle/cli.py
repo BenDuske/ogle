@@ -1893,6 +1893,14 @@ def _incident_summary(records: List[dict]) -> dict:
     serving = 0
     recurring = 0
     total_sightings = 0
+    # Orphaned-drift tally — incidents with NO recorded owner display name (the set
+    # `ogle incidents --unowned` surfaces and `--owner NAME` can never match). Not a
+    # partition against any severity/serving split: an incident is unowned OR owned
+    # regardless of how hot it is, so this is a standalone risk axis. Lets a page-lead
+    # alert on drift nobody is on the hook for via the metrics gauge, same records the
+    # CLI filter lists. Uses the shared `_incident_is_unowned` predicate so the summary
+    # and the filter can never disagree on what "unowned" means.
+    unowned = 0
     for r in records:
         sev = r.get("severity")
         key = sev if sev in ("high", "medium", "low") else "unknown"
@@ -1905,6 +1913,8 @@ def _incident_summary(records: List[dict]) -> dict:
         if count >= 2:
             recurring += 1
             recurring_by_severity[key] += 1
+        if _incident_is_unowned(r):
+            unowned += 1
         # Attribute the incident to each dimension it recorded (deduped so a malformed repeat
         # can't double-count within one incident). No / empty / non-list `kinds` = a legacy
         # record with no tracked dimension → `unknown`, counted once.
@@ -1923,6 +1933,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "recurring": recurring,
         "recurring_by_severity": recurring_by_severity,
         "by_kind": by_kind,
+        "unowned": unowned,
         "total_sightings": total_sightings,
     }
 
@@ -2392,6 +2403,13 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         kind_parts = [f"{d.value} {bks[d.value]}" for d in DriftKind if bks[d.value]]
         if kind_parts:
             _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
+        # Orphaned-drift callout — parity with the ogle_incidents_unowned gauge and
+        # `ogle incidents --unowned`. Printed only when nonzero: a summary with every
+        # incident owned needs no "0 orphaned" noise, but a positive count is a page-lead
+        # signal ("N remembered incidents have nobody to page — assign owners"), so it
+        # earns its own line when it matters.
+        if summary.get("unowned"):
+            _emit(f"- 🚨 unowned (nobody to page): {summary['unowned']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:
             _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -2757,6 +2775,18 @@ def _render_prometheus(
         "ogle_incidents_sightings",
         "Total observation count summed across all incidents.",
         [(None, inc["total_sightings"])],
+    )
+    # Orphaned drift — incidents with NO recorded owner, the alerting-side twin of
+    # `ogle incidents --unowned`. This is drift nobody is on the hook to page for, so a
+    # rising count is a coverage gap, not a data problem: alert `ogle_incidents_unowned > 0`
+    # (or a threshold) to push a lead to assign owners before orphaned drift silently rots.
+    # Standalone axis, not a partition — an incident is unowned regardless of severity or
+    # serving — so it isn't split by label. `.get` with a 0 default keeps a caller that
+    # passes a legacy summary dict (no `unowned` key) from crashing the scrape.
+    family(
+        "ogle_incidents_unowned",
+        "Remembered incidents with no recorded owner (orphaned drift, nobody to page).",
+        [(None, inc.get("unowned", 0))],
     )
     family(
         "ogle_muted_active",

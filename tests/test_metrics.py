@@ -95,6 +95,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_recurring_by_severity",
         "ogle_incidents_by_kind",
         "ogle_incidents_sightings",
+        "ogle_incidents_unowned",
         "ogle_muted_active",
         "ogle_muted_permanent",
         "ogle_muted_snoozed",
@@ -953,3 +954,73 @@ def test_metrics_by_kind_matches_status_json(tmp_path, capsys):
         samples['ogle_incidents_by_kind{kind="freshness"}']
         == str(st["incidents"]["by_kind"]["freshness"])
     )
+
+
+def test_incident_summary_unowned_counts_ownerless_records():
+    """Pure helper: unowned tallies incidents whose owner set is absent/empty/blank."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "count": 1, "owners": ["Alice"]},   # owned
+            {"severity": "low", "count": 1, "owners": []},           # empty → unowned
+            {"severity": "low", "count": 1},                         # legacy → unowned
+            {"severity": "low", "count": 1, "owners": ["   "]},      # blank → unowned
+        ]
+    )
+    assert inc["unowned"] == 3
+    assert inc["total"] == 4
+
+
+def test_incident_summary_unowned_zero_when_all_owned():
+    """No orphaned drift → the count is a clean 0, not absent."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "count": 1, "owners": ["Alice"]},
+            {"severity": "low", "count": 1, "owners": ["Bob", "Cara"]},
+        ]
+    )
+    assert inc["unowned"] == 0
+
+
+def test_metrics_unowned_gauge_emitted_and_matches(tmp_path, capsys):
+    """The orphaned-drift gauge is a gauge and counts ownerless incidents."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])  # owned
+    s.record_incident("b", severity="low", title="B")                     # unowned
+    s.record_incident("c", severity="low", title="C")                     # unowned
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, types, _ = _parse_prom(capsys.readouterr().out)
+    assert types["ogle_incidents_unowned"] == "gauge"
+    assert samples["ogle_incidents_unowned"] == "2"
+
+
+def test_metrics_unowned_gauge_present_even_when_zero(tmp_path, capsys):
+    """Honest 0 — the alert series exists even with every incident owned (no vanishing)."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_unowned"] == "0"
+
+
+def test_metrics_unowned_matches_incidents_filter(tmp_path, capsys):
+    """The gauge and `incidents --unowned --fingerprints` count the SAME records."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B")   # unowned
+    s.record_incident("c", severity="medium", title="C")  # unowned
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    gauge = int(samples["ogle_incidents_unowned"])
+    assert main(["incidents", "--store", str(store_path), "--unowned", "--fingerprints"]) == 0
+    listed = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert gauge == len(listed) == 2

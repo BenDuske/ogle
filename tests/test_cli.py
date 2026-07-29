@@ -2361,6 +2361,40 @@ def test_incidents_summary_by_dimension_suppressed_without_kinds(tmp_path, capsy
     assert "by dimension:" not in capsys.readouterr().out
 
 
+def test_incidents_summary_unowned_line_when_orphaned(tmp_path, capsys):
+    # The rollup calls out orphaned drift (no owner to page), the human twin of the
+    # ogle_incidents_unowned gauge and `incidents --unowned`. Printed only when nonzero.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])  # owned
+    s.record_incident("b", severity="low", title="B")                     # unowned
+    s.record_incident("c", severity="medium", title="C")                  # unowned
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "unowned (nobody to page): 2" in capsys.readouterr().out
+
+
+def test_incidents_summary_unowned_line_suppressed_when_all_owned(tmp_path, capsys):
+    # Every incident owned → no "0 orphaned" noise; the callout line is omitted entirely.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B", owners=["Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "unowned" not in capsys.readouterr().out
+
+
+def test_incidents_summary_json_exposes_unowned(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B")  # unowned
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["unowned"] == 1
+
+
 def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)

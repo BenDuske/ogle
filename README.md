@@ -372,6 +372,9 @@ so an incident spanning two dimensions counts in both and the label sum can exce
 `ogle_incidents_remembered` — graph it to see whether e.g. a freshness-drift spike is driving the
 total, or alert `{kind="freshness"} > 0` on any stalled feed; `{kind="unknown"}` holds legacy
 incidents with no recorded dimension),
+`ogle_incidents_unowned` (orphaned drift with no recorded owner — the alerting twin of
+`incidents --unowned`; a rising count is a coverage gap, not a data problem, so alert
+`ogle_incidents_unowned > 0` to push a lead to assign owners before ownerless drift silently rots),
 `ogle_muted_active` (split into the two always-emitted count gauges
 `ogle_muted_permanent` + `ogle_muted_snoozed` — `permanent + snoozed == active` — plus the
 orthogonal snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
