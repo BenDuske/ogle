@@ -1,23 +1,39 @@
-# Ogle stack — DataHub + Ogle service.
+# Ogle on DataHub — layers the Ogle drift agent on top of a running DataHub
+# quickstart. `datahub docker quickstart` creates the external network
+# `datahub_network` with the GMS reachable at http://datahub-gms:8080.
 #
-# ⚠️ Skeleton only — W1 will splice in the official DataHub Quickstart
-# compose (docs.datahub.com) and layer Ogle on top. Do not `docker compose
-# up` this yet; use `datahub docker quickstart` for now.
-
-version: "3.9"
+#   1. datahub docker quickstart        # bring up DataHub (GMS on :8080)
+#   2. docker compose up --build ogle   # run one drift sweep against it
+#
+# `ogle` is a CLI, not a daemon: it runs a single `check` sweep and exits.
+# Re-run it (cron, `watch -n 300 docker compose up ogle`, or a scheduler) for
+# continuous monitoring — the /data volume keeps the baseline/incident memory
+# so Ogle pages once per incident, not every sweep.
+#
+# For the keyless, Docker-free judge path see the README quickstart
+# (`ogle demo` / `ogle check --signatures …`) — no DataHub required.
 
 services:
   ogle:
     build: .
     image: ogle:dev
     container_name: ogle
-    environment:
-      - DATAHUB_GMS_URL=http://datahub-gms:8080
-      - OGLE_MEMORY_DIR=/data/ogle-mem
+    command:
+      - check
+      - --gms
+      - http://datahub-gms:8080
+      - --discover
+      - --store
+      - /data/ogle-baselines.json
     volumes:
       - ogle-storage:/data
-    depends_on: []   # populated in W1 once we import DataHub's compose
-    restart: unless-stopped
+    networks:
+      - datahub_network
+    restart: "no"
+
+networks:
+  datahub_network:
+    external: true
 
 volumes:
   ogle-storage: {}

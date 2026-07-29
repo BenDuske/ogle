@@ -1,0 +1,15 @@
+# Keep the build context lean — the image only needs pyproject/src/README.
+.git
+.gitignore
+tests
+docs
+examples
+scripts
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+ogle-baselines.json
+docker-compose.yml
+Dockerfile
+.dockerignore
