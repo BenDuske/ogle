@@ -2395,6 +2395,66 @@ def test_incidents_summary_json_exposes_unowned(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["summary"]["unowned"] == 1
 
 
+def test_incidents_summary_serving_unowned_line_when_orphaned_in_production(tmp_path, capsys):
+    # The loudest page: drift on a serving path that ALSO has no owner. Its own 🆘 callout,
+    # distinct from the 🚨 unowned line, printed only when the intersection is nonzero.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", serving=True, owners=[])   # serving+unowned
+    s.record_incident("b", severity="low", title="B", serving=False, owners=[])   # unowned, not serving
+    s.record_incident("c", severity="high", title="C", serving=True, owners=["Al"])  # serving, owned
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "unowned (nobody to page): 2" in out              # a + b
+    assert "serving + unowned (page now): 1" in out          # only a
+
+
+def test_incidents_summary_serving_unowned_line_suppressed_when_none(tmp_path, capsys):
+    # An unowned incident that is NOT serving must NOT trip the 🆘 line (only 🚨).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("b", severity="low", title="B", serving=False, owners=[])  # unowned, not serving
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "unowned (nobody to page): 1" in out
+    assert "serving + unowned" not in out
+
+
+def test_incidents_summary_json_exposes_serving_unowned(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", serving=True, owners=[])   # counted
+    s.record_incident("b", severity="low", title="B", serving=True, owners=["Bo"])  # owned
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["serving_unowned"] == 1
+    assert summary["serving"] == 2
+    assert summary["unowned"] == 1
+
+
+def test_status_surfaces_serving_unowned_inline(tmp_path, capsys):
+    # Parity with metrics/summary: `status` appends the serving+unowned intersection to its
+    # serving-path line when nonzero, and omits it when there is no orphaned production drift.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", serving=True, owners=[])
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    assert "serving+unowned: 1" in capsys.readouterr().out
+
+
+def test_status_omits_serving_unowned_when_zero(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", serving=True, owners=["Al"])  # owned
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    assert "serving+unowned" not in capsys.readouterr().out
+
+
 def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)

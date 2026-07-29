@@ -97,6 +97,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_by_kind",
         "ogle_incidents_sightings",
         "ogle_incidents_unowned",
+        "ogle_incidents_serving_unowned",
         "ogle_muted_active",
         "ogle_muted_permanent",
         "ogle_muted_snoozed",
@@ -199,6 +200,59 @@ def test_serving_recurring_gauge_zero_on_empty_store(tmp_path, capsys):
     assert main(["metrics", "--store", str(store_path)]) == 0
     samples, _, _ = _parse_prom(capsys.readouterr().out)
     assert samples["ogle_incidents_serving_recurring"] == "0"
+
+
+def test_serving_unowned_gauge_is_the_intersection_not_a_derivation(tmp_path, capsys):
+    """serving_unowned can't be reconstructed from serving + unowned alone.
+
+    A serving-but-owned incident next to an unowned-but-not-served one gives serving=1 and
+    unowned=1, yet ZERO incidents are both — the doubly-bad "production fed drifted data with
+    nobody to page" class is empty. Only the intersection gauge tells that truth; a min() or
+    any derivation over the two marginals would wrongly report 1.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    # serving but OWNED
+    s.record_incident("serv", severity="high", title="SERV", datasets=1, serving=True,
+                       owners=["Alice"])
+    # unowned but NOT serving
+    s.record_incident("orphan", severity="high", title="ORPH", datasets=1, serving=False,
+                       owners=[])
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # Both flat totals look "present"...
+    assert samples["ogle_incidents_serving"] == "1"
+    assert samples["ogle_incidents_unowned"] == "1"
+    # ...but their intersection is empty — the truth a min()/derivation would get wrong.
+    assert samples["ogle_incidents_serving_unowned"] == "0"
+
+
+def test_serving_unowned_gauge_counts_the_real_intersection(tmp_path, capsys):
+    # One incident that is BOTH on a serving path AND names no owner — the loudest page.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("bad", severity="high", title="BAD", datasets=1, serving=True, owners=[])
+    s.record_incident("ok", severity="low", title="OK", datasets=1, serving=True,
+                      owners=["Bob"])  # serving but owned → not counted
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_serving"] == "2"
+    assert samples["ogle_incidents_unowned"] == "1"
+    assert samples["ogle_incidents_serving_unowned"] == "1"
+
+
+def test_serving_unowned_gauge_zero_on_empty_store(tmp_path, capsys):
+    # Honest 0 (always emitted), so `ogle_incidents_serving_unowned > 0` is a stable alert
+    # series that exists even when nothing is orphaned-in-production rather than vanishing.
+    store_path = tmp_path / "baselines.json"
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    assert samples["ogle_incidents_serving_unowned"] == "0"
 
 
 def test_serving_by_severity_disambiguates_flat_totals(tmp_path, capsys):

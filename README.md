@@ -293,8 +293,12 @@ drift, the people twin of the by-dimension line that completes the ownership axi
 **non-exclusive** (a two-owner incident counts toward both, so it needn't sum to the total),
 aggregates case-insensitively (one `Alice`, never `Alice`+`alice`), sorts worst-first (most-owned
 first, ties alphabetical), and is skipped when nothing is owned — orphaned drift lands on the
-`🚨 unowned (nobody to page): N` line and the `ogle_incidents_unowned` gauge instead; `--json` carries
-the roster as `by_owner` (a `{name: count}` map) — and
+`🚨 unowned (nobody to page): N` line and the `ogle_incidents_unowned` gauge instead — a second
+**worst-class** callout (`🆘 serving + unowned (page now): N`), the pairwise intersection of serving
+*and* unowned (production being fed drifted data with **nobody on the hook** to fix it — the
+assign-an-owner-NOW page) that the `serving-path` and `unowned` marginals **can't** reconstruct
+because neither reveals their overlap; shown only when nonzero, mirrored inline on `status` and by
+the `ogle_incidents_serving_unowned` gauge, with `--json` carrying it as `serving_unowned` — and
 **muted** — which, when anything is silenced, splits into `⛔ N permanent`
 (a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
 same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't
@@ -392,6 +396,10 @@ incidents with no recorded dimension),
 `ogle_incidents_unowned` (orphaned drift with no recorded owner — the alerting twin of
 `incidents --unowned`; a rising count is a coverage gap, not a data problem, so alert
 `ogle_incidents_unowned > 0` to push a lead to assign owners before ownerless drift silently rots),
+`ogle_incidents_serving_unowned` (the loudest page — incidents both on a serving path **and**
+unowned, production fed drifted data with nobody on the hook; the pairwise intersection **not**
+derivable from `ogle_incidents_serving` + `ogle_incidents_unowned`, since neither marginal reveals
+their overlap, so alert `ogle_incidents_serving_unowned > 0` for an assign-an-owner-NOW page),
 `ogle_muted_active` (split into the two always-emitted count gauges
 `ogle_muted_permanent` + `ogle_muted_snoozed` — `permanent + snoozed == active` — plus the
 orthogonal snooze countdown `ogle_muted_snooze_next_expiry_seconds`), the
@@ -471,6 +479,14 @@ non-derivable from the two per-severity cross-tabs (a store can read `serving 1`
 while their overlap is **zero**), so it earns its own gauge; alert
 `ogle_incidents_serving_recurring > 0` for the top-priority page, and it surfaces in the human
 `status` / `incidents --summary` lines as `🔥 serving+recurring: N`, shown only when nonzero.
+
+Crossing the serving axis with the *ownership* axis gives the other worst class:
+`ogle_incidents_serving_unowned` counts incidents that are **both** on a serving path and unowned —
+production being fed drifted data with nobody on the hook to fix it. Like `serving_recurring` it is
+genuinely non-derivable from its two marginals (`ogle_incidents_serving` and
+`ogle_incidents_unowned` can both read `1` while their overlap is **zero**), so it earns its own
+gauge; alert `ogle_incidents_serving_unowned > 0` for an assign-an-owner-NOW page, and it surfaces
+in the human `status` / `incidents --summary` lines as `🆘 serving+unowned: N`, shown only when nonzero.
 
 ### Corruption-resilient store (unattended-safe)
 

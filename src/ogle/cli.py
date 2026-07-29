@@ -2122,6 +2122,15 @@ def _incident_summary(records: List[dict]) -> dict:
     # each other), so a scrape that has both still can't tell whether the serving drift and the
     # recurring drift are the SAME incidents or disjoint. Standalone risk count, not a partition.
     serving_recurring = 0
+    # Serving ∩ unowned — the loudest page there is: drift on a live serving path that ALSO
+    # names no owner (production is being fed drifted data and nobody is on the hook to fix it).
+    # Like serving_recurring this is the missing pairwise intersection of two standalone axes —
+    # `serving` counts production-path drift, `unowned` counts orphaned drift, but neither
+    # marginal reveals their overlap, so a scrape holding both still can't tell whether the
+    # serving drift and the ownerless drift are the SAME incidents or disjoint. Standalone risk
+    # count, not a partition. Uses the shared `_incident_is_unowned` predicate so it can never
+    # disagree with the `unowned` tally or the `ogle incidents --unowned` filter.
+    serving_unowned = 0
     total_sightings = 0
     # Orphaned-drift tally — incidents with NO recorded owner display name (the set
     # `ogle incidents --unowned` surfaces and `--owner NAME` can never match). Not a
@@ -2155,6 +2164,8 @@ def _incident_summary(records: List[dict]) -> dict:
                 serving_recurring += 1
         if _incident_is_unowned(r):
             unowned += 1
+            if r.get("serving"):
+                serving_unowned += 1
         # Roster tally — +1 to each distinct real owner the incident names (shared
         # `_incident_owner_names` dedups within the record and drops blanks, so the roster and
         # the `unowned` count above can never disagree on who is a real owner).
@@ -2182,6 +2193,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "recurring": recurring,
         "recurring_by_severity": recurring_by_severity,
         "serving_recurring": serving_recurring,
+        "serving_unowned": serving_unowned,
         "by_kind": by_kind,
         "unowned": unowned,
         "by_owner": {display: cnt for display, cnt in owner_acc.values()},
@@ -2682,6 +2694,13 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # earns its own line when it matters.
         if summary.get("unowned"):
             _emit(f"- 🚨 unowned (nobody to page): {summary['unowned']}")
+        # Serving ∩ unowned callout — the loudest page: orphaned drift that is ALSO on a serving
+        # path (production being fed drifted data with nobody on the hook). The pairwise
+        # intersection neither the serving nor the unowned marginal can express. Printed only when
+        # nonzero, and only distinctly from the 🚨 unowned line above it — a positive count is the
+        # "assign an owner NOW, production is affected" signal, so it earns its own line.
+        if summary.get("serving_unowned"):
+            _emit(f"- 🆘 serving + unowned (page now): {summary['serving_unowned']}")
         _emit(f"- total sightings: {summary['total_sightings']}")
         if gate_rc and not args.json:
             _emit(f"_open drift at/above --fail-on {args.fail_on} remembered — exit 1._")
@@ -3071,6 +3090,19 @@ def _render_prometheus(
         "ogle_incidents_unowned",
         "Remembered incidents with no recorded owner (orphaned drift, nobody to page).",
         [(None, inc.get("unowned", 0))],
+    )
+    # Serving ∩ unowned — the loudest page: incidents on a serving path that ALSO name no owner
+    # (production being fed drifted data with nobody on the hook to fix it). Like
+    # ogle_incidents_serving_recurring it is the pairwise intersection NOT derivable from its two
+    # marginals — ogle_incidents_serving counts production-path drift and ogle_incidents_unowned
+    # counts orphaned drift, but a dashboard holding both still can't tell whether the serving
+    # drift and the ownerless drift are the same incidents. Alert `ogle_incidents_serving_unowned
+    # > 0` for an assign-an-owner-NOW page. Standalone count (not a partition, so no label);
+    # `.get` default keeps a legacy summary dict from crashing the scrape.
+    family(
+        "ogle_incidents_serving_unowned",
+        "Remembered incidents both on a serving path AND unowned (orphaned production drift, page now).",
+        [(None, inc.get("serving_unowned", 0))],
     )
     family(
         "ogle_muted_active",
@@ -3544,6 +3576,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     # drifted data repeatedly and unresolved — the single highest-priority page.
     if inc.get("serving_recurring"):
         recurring_part += f" · 🔥 serving+recurring: {inc['serving_recurring']}"
+    # Second worst-class intersection appended inline when present: serving-path drift that ALSO
+    # names no owner — the same count `metrics` emits as ogle_incidents_serving_unowned, in the
+    # human snapshot. Omitted at zero (no noise), surfaced with a 🆘 when production is being fed
+    # drifted data with nobody on the hook — the assign-an-owner-NOW page.
+    if inc.get("serving_unowned"):
+        recurring_part += f" · 🆘 serving+unowned: {inc['serving_unowned']}"
     serving_line += recurring_part + f" · total sightings: {inc['total_sightings']}"
     _emit(serving_line)
     # Drift-DIMENSION texture: which failure modes the remembered incidents carry (schema/
