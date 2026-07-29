@@ -2653,6 +2653,57 @@ def test_incidents_summary_by_owner_respects_filters(tmp_path, capsys):
     assert summary["by_owner"] == {"Alice": 1}
 
 
+def test_incidents_summary_by_owner_annotates_serving_share(tmp_path, capsys):
+    # The escalation-priority signal the flat volume can't carry: Bob owns MORE drift (3) but
+    # Alice owns the PRODUCTION drift (2 of her 2 serving). The roster leads with Bob by count
+    # yet flags Alice's serving share with ⚠️, so an on-call lead pages her first.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)
+    s.record_incident("b", severity="high", title="B", owners=["Alice"], serving=True)
+    s.record_incident("c", severity="low", title="C", owners=["Bob"])
+    s.record_incident("d", severity="low", title="D", owners=["Bob"])
+    s.record_incident("e", severity="low", title="E", owners=["Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    # Bob leads by volume (3) and carries no serving drift → bare; Alice (2) is annotated ⚠️2.
+    assert "by owner: Bob 3 · Alice 2 (⚠️2)" in out
+
+
+def test_incidents_summary_json_exposes_serving_by_owner(tmp_path, capsys):
+    # JSON parity: serving_by_owner holds ONLY owners with ≥1 serving incident (no 0-rows),
+    # keyed by the same display name as by_owner.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)
+    s.record_incident("b", severity="low", title="B", owners=["Alice"])  # Alice non-serving too
+    s.record_incident("c", severity="medium", title="C", owners=["Bob"])  # Bob: no serving
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_owner"] == {"Alice": 2, "Bob": 1}
+    assert summary["serving_by_owner"] == {"Alice": 1}  # Bob absent, not a 0-row
+
+
+def test_incidents_summary_serving_by_owner_aggregates_case_insensitively(tmp_path, capsys):
+    # Same one-row-per-person guarantee as by_owner: mixed-case captures of a serving owner
+    # aggregate into a single ⚠️ tally under the first-seen display form.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)
+    s.record_incident("b", severity="high", title="B", owners=["alice"], serving=True)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    # One row, not two — the two casings fold together (display form follows record order,
+    # so assert on the aggregate, not the winning case).
+    assert len(summary["serving_by_owner"]) == 1
+    assert list(summary["serving_by_owner"].values()) == [2]
+    # And it agrees with the by_owner row for the same (single) person.
+    assert list(summary["by_owner"].values()) == [2]
+
+
 def test_incidents_summary_serving_recurring_callout(tmp_path, capsys):
     # The worst class — drift on a serving path that ALSO recurs — earns its own 🔥 callout.
     # _seed_recurring_incidents: chronic (high, serving, 5×) is BOTH serving and recurring;

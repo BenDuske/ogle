@@ -2155,8 +2155,16 @@ def _incident_summary(records: List[dict]) -> dict:
     # counts toward BOTH, so sum(by_owner) can exceed `total`; and unowned incidents (tracked
     # by `unowned` above) contribute to no name, so it can also fall short. Aggregated case-
     # insensitively — one "Alice", never "Alice"+"alice" — keeping the first-seen display form.
-    # Accumulated as {lower_key: [display, count]} then flattened to {display: count} so the
+    # Accumulated as {lower_key: [display, count, serving_count]} then flattened to
+    # {display: count} (by_owner) and {display: serving_count} (serving_by_owner) so the
     # roster shows real names while a mixed-case store can't split one owner into two rows.
+    # `serving_by_owner` is the escalation-priority twin of the flat roster: the by_owner
+    # volume tells a lead who carries the MOST drift, but not who carries the PRODUCTION drift
+    # — an owner sitting on five low-severity offline captures reads louder than the one owner
+    # with a single serving-path page. This is the owner ∩ serving cross-tab (parity with
+    # serving_by_severity), tallied off the SAME `is_serving` flag so it can never disagree
+    # with the `serving` marginal, and it holds only owners with ≥1 serving incident (an owner
+    # with none is absent, not a `0` row) so "who do I page first?" reads at a glance.
     owner_acc: dict = {}
     for r in records:
         sev = r.get("severity")
@@ -2191,9 +2199,11 @@ def _incident_summary(records: List[dict]) -> dict:
         for name in _incident_owner_names(r):
             slot = owner_acc.get(name.lower())
             if slot is None:
-                owner_acc[name.lower()] = [name, 1]
+                owner_acc[name.lower()] = [name, 1, 1 if is_serving else 0]
             else:
                 slot[1] += 1
+                if is_serving:
+                    slot[2] += 1
         # Attribute the incident to each dimension it recorded (deduped so a malformed repeat
         # can't double-count within one incident). No / empty / non-list `kinds` = a legacy
         # record with no tracked dimension → `unknown`, counted once.
@@ -2216,7 +2226,10 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_unowned_recurring": serving_unowned_recurring,
         "by_kind": by_kind,
         "unowned": unowned,
-        "by_owner": {display: cnt for display, cnt in owner_acc.values()},
+        "by_owner": {display: cnt for display, cnt, _sv in owner_acc.values()},
+        "serving_by_owner": {
+            display: sv for display, _cnt, sv in owner_acc.values() if sv
+        },
         "total_sightings": total_sightings,
     }
 
@@ -2702,8 +2715,14 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # all-orphan or empty store), so it adds no noise.
         bo = summary["by_owner"]
         if bo:
+            # Annotate each owner with their serving-path share (⚠️N) when nonzero — the
+            # escalation-priority signal the flat volume can't carry: "Alice 5 (⚠️2)" says two
+            # of Alice's five are production pages, so she leads the call even if Bob's raw
+            # count is higher. Owners with no serving drift stay bare (no "⚠️0" noise), mirroring
+            # the conditional serving splits elsewhere in this rollup.
+            sbo = summary["serving_by_owner"]
             owner_parts = [
-                f"{name} {cnt}"
+                f"{name} {cnt}" + (f" (⚠️{sbo[name]})" if sbo.get(name) else "")
                 for name, cnt in sorted(bo.items(), key=lambda kv: (-kv[1], kv[0].lower()))
             ]
             _emit(f"- 👤 by owner: {' · '.join(owner_parts)}")
