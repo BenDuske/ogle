@@ -282,7 +282,15 @@ cross-tab the `ogle_incidents_serving_by_severity` gauge exposes (the four bucke
 `serving-path`) — a **by-dimension** line (`🏷️ by dimension: schema 2 · freshness 1`) naming which
 failure modes the incidents carry, the human twin of `ogle_incidents_by_kind` (**non-exclusive** — a
 two-dimension incident shows in both — so it needn't sum to the total; the `unknown` bucket for
-legacy incidents is omitted here and the line is skipped entirely when nothing is attributed) — and
+legacy incidents is omitted here and the line is skipped entirely when nothing is attributed) — a
+**by-owner** roster (`👤 by owner: Alice 2 · Bob 1`) naming who is carrying how much remembered
+drift, the people twin of the by-dimension line that completes the ownership axis alongside
+`incidents --owner NAME` (one person's queue) and `incidents --unowned` (nobody's). It is likewise
+**non-exclusive** (a two-owner incident counts toward both, so it needn't sum to the total),
+aggregates case-insensitively (one `Alice`, never `Alice`+`alice`), sorts worst-first (most-owned
+first, ties alphabetical), and is skipped when nothing is owned — orphaned drift lands on the
+`🚨 unowned (nobody to page): N` line and the `ogle_incidents_unowned` gauge instead; `--json` carries
+the roster as `by_owner` (a `{name: count}` map) — and
 **muted** — which, when anything is silenced, splits into `⛔ N permanent`
 (a *standing* blind spot: drift suppressed with no end date) and `💤 N snoozed` (self-expiring), the
 same distinction the `ogle_muted_permanent` gauge exposes, so a forever-muted serving table can't

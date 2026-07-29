@@ -2408,6 +2408,113 @@ def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
     assert summary["by_kind"]["schema"] == 0
 
 
+def test_incidents_summary_by_owner_line_sorted_worst_first(tmp_path, capsys):
+    # The roster surfaces who is carrying how much remembered drift — the people twin of the
+    # by-dimension line. Sorted most-owned first so an on-call lead reads the overloaded owner
+    # at the front. Alice owns 2, Bob owns 1 → "Alice 2 · Bob 1".
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B", owners=["Alice"])
+    s.record_incident("c", severity="medium", title="C", owners=["Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "by owner: Alice 2 · Bob 1" in capsys.readouterr().out
+
+
+def test_incidents_summary_by_owner_ties_break_alphabetically(tmp_path, capsys):
+    # Equal load → deterministic order: ties broken by name (case-insensitively) so the roster
+    # is stable across runs regardless of store order. Bob and Alice each own 1 → Alice first.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Bob"])
+    s.record_incident("b", severity="low", title="B", owners=["Alice"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "by owner: Alice 1 · Bob 1" in capsys.readouterr().out
+
+
+def test_incidents_summary_by_owner_aggregates_case_insensitively(tmp_path, capsys):
+    # One "Alice", never "Alice"+"alice": mixed-case captures of the same person aggregate into
+    # a single roster row, keeping the first-seen display form (the store sorts owners, so the
+    # capitalized "Alice" sorts ahead of "alice" and wins the display).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B", owners=["alice"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by owner: Alice 2" in out
+    assert "alice 1" not in out  # not split into two rows
+
+
+def test_incidents_summary_by_owner_non_exclusive(tmp_path, capsys):
+    # Like by-dimension, the roster is NOT a partition: an incident with two owners counts
+    # toward BOTH, so the roster counts can sum past `total` (1 incident, 2 owners → each 1).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice", "Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["total"] == 1
+    assert summary["by_owner"] == {"Alice": 1, "Bob": 1}
+
+
+def test_incidents_summary_by_owner_suppressed_when_all_unowned(tmp_path, capsys):
+    # An all-orphan store owns nothing → the roster line is omitted (no noise); the 🚨 unowned
+    # line carries that story instead.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A")
+    s.record_incident("b", severity="low", title="B")
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    assert "by owner:" not in capsys.readouterr().out
+
+
+def test_incidents_summary_by_owner_skips_blank_owners(tmp_path, capsys):
+    # A blank/whitespace owner is a user slip, not a real name — it never becomes a roster row
+    # and the incident it sits on is counted as unowned instead.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["   "])
+    s.record_incident("b", severity="low", title="B", owners=["Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_owner"] == {"Bob": 1}
+    assert summary["unowned"] == 1  # the blank-owner incident is orphaned
+
+
+def test_incidents_summary_json_exposes_by_owner(tmp_path, capsys):
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B", owners=["Alice"])
+    s.record_incident("c", severity="medium", title="C")  # unowned
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_owner"] == {"Alice": 2}
+
+
+def test_incidents_summary_by_owner_respects_filters(tmp_path, capsys):
+    # The roster describes the FILTERED set, same as every other summary axis: a --serving-only
+    # rollup counts only owners of serving incidents.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)
+    s.record_incident("b", severity="low", title="B", owners=["Bob"])  # not serving
+    s.save()
+    assert main(
+        ["incidents", "--store", str(store_path), "--summary", "--serving-only", "--json"]
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_owner"] == {"Alice": 1}
+
+
 def test_incidents_summary_surfaces_open_drift_age(tmp_path, capsys):
     # Parity with `status`: the --summary rollup must surface how long the (filtered) drift has
     # sat — stalest first (resolve/forget candidate), freshest trailing (live-incident signal),

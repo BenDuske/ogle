@@ -1727,6 +1727,35 @@ def _incident_matches_owner(rec: dict, needle: str) -> bool:
     return any(probe in str(o).lower() for o in owners)
 
 
+def _incident_owner_names(rec: dict) -> List[str]:
+    """Distinct, real owner display names on an incident, in recorded order.
+
+    The single reader of the `owners` provenance the walk persists, shared by the roster
+    (`by_owner` in `_incident_summary`) and the orphan predicate (`_incident_is_unowned`) so
+    "who owns this" and "is this unowned" can never disagree. Each name is stripped; blank/
+    all-whitespace entries (a user slip, not a real name) are dropped, matching the
+    all-whitespace-is-not-a-name rule `_incident_matches_owner` uses on the query side. Names
+    are de-duplicated case-insensitively with the FIRST-seen display form kept, so a record
+    that lists "Alice"/"alice" twice counts one owner and shows one name. Returns `[]` when
+    the field is absent, not a list, empty, or wholly blank — the unowned set.
+    """
+    owners = rec.get("owners")
+    if not isinstance(owners, list):
+        return []
+    seen: set = set()
+    out: List[str] = []
+    for o in owners:
+        name = str(o).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
 def _incident_is_unowned(rec: dict) -> bool:
     """True if an incident has NO recorded owner display name — orphaned drift.
 
@@ -1739,11 +1768,10 @@ def _incident_is_unowned(rec: dict) -> bool:
     blank/whitespace (a user slip, not a real name) all count as unowned — the same
     all-whitespace-is-not-a-name rule `_incident_matches_owner` uses on the query side, so
     the two selectors partition the incident set cleanly with no record in both or neither.
+    Defers to `_incident_owner_names` for the definition of a real owner, so the roster and
+    this predicate stay in lockstep: an incident is unowned exactly when it names no owner.
     """
-    owners = rec.get("owners")
-    if not isinstance(owners, list):
-        return True
-    return not any(str(o).strip() for o in owners)
+    return not _incident_owner_names(rec)
 
 
 def _incident_passes(
@@ -1901,6 +1929,14 @@ def _incident_summary(records: List[dict]) -> dict:
     # CLI filter lists. Uses the shared `_incident_is_unowned` predicate so the summary
     # and the filter can never disagree on what "unowned" means.
     unowned = 0
+    # Owner ROSTER — how much remembered drift each named owner is carrying, the people twin
+    # of `by_kind`. Like the dimension split it is NON-exclusive: an incident with two owners
+    # counts toward BOTH, so sum(by_owner) can exceed `total`; and unowned incidents (tracked
+    # by `unowned` above) contribute to no name, so it can also fall short. Aggregated case-
+    # insensitively — one "Alice", never "Alice"+"alice" — keeping the first-seen display form.
+    # Accumulated as {lower_key: [display, count]} then flattened to {display: count} so the
+    # roster shows real names while a mixed-case store can't split one owner into two rows.
+    owner_acc: dict = {}
     for r in records:
         sev = r.get("severity")
         key = sev if sev in ("high", "medium", "low") else "unknown"
@@ -1915,6 +1951,15 @@ def _incident_summary(records: List[dict]) -> dict:
             recurring_by_severity[key] += 1
         if _incident_is_unowned(r):
             unowned += 1
+        # Roster tally — +1 to each distinct real owner the incident names (shared
+        # `_incident_owner_names` dedups within the record and drops blanks, so the roster and
+        # the `unowned` count above can never disagree on who is a real owner).
+        for name in _incident_owner_names(r):
+            slot = owner_acc.get(name.lower())
+            if slot is None:
+                owner_acc[name.lower()] = [name, 1]
+            else:
+                slot[1] += 1
         # Attribute the incident to each dimension it recorded (deduped so a malformed repeat
         # can't double-count within one incident). No / empty / non-list `kinds` = a legacy
         # record with no tracked dimension → `unknown`, counted once.
@@ -1934,6 +1979,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "recurring_by_severity": recurring_by_severity,
         "by_kind": by_kind,
         "unowned": unowned,
+        "by_owner": {display: cnt for display, cnt in owner_acc.values()},
         "total_sightings": total_sightings,
     }
 
@@ -2403,6 +2449,21 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         kind_parts = [f"{d.value} {bks[d.value]}" for d in DriftKind if bks[d.value]]
         if kind_parts:
             _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
+        # Owner ROSTER — the people twin of the by-dimension line: "who is carrying how much
+        # remembered drift?" Completes the ownership axis alongside `--owner NAME` (one person's
+        # queue) and `--unowned` (nobody's) with the whole-team load distribution an on-call lead
+        # reads to spot an overloaded owner. NON-exclusive like by-dimension (an incident with two
+        # owners shows under both) so it need not sum to `total`; unowned incidents contribute to
+        # no name (that's the 🚨 line's job). Sorted worst-first — most-owned first, ties broken
+        # alphabetically (case-insensitively) for a stable order. Skipped when nothing is owned (an
+        # all-orphan or empty store), so it adds no noise.
+        bo = summary["by_owner"]
+        if bo:
+            owner_parts = [
+                f"{name} {cnt}"
+                for name, cnt in sorted(bo.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+            ]
+            _emit(f"- 👤 by owner: {' · '.join(owner_parts)}")
         # Orphaned-drift callout — parity with the ogle_incidents_unowned gauge and
         # `ogle incidents --unowned`. Printed only when nonzero: a summary with every
         # incident owned needs no "0 orphaned" noise, but a positive count is a page-lead
