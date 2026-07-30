@@ -276,6 +276,30 @@ class BaselineStore:
         """Drop an incident from memory (e.g. once the underlying drift is resolved)."""
         self.seen_incidents.pop(fingerprint, None)
 
+    def incidents_confined_to(self, urns: Iterable[str]) -> List[str]:
+        """Fingerprints of remembered incidents whose every touched URN is in `urns`.
+
+        The write-side companion to `forget_baseline` for a decommissioned dataset: once a
+        table is gone from DataHub it stops being walked, so an open incident that touches
+        ONLY that table can never self-resolve (its fingerprint won't recur) and would sit in
+        `ogle incidents` forever. This finds exactly those orphans so a caller can prune them.
+
+        An incident is returned only when its recorded `urns` provenance is non-empty AND is a
+        subset of `urns` — i.e. the whole incident is explained by the given set. An incident
+        that also touches a URN outside the set is preserved (it still has a live asset behind
+        it). A legacy/offline record with no captured URNs is never returned: it can't be
+        *proven* to be confined, so the same never-guess rule the `--owner`/`--kind` filters
+        follow keeps it out. Returns the matching fingerprints (sorted for stable output).
+        """
+        want = {str(u) for u in urns}
+        if not want:
+            return []
+        return sorted(
+            fp
+            for fp, rec in self.seen_incidents.items()
+            if rec.urns and want.issuperset(rec.urns)
+        )
+
     def incidents(self) -> List[dict]:
         """Every remembered incident as a plain dict (its provenance + `fingerprint`).
 

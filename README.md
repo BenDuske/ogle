@@ -650,6 +650,7 @@ clears any mute/snooze on that URN so `ogle baselines` and the next walk stay ho
 ogle forget "urn:li:dataset:(dbt,old.orders,PROD)"          # prune one decommissioned dataset
 ogle forget URN_A URN_B                                       # batch — hits and misses report per token
 ogle baselines --grep staging --urns | ogle forget -         # prune a whole class, no xargs (native on Windows)
+ogle forget URN_A --with-incidents                           # also prune incidents that touch ONLY URN_A
 ogle baselines --grep old --urns | ogle forget --dry-run -   # preview what WOULD be pruned, change nothing
 ogle baselines --grep old --urns | ogle forget --json -      # machine receipt: {forgotten[], missed[], count, dry_run}
 ```
@@ -658,10 +659,15 @@ Where `ogle resolve` drops a drift *event* by fingerprint, `forget` drops the *d
 URN — matched **exactly** (the `--urns` selector emits them whole, so there's no prefix to
 disambiguate). A lone `-` reads URNs from stdin so the `baselines --urns` pipe runs without
 `xargs`; an unknown or empty token is a reportable miss (`not watched`), never a mass wipe.
-Incidents are left untouched — a remembered drift outlives the dataset row and is cleared via
-`ogle resolve`, not here. `--dry-run` previews the exact per-token outcome without writing.
-`--json` folds the whole batch into one object (`forgotten[]`, `missed[]`, `count`, `dry_run`)
-in place of the per-token lines — a machine receipt an automated decommission wrapper can check.
+By default incidents are left untouched — a remembered drift outlives the dataset row and is
+cleared via `ogle resolve`, not here. But a decommissioned dataset's open incident can never
+self-resolve (its fingerprint stops recurring once the table isn't walked), so `--with-incidents`
+closes that loop: it also drops any remembered incident that touches **only** the forgotten
+dataset(s) (`🧹 resolved orphan incident`), while leaving intact any incident that also spans a
+still-watched dataset. `--dry-run` previews the exact per-token outcome without writing.
+`--json` folds the whole batch into one object (`forgotten[]`, `missed[]`, `count`, `dry_run` —
+plus `forgotten_incidents[]` under `--with-incidents`) in place of the per-token lines — a
+machine receipt an automated decommission wrapper can check.
 
 ### Inspecting what Ogle remembers (`ogle incidents`)
 

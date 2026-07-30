@@ -121,6 +121,32 @@ def test_forget_incident():
     store.forget_incident("never")
 
 
+def test_incidents_confined_to_returns_fully_contained_only():
+    # Orphan detection for `forget --with-incidents`: an incident whose every touched URN is
+    # in the given set is "confined"; one that also reaches outside it is not.
+    store = BaselineStore()
+    # urns provenance only lands alongside severity/title (the latest-sighting refresh rule).
+    store.record_incident("only_orders", severity="high", urns=[ORDERS_URN])
+    store.record_incident("only_customers", severity="high", urns=[CUSTOMERS_URN])
+    store.record_incident("both", severity="high", urns=[ORDERS_URN, CUSTOMERS_URN])
+    assert store.incidents_confined_to([ORDERS_URN]) == ["only_orders"]
+    # A superset that covers both datasets sweeps up the spanning incident too (sorted output).
+    assert store.incidents_confined_to([ORDERS_URN, CUSTOMERS_URN]) == [
+        "both",
+        "only_customers",
+        "only_orders",
+    ]
+
+
+def test_incidents_confined_to_ignores_urnless_and_empty_query():
+    # Never-guess: a legacy/offline incident with no captured URNs can't be proven confined,
+    # and an empty query set matches nothing (never a mass sweep).
+    store = BaselineStore()
+    store.record_incident("no_urns", severity="high")  # provenance but urns=[]
+    assert store.incidents_confined_to([ORDERS_URN]) == []
+    assert store.incidents_confined_to([]) == []
+
+
 # ---- incident memory (provenance for `ogle incidents`) ----------------------------
 def test_incidents_empty_store():
     assert BaselineStore().incidents() == []

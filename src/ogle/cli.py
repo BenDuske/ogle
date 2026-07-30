@@ -2523,6 +2523,13 @@ def cmd_forget(args: argparse.Namespace) -> int:
 
     `--dry-run` previews the SAME per-token outcome — hits print `👀 would forget <urn>` —
     but the store is never mutated or saved, so a batch pipe can be checked before it commits.
+
+    `--with-incidents` closes a hygiene loop: a decommissioned dataset's open incidents would
+    otherwise linger forever (the table stops being walked, so their fingerprints never recur
+    to self-resolve). With the flag, any remembered incident that touches ONLY the forgotten
+    dataset(s) is dropped too (`🧹 resolved orphan incident <fp>`); one that also touches a
+    still-watched dataset is left intact. It respects `--dry-run` and adds a
+    `forgotten_incidents[]` list to the `--json` receipt.
     """
     store_path = Path(args.store)
     store = BaselineStore.load(store_path)
@@ -2533,6 +2540,10 @@ def cmd_forget(args: argparse.Namespace) -> int:
     # which missed, the count — so an automated decommission wrapper confirms exactly what it
     # pruned. Per-token human lines are suppressed in --json mode; the object prints at the end.
     as_json = getattr(args, "json", False)
+    # --with-incidents: after pruning the dataset(s), also drop remembered incidents that
+    # touch ONLY the forgotten URN(s) — orphans that can never self-resolve once the table
+    # stops being walked. Opt-in, since `forget` otherwise leaves incidents to `resolve`.
+    with_incidents = getattr(args, "with_incidents", False)
     forgotten: List[str] = []
     missed: List[str] = []
     for raw in _expand_stdin_fingerprints(args.urn):
@@ -2551,27 +2562,39 @@ def cmd_forget(args: argparse.Namespace) -> int:
         forgotten.append(urn)
         if not as_json:
             _emit(f"👀 would forget `{urn}`" if dry_run else f"✅ forgot `{urn}`")
-    if forgotten and not dry_run:
+    # Resolve orphan incidents confined to the batch just forgotten. Computed against the set
+    # actually forgotten this run (not every requested token), so a missed URN never drags an
+    # incident down with it. Order is stable (store-sorted) for a diffable receipt.
+    forgotten_incidents: List[str] = []
+    if with_incidents and forgotten:
+        forgotten_incidents = store.incidents_confined_to(forgotten)
+        for fp in forgotten_incidents:
+            if not dry_run:
+                store.forget_incident(fp)
+            if not as_json:
+                _emit(
+                    f"👀 would resolve orphan incident `{fp}`"
+                    if dry_run
+                    else f"🧹 resolved orphan incident `{fp}`"
+                )
+    if (forgotten or forgotten_incidents) and not dry_run:
         try:
             store.save(store_path)
         except Exception as exc:
             print(f"ogle forget: could not save store: {exc}", file=sys.stderr)
             return 2
     if as_json:
-        _emit(
-            json.dumps(
-                {
-                    "forget": {
-                        "dry_run": dry_run,
-                        "forgotten": forgotten,
-                        "missed": missed,
-                        "count": len(forgotten),
-                    }
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        receipt = {
+            "dry_run": dry_run,
+            "forgotten": forgotten,
+            "missed": missed,
+            "count": len(forgotten),
+        }
+        # Only surface the incident axis when the caller asked for it, so the default receipt
+        # shape is unchanged for existing automation.
+        if with_incidents:
+            receipt["forgotten_incidents"] = forgotten_incidents
+        _emit(json.dumps({"forget": receipt}, indent=2, sort_keys=True))
     return 0
 
 
@@ -4560,6 +4583,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", default=DEFAULT_STORE, help=f"Store JSON (default: {DEFAULT_STORE})."
     )
     forget.add_argument(
+        "--with-incidents",
+        action="store_true",
+        help="Also drop any remembered incident that touches ONLY the forgotten dataset(s) — "
+        "an orphan that can never self-resolve once the table stops being walked. An incident "
+        "that also touches a still-watched dataset is left intact. Honors --dry-run.",
+    )
+    forget.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview which datasets would be forgotten without dropping anything from the "
@@ -4569,7 +4599,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the batch outcome as one JSON object (forgotten[], missed[], count, "
-        "dry_run) instead of per-token lines — a machine receipt for an automation loop.",
+        "dry_run — plus forgotten_incidents[] with --with-incidents) instead of per-token "
+        "lines — a machine receipt for an automation loop.",
     )
     forget.set_defaults(func=cmd_forget)
 

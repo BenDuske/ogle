@@ -4040,6 +4040,89 @@ def test_forget_registered_in_help():
     assert ns.urn == [ORDERS_URN]
     assert ns.dry_run is False  # defaults off — forget mutates unless asked to preview
     assert ns.json is False     # human by default; --json is the machine receipt
+    assert ns.with_incidents is False  # opt-in; forget leaves incidents alone by default
+
+
+def test_forget_leaves_incidents_alone_without_the_flag(tmp_path, capsys):
+    # Default forget drops the dataset but NOT its incidents (that's `resolve`'s job).
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp_orders", severity="high", title="O", urns=[ORDERS_URN])
+    s.save()
+    rc = main(["forget", ORDERS_URN, "--store", str(store)])
+    assert rc == 0
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded
+    assert reloaded.has_seen("fp_orders")  # incident survives — unchanged default behavior
+
+
+def test_forget_with_incidents_drops_confined_orphan(tmp_path, capsys):
+    # A decommissioned dataset's incident that touches ONLY it can never self-resolve — prune it.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp_orders", severity="high", title="O", urns=[ORDERS_URN])
+    s.save()
+    rc = main(["forget", ORDERS_URN, "--with-incidents", "--store", str(store)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "resolved orphan incident" in out and "fp_orders" in out
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded
+    assert not reloaded.has_seen("fp_orders")  # orphan gone
+
+
+def test_forget_with_incidents_preserves_incident_touching_a_live_dataset(tmp_path, capsys):
+    # An incident spanning the forgotten dataset AND a still-watched one is NOT an orphan.
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident(
+        "fp_both", severity="high", title="B", urns=[ORDERS_URN, CUSTOMERS_URN]
+    )
+    s.save()
+    rc = main(["forget", ORDERS_URN, "--with-incidents", "--store", str(store)])
+    assert rc == 0
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN not in reloaded
+    assert reloaded.has_seen("fp_both")  # customers still watched → incident preserved
+
+
+def test_forget_with_incidents_dry_run_previews_without_dropping(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp_orders", severity="high", title="O", urns=[ORDERS_URN])
+    s.save()
+    mtime_before = store.stat().st_mtime_ns
+    rc = main(
+        ["forget", ORDERS_URN, "--with-incidents", "--dry-run", "--store", str(store)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would resolve orphan incident" in out and "🧹" not in out
+    reloaded = BaselineStore.load(store)
+    assert ORDERS_URN in reloaded and reloaded.has_seen("fp_orders")  # nothing mutated
+    assert store.stat().st_mtime_ns == mtime_before  # never written
+
+
+def test_forget_with_incidents_json_adds_forgotten_incidents_list(tmp_path, capsys):
+    store = tmp_path / "baselines.json"
+    s = _seed_baselines(store)
+    s.record_incident("fp_orders", severity="high", title="O", urns=[ORDERS_URN])
+    s.save()
+    rc = main(["forget", ORDERS_URN, "--with-incidents", "--json", "--store", str(store)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["forget"]
+    assert payload["forgotten"] == [ORDERS_URN]
+    assert payload["forgotten_incidents"] == ["fp_orders"]
+
+
+def test_forget_json_omits_incident_list_without_the_flag(tmp_path, capsys):
+    # Default receipt shape is unchanged for existing automation — no incident key.
+    store = tmp_path / "baselines.json"
+    _seed_baselines(store)
+    rc = main(["forget", ORDERS_URN, "--json", "--store", str(store)])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)["forget"]
+    assert "forgotten_incidents" not in payload
 
 
 # ---- status: whole-store rollup ---------------------------------------------------
