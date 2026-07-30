@@ -58,6 +58,7 @@ class _IncidentRecord:
     first_seen: Optional[float] = None  # epoch-seconds of the FIRST sighting — the incident's longevity/standing (None = legacy/untimed)
     kinds: List[str] = field(default_factory=list)  # drift dimensions in the incident at last sighting (schema/volume/quality/distribution/freshness); [] = legacy/unknown
     owners: List[str] = field(default_factory=list)  # owner display names (union across the incident's datasets) at last sighting — the "who to page" attribution; [] = unowned/legacy
+    urns: List[str] = field(default_factory=list)  # dataset URNs the incident touched at last sighting — the "which assets" provenance behind per-asset history queries; [] = legacy/unknown
 
     def to_dict(self) -> dict:
         # Serialize provenance only when set so an old bare-count record round-trips
@@ -79,6 +80,8 @@ class _IncidentRecord:
             d["kinds"] = list(self.kinds)
         if self.owners:
             d["owners"] = list(self.owners)
+        if self.urns:
+            d["urns"] = list(self.urns)
         return d
 
     @classmethod
@@ -87,6 +90,7 @@ class _IncidentRecord:
         fs = data.get("first_seen")
         raw_kinds = data.get("kinds")
         raw_owners = data.get("owners")
+        raw_urns = data.get("urns")
         return cls(
             count=int(data.get("count", 0)),
             severity=data.get("severity"),
@@ -97,6 +101,7 @@ class _IncidentRecord:
             first_seen=float(fs) if fs is not None else None,
             kinds=[str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else [],
             owners=[str(o) for o in raw_owners] if isinstance(raw_owners, list) else [],
+            urns=[str(u) for u in raw_urns] if isinstance(raw_urns, list) else [],
         )
 
 
@@ -195,6 +200,7 @@ class BaselineStore:
         serving: bool = False,
         kinds: Optional[Iterable[str]] = None,
         owners: Optional[Iterable[str]] = None,
+        urns: Optional[Iterable[str]] = None,
         now: Optional[float] = None,
     ) -> int:
         """Record one observation of an incident; return its running observation count.
@@ -216,6 +222,12 @@ class BaselineStore:
         `kinds` it refreshes only when supplied; `owners=None` leaves an earlier capture intact,
         so an owner-less offline (`--signatures`) run can't erase the attribution a live walk
         recorded.
+
+        `urns` (the dataset URNs this incident touched) is provenance in the same latest-sighting
+        sense — stored so a per-asset history query (`prior_incident_history`) can tell whether an
+        asset is chronically unstable. It refreshes only when supplied; `urns=None` leaves an
+        earlier capture intact. A legacy/pre-`urns` record simply carries [] and is invisible to
+        the per-asset query (the same never-guess rule `kinds`/`owners` filters follow).
 
         `now` (epoch seconds) stamps `last_seen` for this sighting, giving the incident a
         temporal axis (`ogle incidents` age display + `--stale` staleness hunt). It's
@@ -249,6 +261,11 @@ class BaselineStore:
             # record; None leaves an earlier capture intact, [] means "supplied, but unowned".
             if owners is not None:
                 rec.owners = sorted({str(o) for o in owners})
+            # Same latest-sighting refresh as kinds/owners: deduped + sorted for a stable,
+            # diffable record; None leaves an earlier capture intact, [] means "supplied,
+            # but no URNs recorded".
+            if urns is not None:
+                rec.urns = sorted({str(u) for u in urns})
         if now is not None:
             rec.last_seen = now
             if rec.first_seen is None:
@@ -272,6 +289,30 @@ class BaselineStore:
             d["fingerprint"] = fp
             out.append(d)
         return out
+
+    def prior_incident_history(
+        self, urns: Iterable[str], exclude_fingerprint: Optional[str] = None
+    ) -> int:
+        """How many DISTINCT remembered incidents touched any of the given dataset URNs.
+
+        The cross-run signal behind an alert's "recurring instability" annotation: an asset
+        with prior incidents on record is chronically unstable, not a first-time blip. Pass
+        `exclude_fingerprint` (usually the incident being reported this run) so an incident
+        never counts itself.
+
+        Only incidents whose recorded `urns` provenance overlaps `urns` count — a legacy or
+        offline record that never captured its URNs can't be *proven* to touch the asset, so
+        it is not counted (the same never-guess rule the `--owner`/`--kind` filters follow).
+        Returns the match count (0 when none / all un-URN'd).
+        """
+        want = {str(u) for u in urns}
+        if not want:
+            return 0
+        return sum(
+            1
+            for fp, rec in self.seen_incidents.items()
+            if fp != exclude_fingerprint and want.intersection(rec.urns)
+        )
 
     # ---- muting (known false positives) --------------------------------------------
     def mute(

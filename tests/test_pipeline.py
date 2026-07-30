@@ -124,6 +124,46 @@ def test_recorded_incident_carries_owner_attribution():
     assert rec2["owners"] == ["data-eng", "growth-team"]
 
 
+def test_recorded_incident_carries_touched_urns():
+    """The pipeline persists which assets an incident touched so a later run can tell a
+    chronic asset from a first-timer (`prior_incident_history`)."""
+    store = BaselineStore()
+    store.put_baseline(_sig(urn=CUSTOMERS_URN, row_count=1000))
+    store.put_baseline(_sig(urn=ORDERS_URN, row_count=1000))
+    run_drift_check(
+        store,
+        [_sig(urn=CUSTOMERS_URN, row_count=0), _sig(urn=ORDERS_URN, row_count=0)],
+    )
+    (rec,) = store.incidents()
+    assert rec["urns"] == sorted([CUSTOMERS_URN, ORDERS_URN])
+
+
+def test_recurring_asset_gets_history_note_in_narrative():
+    """A NEW incident on an asset that already has a prior (different-fingerprint) incident on
+    record is annotated as chronic instability — the cross-run 'gets sharper over time' signal
+    surfaced to the on-call operator."""
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    # A prior, resolved-and-forgotten-shape incident on the SAME asset, different fingerprint.
+    store.record_incident(
+        "old-drift-fp", severity="high", title="earlier drift", urns=[CUSTOMERS_URN]
+    )
+    report = run_drift_check(store, [_sig(row_count=0)])  # fresh volume collapse -> new fp
+    assert report.incident is not None
+    assert report.incident.fingerprint != "old-drift-fp"
+    assert "Recurring context" in report.narrative
+    assert "1 prior incident on record for this asset" in report.narrative
+
+
+def test_first_time_drift_has_no_history_note():
+    """A first-ever drift on an asset must NOT manufacture a recurring-context line."""
+    store = BaselineStore()
+    store.put_baseline(_sig(row_count=1000))
+    report = run_drift_check(store, [_sig(row_count=0)])
+    assert report.incident is not None
+    assert "Recurring context" not in report.narrative
+
+
 def test_serving_path_escalates_severity():
     store = BaselineStore()
     store.put_baseline(_sig(row_count=1000))

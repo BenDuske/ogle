@@ -243,10 +243,19 @@ def _recommended_actions(findings: List[DriftFinding]) -> List[str]:
     return [_ACTIONS[k] for k in kinds]
 
 
-def render_markdown(incident: Incident) -> str:
-    """Deterministic markdown report. This is the ground truth an LLM only rephrases."""
+def render_markdown(incident: Incident, context_note: Optional[str] = None) -> str:
+    """Deterministic markdown report. This is the ground truth an LLM only rephrases.
+
+    `context_note` is an optional one-line cross-run fact the caller supplies (e.g. "these
+    assets have prior incidents on record"). It is rendered right under the summary line so
+    an on-call engineer reads it before the per-dataset detail. The core stays pure — the
+    note is just a passed string; the store/clock context that produces it lives in the
+    pipeline, keeping this function unit-testable with no store and no clock.
+    """
     mark = _SEV_MARK[incident.overall_severity]
     lines: List[str] = [f"## {mark} {incident.title}", "", incident.summary_line, ""]
+    if context_note and context_note.strip():
+        lines += [context_note.strip(), ""]
 
     by_urn: Dict[str, List[DriftFinding]] = {}
     for f in incident.findings:
@@ -273,15 +282,16 @@ def render_markdown(incident: Incident) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_llm_prompt(incident: Incident) -> str:
+def build_llm_prompt(incident: Incident, context_note: Optional[str] = None) -> str:
     """Grounded prompt handed to an LLM to phrase the incident.
 
     Pure and testable. It hands the model the already-computed facts and *forbids*
     inventing severity or datasets — the model's only job is a tight, plain-English
     summary a busy engineer can act on. Kept model-agnostic (works for Aegis-local Qwen
-    or Anthropic fallback).
+    or Anthropic fallback). Any `context_note` is folded into the FACTS block so the model
+    may use the cross-run history but still cannot invent beyond what Ogle computed.
     """
-    facts = render_markdown(incident)
+    facts = render_markdown(incident, context_note=context_note)
     return (
         "You are Ogle, an ML-lineage monitoring agent. Below are drift findings Ogle "
         "already computed for datasets feeding production ML models. Write a short "
@@ -299,6 +309,7 @@ def narrate(
     findings: List[DriftFinding],
     llm: Optional[Callable[[str], str]] = None,
     owners: Optional[Dict[str, List[str]]] = None,
+    context_note: Optional[str] = None,
 ) -> str:
     """Produce the human-facing narrative for a scoring run.
 
@@ -307,21 +318,23 @@ def narrate(
     back to the deterministic report, because an alert must always go out. Empty findings
     yield a clean "no drift" line so callers can send a heartbeat without special-casing.
     `owners` (urn -> owner names) is surfaced as a "who to page" line when provided.
+    `context_note` is an optional cross-run fact (e.g. prior-incident history) rendered
+    under the summary on both the deterministic and LLM paths.
     """
     incident = build_incident(findings, owners=owners)
     if incident is None:
         return "✅ No drift detected across monitored datasets.\n"
 
     if llm is None:
-        return render_markdown(incident)
+        return render_markdown(incident, context_note=context_note)
 
-    prompt = build_llm_prompt(incident)
+    prompt = build_llm_prompt(incident, context_note=context_note)
     try:
         text = llm(prompt)
     except Exception:
-        return render_markdown(incident)
+        return render_markdown(incident, context_note=context_note)
     if not text or not text.strip():
-        return render_markdown(incident)
+        return render_markdown(incident, context_note=context_note)
     body = text.strip()
     # Keep the incident fingerprint footer on the polished path. It is the stable handle
     # Aegis dedups on and an operator references by — the deterministic report always

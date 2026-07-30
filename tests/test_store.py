@@ -303,6 +303,81 @@ def test_incident_without_owners_omits_the_key(tmp_path):
     assert "owners" not in raw["seen_incidents"]["fp"]
 
 
+# ---- incident URN provenance + per-asset history ------------------------------------
+
+def test_record_incident_stores_urns_sorted_and_deduped():
+    # The touched-asset set is stored deduped + sorted for a stable, diffable record (parity
+    # with kinds/owners).
+    store = BaselineStore()
+    store.record_incident(
+        "fp", severity="high", title="drift", urns=["urn:b", "urn:a", "urn:b"]
+    )
+    (rec,) = store.incidents()
+    assert rec["urns"] == ["urn:a", "urn:b"]
+
+
+def test_bare_record_incident_does_not_blank_prior_urns():
+    # An offline/metadata-less dedup ping (urns=None) must not erase the asset set an earlier
+    # rich call captured (parity with owners/kinds).
+    store = BaselineStore()
+    store.record_incident("fp", severity="medium", title="drift", urns=["urn:a"])
+    store.record_incident("fp")  # bare ping — no urns
+    (rec,) = store.incidents()
+    assert rec["urns"] == ["urn:a"]
+
+
+def test_incident_urns_roundtrip_through_disk(tmp_path):
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", title="drift", urns=["urn:a", "urn:b"])
+    s1.save()
+    (rec,) = BaselineStore.load(p).incidents()
+    assert rec["urns"] == ["urn:a", "urn:b"]
+
+
+def test_incident_without_urns_omits_the_key(tmp_path):
+    # A URN-less record must not emit an empty `urns` list — old/new Ogle round-trip identical
+    # bytes (additive-provenance contract).
+    p = tmp_path / "store.json"
+    s1 = BaselineStore(path=p)
+    s1.record_incident("fp", severity="high", title="drift")
+    s1.save()
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    assert "urns" not in raw["seen_incidents"]["fp"]
+
+
+def test_prior_incident_history_counts_distinct_incidents_touching_an_asset():
+    # Two different incidents both touched urn:a; a third touched only urn:c. A query for
+    # urn:a sees the two, not the third.
+    store = BaselineStore()
+    store.record_incident("fp1", severity="high", title="d", urns=["urn:a", "urn:b"])
+    store.record_incident("fp2", severity="low", title="d", urns=["urn:a"])
+    store.record_incident("fp3", severity="low", title="d", urns=["urn:c"])
+    assert store.prior_incident_history(["urn:a"]) == 2
+
+
+def test_prior_incident_history_excludes_own_fingerprint():
+    # An incident must not count itself as prior history.
+    store = BaselineStore()
+    store.record_incident("fp1", severity="high", title="d", urns=["urn:a"])
+    store.record_incident("fp2", severity="low", title="d", urns=["urn:a"])
+    assert store.prior_incident_history(["urn:a"], exclude_fingerprint="fp2") == 1
+
+
+def test_prior_incident_history_ignores_records_without_urn_provenance():
+    # A legacy/offline record that never captured its URNs can't be proven to touch the asset,
+    # so it is not counted (never-guess rule, parity with the --owner/--kind filters).
+    store = BaselineStore()
+    store.record_incident("legacy", severity="high", title="d")  # no urns
+    assert store.prior_incident_history(["urn:a"]) == 0
+
+
+def test_prior_incident_history_empty_query_is_zero():
+    store = BaselineStore()
+    store.record_incident("fp1", severity="high", title="d", urns=["urn:a"])
+    assert store.prior_incident_history([]) == 0
+
+
 def test_legacy_bare_count_record_loads(tmp_path):
     # A store file written by an older Ogle (count only, no provenance keys) must load and
     # surface as an incident with empty/defaulted provenance — never crash.

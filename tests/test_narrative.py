@@ -163,6 +163,48 @@ def test_summary_line_appears_in_markdown_under_title():
     assert md.index(inc.title) < md.index("finding")
 
 
+# ---- context_note (cross-run history annotation) ----
+
+def test_context_note_renders_under_summary_line():
+    inc = build_incident([_finding(msg="schema changed: removed ['region']")])
+    note = "🔁 Recurring context: 3 prior incidents on record for this asset."
+    md = render_markdown(inc, context_note=note)
+    assert note in md
+    # placed between the summary line and the first per-dataset section
+    assert md.index(inc.summary_line) < md.index(note) < md.index("###")
+
+
+def test_context_note_absent_leaves_markdown_unchanged():
+    inc = build_incident([_finding(msg="schema changed: removed ['region']")])
+    assert render_markdown(inc) == render_markdown(inc, context_note=None)
+    # a blank/whitespace note is treated as absent (no empty line injected)
+    assert render_markdown(inc) == render_markdown(inc, context_note="   ")
+
+
+def test_context_note_folds_into_llm_prompt_facts():
+    inc = build_incident([_finding(msg="row count collapsed 10000 -> 0")])
+    note = "🔁 Recurring context: 2 prior incidents on record for these assets."
+    prompt = build_llm_prompt(inc, context_note=note)
+    assert note in prompt  # the model may use the history, still can't invent beyond FACTS
+
+
+def test_narrate_threads_context_note_on_deterministic_path():
+    findings = [_finding(msg="schema changed: removed ['region']")]
+    note = "🔁 Recurring context: 1 prior incident on record for this asset."
+    assert note in narrate(findings, context_note=note)
+
+
+def test_narrate_threads_context_note_on_llm_fallback():
+    # Even when the LLM raises, the fallback markdown must still carry the history note.
+    findings = [_finding(msg="schema changed: removed ['region']")]
+    note = "🔁 Recurring context: 4 prior incidents on record for this asset."
+
+    def boom(_):
+        raise RuntimeError("model down")
+
+    assert note in narrate(findings, llm=boom, context_note=note)
+
+
 # ---- build_llm_prompt ----
 
 def test_llm_prompt_grounds_on_facts_and_forbids_invention():

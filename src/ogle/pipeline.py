@@ -142,8 +142,24 @@ def run_drift_check(
     incident = build_incident(all_findings, owners=owners)
     is_new = False
     count = 0
+    context_note: Optional[str] = None
     if incident is not None:
         is_new = not store.has_seen(incident.fingerprint)
+        # Cross-run triage signal: how many OTHER remembered incidents have touched these
+        # same assets. Computed BEFORE recording this run's incident (and excluding its own
+        # fingerprint) so an asset with a track record reads as chronically unstable rather
+        # than a first-time blip. Zero for a first-ever drift or a store with no URN
+        # provenance — in which case no note is added (never manufacture history).
+        prior = store.prior_incident_history(
+            incident.urns, exclude_fingerprint=incident.fingerprint
+        )
+        if prior:
+            these = "this asset" if len(incident.urns) == 1 else "these assets"
+            context_note = (
+                f"\U0001f501 Recurring context: {prior} prior "
+                f"incident{'' if prior == 1 else 's'} on record for {these} — "
+                "chronic instability, not a first-time blip."
+            )
         # Record with provenance so `ogle incidents` can describe what Ogle remembers,
         # not just count opaque fingerprints.
         count = store.record_incident(
@@ -163,10 +179,14 @@ def run_drift_check(
                 if incident.owners
                 else None
             ),
+            # Which assets this incident touched — the provenance behind
+            # `prior_incident_history`, so a future run can tell a chronic asset from a
+            # first-timer. Always known when a live or offline incident is built.
+            urns=list(incident.urns),
             now=now,
         )
 
-    text = narrate(all_findings, llm=llm, owners=owners)
+    text = narrate(all_findings, llm=llm, owners=owners, context_note=context_note)
 
     # Advance baselines only after scoring, so a mid-batch failure can't half-update state.
     if update_baselines:
