@@ -3889,6 +3889,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     ]
     if kind_parts:
         _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
+    # Orphaned-drift callout — the ownership-coverage twin of the by-dimension texture above:
+    # remembered incidents with NOBODY on the hook to page. The serving∩unowned (🆘) and apex
+    # (💀) intersections on the serving line above are SUBSETS of this — a store can hold
+    # orphaned drift that never touches a serving path, in which case those intersections stay
+    # silent and the snapshot would otherwise say nothing about the orphaned set at all, even
+    # though it's a coverage gap (drift nobody is assigned to fix). Same count `metrics` emits
+    # as ogle_incidents_unowned, `status --json` carries as `unowned`, and `incidents --summary`
+    # prints on its own 🚨 line — brought to the human snapshot for parity. Printed only when
+    # nonzero (an all-owned store needs no "0 orphaned" noise); a positive count is the
+    # assign-an-owner page-lead signal, matching the --summary callout's wording.
+    if inc.get("unowned"):
+        _emit(f"- 🚨 unowned (nobody to page): {inc['unowned']}")
     # How long the remembered drift has been sitting: the stalest (longest-quiet) incident
     # leads because that's the resolve/forget candidate an operator most needs nudged about —
     # drift that stopped recurring weeks ago but was never cleared. Freshest trails as the

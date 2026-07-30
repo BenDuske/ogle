@@ -2687,6 +2687,36 @@ def test_status_omits_serving_unowned_recurring_when_zero(tmp_path, capsys):
     assert "serving+unowned+recurring" not in out       # …but seen once, so NOT the apex triple
 
 
+def test_status_surfaces_unowned_callout_even_when_not_serving(tmp_path, capsys):
+    # The load-bearing gap this closes: orphaned drift that never touches a serving path. The
+    # serving∩unowned (🆘) and apex (💀) intersections stay silent here, yet the drift still has
+    # nobody to page — so the human `status` snapshot must surface the flat unowned count on its
+    # own 🚨 line, matching metrics (ogle_incidents_unowned), `status --json`, and the --summary
+    # callout. Two ownerless, non-serving incidents → "🚨 unowned (nobody to page): 2", and NO
+    # serving-intersection line (nothing serves).
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="low", title="A", owners=[])                 # unowned, not serving
+    s.record_incident("b", severity="medium", title="B", owners=["  "])          # blank owner → unowned
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "🚨 unowned (nobody to page): 2" in out
+    assert "serving+unowned" not in out  # neither incident is on a serving path
+
+
+def test_status_omits_unowned_callout_when_all_owned(tmp_path, capsys):
+    # Every incident has a real owner → no orphaned drift → the 🚨 line is suppressed (no
+    # "0 orphaned" noise), mirroring the --summary callout's zero-suppression.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("b", severity="low", title="B", owners=["Bob"])
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    assert "nobody to page" not in capsys.readouterr().out
+
+
 def test_incidents_summary_json_exposes_by_kind(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)
