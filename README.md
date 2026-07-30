@@ -283,10 +283,14 @@ cross-tab the `ogle_incidents_serving_by_severity` gauge exposes (the four bucke
 of serving *and* recurring (a live model being fed drifted data **repeatedly**, unresolved — the
 top-priority page) that the two per-severity cross-tabs **can't** reconstruct because each crosses
 its axis with severity, not with the other; shown only when nonzero and mirrored by the
-`ogle_incidents_serving_recurring` gauge — a **by-dimension** line (`🏷️ by dimension: schema 2 · freshness 1`) naming which
+`ogle_incidents_serving_recurring` gauge — a **by-dimension** line (`🏷️ by dimension: schema 2 (⚠️1) · freshness 1`) naming which
 failure modes the incidents carry, the human twin of `ogle_incidents_by_kind` (**non-exclusive** — a
 two-dimension incident shows in both — so it needn't sum to the total; the `unknown` bucket for
-legacy incidents is omitted here and the line is skipped entirely when nothing is attributed) — a
+legacy incidents is omitted here and the line is skipped entirely when nothing is attributed), each
+dimension annotated with its **serving-path share** (`⚠️N`) when nonzero — the serving ∩ dimension
+cross-tab `ogle_incidents_serving_by_kind{kind="…"}` exposes, telling the on-call *which* dimension is
+hitting production (a schema break to redeploy vs. freshness staleness to unstick — different fixes),
+so `schema 2 (⚠️1)` means one of the two schema incidents is on a live serving path (`serving_by_kind[d] ≤ by_kind[d]`) — a
 **by-owner** roster (`👤 by owner: Alice 2 · Bob 1`) naming who is carrying how much remembered
 drift, the people twin of the by-dimension line that completes the ownership axis alongside
 `incidents --owner NAME` (one person's queue) and `incidents --unowned` (nobody's). It is likewise
@@ -398,7 +402,12 @@ the drift-dimension breakdown `ogle_incidents_by_kind{kind="schema|volume|qualit
 so an incident spanning two dimensions counts in both and the label sum can exceed
 `ogle_incidents_remembered` — graph it to see whether e.g. a freshness-drift spike is driving the
 total, or alert `{kind="freshness"} > 0` on any stalled feed; `{kind="unknown"}` holds legacy
-incidents with no recorded dimension),
+incidents with no recorded dimension) and its serving cross-tab
+`ogle_incidents_serving_by_kind{kind="…"}` (the serving ∩ dimension split — *which* dimension is
+hitting a live serving path, the kind-axis twin of `ogle_incidents_serving_by_severity`; alert
+`{kind="freshness"} > 0` for a production freshness spike specifically; **non-exclusive** like its
+marginal, and per label it never exceeds `ogle_incidents_by_kind` since it is the same buckets gated
+on serving),
 `ogle_incidents_unowned` (orphaned drift with no recorded owner — the alerting twin of
 `incidents --unowned`; a rising count is a coverage gap, not a data problem, so alert
 `ogle_incidents_unowned > 0` to push a lead to assign owners before ownerless drift silently rots),

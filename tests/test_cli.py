@@ -2361,6 +2361,65 @@ def test_incidents_summary_by_dimension_suppressed_without_kinds(tmp_path, capsy
     assert "by dimension:" not in capsys.readouterr().out
 
 
+def test_incidents_summary_by_dimension_serving_share_annotation(tmp_path, capsys):
+    # The by-dimension line annotates each dimension with its serving-path share (⚠️N) — the
+    # serving ∩ kind cross-tab, the remediation-priority signal the flat dimension count hides.
+    # Here 2 of 2 schema incidents are serving but only 1 of the 2 volume incidents is, so
+    # schema reads "schema 2 (⚠️2)" and volume reads "volume 2 (⚠️1)".
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"], serving=True)
+    s.record_incident("b", severity="low", title="B", kinds=["schema"], serving=True)
+    s.record_incident("c", severity="low", title="C", kinds=["volume"], serving=False)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 2 (⚠️2) · volume 2 (⚠️1)" in out
+
+
+def test_incidents_summary_by_dimension_no_serving_annotation_when_offline(tmp_path, capsys):
+    # A dimension with no serving-path drift stays bare (no "⚠️0" noise), mirroring the owner
+    # line and the conditional serving splits elsewhere in the rollup.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema"], serving=False)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 1" in out
+    assert "⚠️" not in out.split("by dimension:", 1)[1].splitlines()[0]
+
+
+def test_incidents_summary_json_exposes_serving_by_kind(tmp_path, capsys):
+    # JSON parity: serving_by_kind holds the serving subset of by_kind, per dimension, and
+    # never exceeds by_kind for any dimension.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"], serving=True)
+    s.record_incident("b", severity="low", title="B", kinds=["schema"], serving=False)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["serving_by_kind"]["schema"] == 1   # only the serving schema incident
+    assert summary["serving_by_kind"]["volume"] == 1
+    assert summary["by_kind"]["schema"] == 2           # marginal counts both
+    # Invariant: serving_by_kind[d] <= by_kind[d] for every dimension.
+    for d, n in summary["serving_by_kind"].items():
+        assert n <= summary["by_kind"][d]
+
+
+def test_status_by_dimension_serving_share_annotation(tmp_path, capsys):
+    # The human status snapshot carries the same serving ∩ kind annotation as the summary.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["freshness"], serving=True)
+    s.record_incident("b", severity="low", title="B", kinds=["freshness"], serving=False)
+    s.save()
+    assert main(["status", "--store", str(store_path)]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: freshness 2 (⚠️1)" in out
+
+
 def test_incidents_summary_unowned_line_when_orphaned(tmp_path, capsys):
     # The rollup calls out orphaned drift (no owner to page), the human twin of the
     # ogle_incidents_unowned gauge and `incidents --unowned`. Printed only when nonzero.

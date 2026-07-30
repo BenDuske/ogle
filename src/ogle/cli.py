@@ -2113,6 +2113,19 @@ def _incident_summary(records: List[dict]) -> dict:
     # is stable and no dimension is fabricated; an unrecognized kind string folds there too.
     by_kind = {k.value: 0 for k in DriftKind}
     by_kind["unknown"] = 0
+    # Serving ∩ dimension cross-tab — the kind-axis twin of serving_by_severity and
+    # serving_by_owner: of the drift hitting a live serving path, WHICH dimension is it
+    # (schema/volume/quality/distribution/freshness)? The flat `serving` total says "N
+    # production pages" but not whether they're schema breaks (redeploy the pipeline) or
+    # freshness staleness (unstick the loader) — different remediations, so the split changes
+    # what the on-call does first. NON-exclusive exactly like `by_kind` (a serving incident
+    # spanning schema+volume counts in both), so sum(serving_by_kind) can EXCEED `serving`; it
+    # is a per-dimension tally of the serving subset, not a partition. Tallied off the SAME
+    # `is_serving` flag and the SAME dimension buckets as `by_kind`, so it can never disagree
+    # with the `serving` marginal or the `by_kind` roster: serving_by_kind[d] <= by_kind[d]
+    # for every dimension. `unknown` holds serving incidents with no recorded dimension.
+    serving_by_kind = {k.value: 0 for k in DriftKind}
+    serving_by_kind["unknown"] = 0
     serving = 0
     recurring = 0
     # Serving ∩ recurring — the worst single class: drift on a live serving path that ALSO
@@ -2210,10 +2223,14 @@ def _incident_summary(records: List[dict]) -> dict:
         rk = r.get("kinds")
         if isinstance(rk, list) and rk:
             buckets = {k if (k in by_kind and k != "unknown") else "unknown" for k in rk}
-            for b in buckets:
-                by_kind[b] += 1
         else:
-            by_kind["unknown"] += 1
+            buckets = {"unknown"}
+        for b in buckets:
+            by_kind[b] += 1
+            # Same buckets gated on the serving flag → the serving ∩ dimension cross-tab can
+            # never exceed its `by_kind` marginal (serving_by_kind[d] <= by_kind[d]).
+            if is_serving:
+                serving_by_kind[b] += 1
     return {
         "total": len(records),
         "by_severity": by_severity,
@@ -2225,6 +2242,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_unowned": serving_unowned,
         "serving_unowned_recurring": serving_unowned_recurring,
         "by_kind": by_kind,
+        "serving_by_kind": serving_by_kind,
         "unowned": unowned,
         "by_owner": {display: cnt for display, cnt, _sv in owner_acc.values()},
         "serving_by_owner": {
@@ -2701,8 +2719,20 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # in both), so it need not sum to `total`; only nonzero REAL dimensions are listed and the
         # `unknown` bucket is omitted (it's absence-of-a-dimension, kept only in the gauge). The
         # line is skipped when no real dimension is attributed (e.g. a legacy-only store).
+        # Annotate each dimension with its serving-path share (⚠️N) when nonzero — the
+        # remediation-priority signal the flat dimension count can't carry: "schema 5 (⚠️2)"
+        # says two of the five schema incidents touch production, so schema drift leads the
+        # call even if freshness's raw count is higher. Dimensions with no serving drift stay
+        # bare (no "⚠️0" noise), mirroring the owner line and the conditional serving splits
+        # elsewhere in this rollup. serving_by_kind[d] <= by_kind[d] by construction.
         bks = summary["by_kind"]
-        kind_parts = [f"{d.value} {bks[d.value]}" for d in DriftKind if bks[d.value]]
+        sbk = summary["serving_by_kind"]
+        kind_parts = [
+            f"{d.value} {bks[d.value]}"
+            + (f" (⚠️{sbk[d.value]})" if sbk.get(d.value) else "")
+            for d in DriftKind
+            if bks[d.value]
+        ]
         if kind_parts:
             _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
         # Owner ROSTER — the people twin of the by-dimension line: "who is carrying how much
@@ -3122,6 +3152,21 @@ def _render_prometheus(
         "ogle_incidents_by_kind",
         "Remembered incidents carrying each drift dimension (non-exclusive; sum ≥ remembered).",
         [({"kind": k}, bk.get(k, 0)) for k in kind_order],
+    )
+    # Serving ∩ dimension cross-tab — of the drift on a live serving path, WHICH dimension is
+    # it? The kind-axis twin of ogle_incidents_serving_by_severity: the flat serving total says
+    # "N production pages" but not whether they're schema breaks (redeploy) or freshness
+    # staleness (unstick the loader) — different fixes, so the split drives the on-call's first
+    # move. Graph `ogle_incidents_serving_by_kind{kind="freshness"}` to alert on a production
+    # freshness spike alone. NON-exclusive exactly like ogle_incidents_by_kind (a serving
+    # incident spanning two dimensions counts in both), so summing over the label can exceed
+    # ogle_incidents_serving; per label it never exceeds ogle_incidents_by_kind (same buckets,
+    # gated on serving). Emitted for every kind (honest 0s) so an alert series never vanishes.
+    sbk = inc.get("serving_by_kind") or {}
+    family(
+        "ogle_incidents_serving_by_kind",
+        "Remembered serving-path incidents carrying each drift dimension (serving AND dimension; non-exclusive).",
+        [({"kind": k}, sbk.get(k, 0)) for k in kind_order],
     )
     family(
         "ogle_incidents_sightings",
@@ -3660,8 +3705,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     # incidents with no recorded kind) is omitted here — it's absence-of-a-dimension, noise on a
     # human line — but stays in the gauge for series completeness. The whole line is skipped when
     # no real dimension is attributed (e.g. a legacy-only store), rather than printing zeros.
+    # Each dimension carries its serving-path share (⚠️N) when nonzero — the same
+    # remediation-priority signal the summary rollup surfaces, brought to the human snapshot:
+    # "schema 5 (⚠️2)" says two of five schema incidents touch production. The serving ∩ kind
+    # cross-tab `metrics` exposes as ogle_incidents_serving_by_kind. Dimensions with no serving
+    # drift stay bare (no "⚠️0" noise); serving_by_kind[d] <= by_kind[d] by construction.
     bk = inc["by_kind"]
-    kind_parts = [f"{d.value} {bk[d.value]}" for d in DriftKind if bk[d.value]]
+    sbk = inc.get("serving_by_kind") or {}
+    kind_parts = [
+        f"{d.value} {bk[d.value]}"
+        + (f" (⚠️{sbk[d.value]})" if sbk.get(d.value) else "")
+        for d in DriftKind
+        if bk[d.value]
+    ]
     if kind_parts:
         _emit(f"- 🏷️ by dimension: {' · '.join(kind_parts)}")
     # How long the remembered drift has been sitting: the stalest (longest-quiet) incident

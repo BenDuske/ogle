@@ -95,6 +95,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_recurring_by_severity",
         "ogle_incidents_serving_recurring",
         "ogle_incidents_by_kind",
+        "ogle_incidents_serving_by_kind",
         "ogle_incidents_sightings",
         "ogle_incidents_unowned",
         "ogle_incidents_serving_unowned",
@@ -382,6 +383,63 @@ def test_recurring_by_severity_sums_to_flat_recurring(tmp_path, capsys):
         for s in ("high", "medium", "low", "unknown")
     )
     assert split == int(samples["ogle_incidents_recurring"])
+
+
+def test_serving_by_kind_disambiguates_which_dimension_is_in_production(tmp_path, capsys):
+    """Flat serving + flat by_kind can't say WHICH dimension is hitting production.
+
+    A serving freshness incident next to a NON-serving schema incident gives serving=1 and
+    by_kind{schema}=1, by_kind{freshness}=1 — yet the only production drift is freshness.
+    Only the serving ∩ kind cross-tab tells the on-call the deployed model is stale, not
+    schema-broken (different remediation).
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fr", severity="high", title="FRESH", kinds=["freshness"], serving=True)
+    s.record_incident("sc", severity="high", title="SCHEMA", kinds=["schema"], serving=False)
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # The misleading flat view: both dimensions look "present".
+    assert samples['ogle_incidents_by_kind{kind="schema"}'] == "1"
+    assert samples['ogle_incidents_by_kind{kind="freshness"}'] == "1"
+    # The truth the cross-tab surfaces: only freshness is on a serving path.
+    assert samples['ogle_incidents_serving_by_kind{kind="freshness"}'] == "1"
+    assert samples['ogle_incidents_serving_by_kind{kind="schema"}'] == "0"
+
+
+def test_serving_by_kind_never_exceeds_by_kind(tmp_path, capsys):
+    """Invariant: the serving subset can never exceed its by_kind marginal, per dimension."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"], serving=True)
+    s.record_incident("b", severity="low", title="B", kinds=["schema"], serving=False)
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    for kind in ("schema", "volume", "quality", "distribution", "freshness", "unknown"):
+        sv = int(samples[f'ogle_incidents_serving_by_kind{{kind="{kind}"}}'])
+        bk = int(samples[f'ogle_incidents_by_kind{{kind="{kind}"}}'])
+        assert sv <= bk
+
+
+def test_incident_summary_serving_by_kind_counts_only_serving():
+    """Pure-helper check: only serving incidents feed serving_by_kind; legacy → unknown."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "serving": True, "count": 1, "kinds": ["schema"]},
+            {"severity": "high", "serving": False, "count": 1, "kinds": ["schema"]},
+            {"severity": "low", "serving": True, "count": 1},  # legacy: no kinds → unknown
+        ]
+    )
+    assert inc["serving_by_kind"]["schema"] == 1  # only the serving schema incident
+    assert inc["by_kind"]["schema"] == 2
+    assert inc["serving_by_kind"]["unknown"] == 1  # serving legacy incident
+    assert inc["by_kind"]["unknown"] == 1
 
 
 def test_incident_summary_serving_by_severity_counts_only_serving():
