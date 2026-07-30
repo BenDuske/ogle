@@ -2925,8 +2925,14 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # fingerprint into an actionable page: the operator sees whom to route it to without
         # re-walking DataHub. Omitted on unowned/legacy/offline-recorded incidents (empty
         # list) rather than faking an owner; JSON carries the same field verbatim.
-        ro = r.get("owners")
-        opart = f" · 👤 {', '.join(ro)}" if isinstance(ro, list) and ro else ""
+        # Routed through the SAME `_incident_owner_names` canonicalizer the --summary roster
+        # uses (strip, drop blanks, case-insensitive dedup keeping the first-seen form) so the
+        # LIST line and the rollup can never disagree on the owner set: the persisted `owners`
+        # can hold case-variant duplicates ("Alice"/"alice" unioned across two datasets) or
+        # unstripped names, which the raw join would render as "👤 Alice, alice,  Bob " while
+        # the summary shows the clean "Alice · Bob".
+        ro = _incident_owner_names(r)
+        opart = f" · 👤 {', '.join(ro)}" if ro else ""
         _emit(
             f"- {mark} **{sev}** — {title} · {seen}{dpart}{serv}{kpart}{opart}{fpart}{apart}  `{r['fingerprint']}`"
         )

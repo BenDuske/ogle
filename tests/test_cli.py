@@ -1740,6 +1740,37 @@ def test_incidents_renders_owner_attribution(tmp_path, capsys):
     assert "👤 alice, bob" in out
 
 
+def test_incidents_list_owner_display_matches_summary_roster(tmp_path, capsys):
+    # The per-incident LIST line and the --summary roster must show the SAME owner set. The
+    # persisted `owners` can carry case-variant duplicates ("Alice"/"alice" unioned across two
+    # datasets) or unstripped names; both views route through `_incident_owner_names` so neither
+    # can render "👤 Alice, alice,  Bob " while the other shows the clean "Alice · Bob".
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident(
+        "fp1",
+        severity="high",
+        title="HIGH drift",
+        datasets=2,
+        serving=True,
+        owners=["Alice", "alice", "  Bob  ", "Bob"],
+    )
+    s.save()
+    assert main(["incidents", "--store", str(store_path)]) == 0
+    list_out = capsys.readouterr().out
+    owner_seg = list_out.split("👤")[1].split("`")[0]  # the "👤 …" run before the fingerprint
+    # Canonical: each owner appears exactly once, whitespace stripped, case-variant folded.
+    assert owner_seg.count("Alice") == 1 and owner_seg.count("Bob") == 1
+    # The raw messy forms must NOT leak into the line.
+    assert "alice" not in owner_seg
+    assert "  Bob  " not in list_out
+    # And the summary roster names the same two owners, once each — the two views agree.
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    summary_out = capsys.readouterr().out
+    assert "👤 by owner: Alice 1" in summary_out
+    assert "Bob 1" in summary_out
+
+
 def test_incidents_json_carries_owners(tmp_path, capsys):
     store_path = tmp_path / "baselines.json"
     s = BaselineStore(path=store_path)
