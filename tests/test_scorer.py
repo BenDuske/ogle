@@ -3108,3 +3108,44 @@ def test_empirical_divergence_none_for_single_distinct_value(name, func):
     distinct_b = [(0.1, 0.0), (0.5, 5.0), (0.9, 10.0)]
     distinct_c = [(0.1, 2.0), (0.5, 7.0), (0.9, 12.0)]
     assert func(distinct_b, distinct_c) is not None
+
+
+# The deliberate OTHER HALF of that contract. The eight functions above integrate a CDF gap over
+# the pooled BINS, so a single distinct pooled value leaves no bin and the honest answer is None
+# ("unmeasurable", not a fabricated 0.0). The sup / Wasserstein family reads the gap at the pooled
+# KNOTS (or moves the mass along them) instead of integrating over bins between them, so it needs
+# no bin: two sides that are each a degenerate constant AT THE SAME VALUE are genuinely identical
+# distributions, and the correct separation is a real, computed 0.0 — NOT None. That asymmetry is
+# intentional (it is exactly the "rides on the raw quantiles alone, so a degenerate spread still
+# gets a whole-distribution separation number" property KS/Kuiper/W* advertise) but was untested on
+# this side: nothing pinned that these five stay OUT of the None-guard family, so a refactor that
+# "unified" the degenerate contract could silently swap a legitimate zero-separation enrichment for
+# a None (dropping the signal that an identical constant field genuinely did not move) unnoticed.
+_ZERO_ON_IDENTICAL_CONSTANT = [
+    ("ks", _empirical_ks),
+    ("kuiper", _empirical_kuiper),
+    ("winf", _empirical_winf),
+    ("w1", _empirical_w1),
+    ("w2", _empirical_w2),
+]
+
+
+@pytest.mark.parametrize("name, func", _ZERO_ON_IDENTICAL_CONSTANT, ids=[n for n, _ in _ZERO_ON_IDENTICAL_CONSTANT])
+def test_sup_and_wasserstein_report_honest_zero_on_identical_constant(name, func):
+    # Both sides a degenerate constant at the SAME value: a single distinct pooled value, the exact
+    # input the None-guard family returns None for — but these are identical distributions, so the
+    # honest, computed answer here is 0.0 (no separation), NOT None and NOT a crash.
+    const_q = [(0.1, 5.0), (0.5, 5.0), (0.9, 5.0)]
+    got = func(const_q, const_q)
+    assert got is not None and got == pytest.approx(0.0, abs=1e-12)
+    # And a degenerate spread is no barrier to a real score: two constants at DIFFERENT values pool
+    # to two distinct knots, so the family measures a genuine whole-distribution separation with no
+    # stdev on either side — the property these five are chosen for.
+    lo_const = [(0.1, 5.0), (0.5, 5.0), (0.9, 5.0)]
+    hi_const = [(0.1, 7.0), (0.5, 7.0), (0.9, 7.0)]
+    moved = func(lo_const, hi_const)
+    assert moved is not None and moved > 0.0
+    # The None guard these functions DO keep is the shared-quantile / shared-band one, same as the
+    # integral family — a missing side is still unmeasurable, degenerate spread or not.
+    assert func(None, const_q) is None
+    assert func(const_q, None) is None
