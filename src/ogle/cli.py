@@ -3159,6 +3159,20 @@ def _mute_breakdown(store: "BaselineStore", now: float) -> dict:
     }
 
 
+def _esc_help(text: str) -> str:
+    """Prometheus HELP-text escaping: backslash -> ``\\\\`` and newline -> ``\\n``.
+
+    The exposition format (v0.0.4) escapes exactly these two in a HELP string — NOT the
+    double-quote, which the label-value escaper (`esc`) additionally escapes. A raw newline
+    would split the `# HELP` line and break the scrape; a raw backslash is ambiguous to a
+    strict parser. Kept as a module-level function (not a closure like `esc`) so the rule is
+    unit-testable on its own. All current HELP literals are clean, so this is conformance
+    hardening — it keeps a future help string with a special char from silently emitting
+    malformed exposition text, exactly as `esc` already guards the label values.
+    """
+    return text.replace("\\", "\\\\").replace("\n", "\\n")
+
+
 def _render_prometheus(
     totals: dict,
     inc: dict,
@@ -3186,7 +3200,7 @@ def _render_prometheus(
     lines: List[str] = []
 
     def family(name: str, help_text: str, samples) -> None:
-        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# HELP {name} {_esc_help(help_text)}")
         lines.append(f"# TYPE {name} gauge")
         for labels, value in samples:
             if labels:

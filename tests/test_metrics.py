@@ -9,7 +9,7 @@ suffix, label escaping) and the numeric values against a known store.
 import json
 import time
 
-from ogle.cli import _render_prometheus, build_parser, main
+from ogle.cli import _esc_help, _render_prometheus, build_parser, main
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -554,6 +554,34 @@ def test_render_escapes_store_label():
     text = _render_prometheus(totals, inc, 0, r'C:\ogle\store".json')
     # Backslashes doubled, double-quote backslash-escaped — a scraper won't mis-tokenize.
     assert r'ogle_up{store="C:\\ogle\\store\".json"} 1' in text
+
+
+# ---- pure render helper: HELP-text escaping ----------------------------------------
+def test_esc_help_escapes_backslash_and_newline_but_not_quote():
+    # Exposition v0.0.4 escapes exactly `\`->`\\` and newline->`\n` in a HELP string.
+    assert _esc_help("plain help") == "plain help"
+    assert _esc_help("a\\b") == "a\\\\b"  # backslash doubled
+    assert _esc_help("line1\nline2") == "line1\\nline2"  # newline -> literal \n
+    # A double-quote is legal RAW in HELP (unlike a label value) — it must NOT be escaped,
+    # else a scraper renders a stray backslash in the description.
+    assert _esc_help('say "hi"') == 'say "hi"'
+    # Combined: backslash first so the newline's inserted backslash isn't re-doubled.
+    assert _esc_help("c:\\x\nmore") == "c:\\\\x\\nmore"
+
+
+def test_help_lines_are_well_formed_over_a_real_render(tmp_path, capsys):
+    # Contract over the full pipeline: every rendered `# HELP` line is a single physical line
+    # with a name and a non-empty description (a raw newline in a help string would split it
+    # into a malformed continuation line, which this catches). Pins that `family()` routes
+    # help through `_esc_help` on the real metric set, not just the isolated helper.
+    _seed_store(tmp_path / "s.json")
+    assert main(["metrics", "--store", str(tmp_path / "s.json")]) == 0
+    text = capsys.readouterr().out
+    help_lines = [ln for ln in text.splitlines() if ln.startswith("# HELP ")]
+    assert help_lines  # sanity: families were emitted
+    for ln in help_lines:
+        parts = ln.split(" ", 3)  # "#", "HELP", <name>, <description>
+        assert len(parts) == 4 and parts[3].strip()
 
 
 def test_metrics_always_exits_zero_with_high_incidents(tmp_path, capsys):
