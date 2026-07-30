@@ -2792,6 +2792,65 @@ def test_incidents_summary_serving_by_owner_aggregates_case_insensitively(tmp_pa
     assert list(summary["by_owner"].values()) == [2]
 
 
+def test_incidents_summary_by_owner_annotates_recurring_share(tmp_path, capsys):
+    # The chronic-axis twin of the ⚠️ serving share: Alice's "a" was seen twice (recurring)
+    # while her "b" is a fresh serving one-off, so she carries serving=2 but recurring=1 — the
+    # two marks are independent shares of the SAME owner's count and render ⚠️ before 🔁,
+    # matching the dimension-line ordering. Bob out-volumes her (3) but is neither → bare.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"], serving=True)  # 2× → recurring
+    s.record_incident("b", severity="high", title="B", owners=["Alice"], serving=True)  # serving, not recurring
+    s.record_incident("c", severity="low", title="C", owners=["Bob"])
+    s.record_incident("d", severity="low", title="D", owners=["Bob"])
+    s.record_incident("e", severity="low", title="E", owners=["Bob"])
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    # Bob leads by volume (3), bare; Alice (2) carries both marks, serving first: (⚠️2 🔁1).
+    assert "by owner: Bob 3 · Alice 2 (⚠️2 🔁1)" in out
+
+
+def test_incidents_summary_json_exposes_recurring_by_owner(tmp_path, capsys):
+    # JSON parity with serving_by_owner: recurring_by_owner holds ONLY owners with ≥1 recurring
+    # incident (no 0-rows), keyed by the same display name as by_owner. Alice's "a" recurs, her
+    # "b" doesn't; Bob's single sighting never recurs → Bob absent, not a 0-row.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])  # 2× → recurring
+    s.record_incident("b", severity="low", title="B", owners=["Alice"])  # Alice non-recurring too
+    s.record_incident("c", severity="medium", title="C", owners=["Bob"])  # Bob: single sighting
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["by_owner"] == {"Alice": 2, "Bob": 1}
+    assert summary["recurring_by_owner"] == {"Alice": 1}  # Bob absent, not a 0-row
+    # Bounded by its marginal for every owner: recurring_by_owner[name] <= by_owner[name].
+    bo = summary["by_owner"]
+    assert all(v <= bo[name] for name, v in summary["recurring_by_owner"].items())
+
+
+def test_incidents_summary_recurring_by_owner_aggregates_case_insensitively(tmp_path, capsys):
+    # Same one-row-per-person guarantee as by_owner/serving_by_owner: mixed-case captures of a
+    # recurring owner fold into a single 🔁 tally under the first-seen display form.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])
+    s.record_incident("a", severity="high", title="A", owners=["Alice"])  # "a" recurs → Alice
+    s.record_incident("b", severity="high", title="B", owners=["alice"])
+    s.record_incident("b", severity="high", title="B", owners=["alice"])  # "b" recurs → alice (same person)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    # One row, not two — the casings fold together (display form follows record order).
+    assert len(summary["recurring_by_owner"]) == 1
+    assert list(summary["recurring_by_owner"].values()) == [2]
+    # And it agrees with the by_owner row for the same (single) person.
+    assert list(summary["by_owner"].values()) == [2]
+
+
 def test_incidents_summary_serving_recurring_callout(tmp_path, capsys):
     # The worst class — drift on a serving path that ALSO recurs — earns its own 🔥 callout.
     # _seed_recurring_incidents: chronic (high, serving, 5×) is BOTH serving and recurring;

@@ -2182,9 +2182,10 @@ def _incident_summary(records: List[dict]) -> dict:
     # counts toward BOTH, so sum(by_owner) can exceed `total`; and unowned incidents (tracked
     # by `unowned` above) contribute to no name, so it can also fall short. Aggregated case-
     # insensitively — one "Alice", never "Alice"+"alice" — keeping the first-seen display form.
-    # Accumulated as {lower_key: [display, count, serving_count]} then flattened to
-    # {display: count} (by_owner) and {display: serving_count} (serving_by_owner) so the
-    # roster shows real names while a mixed-case store can't split one owner into two rows.
+    # Accumulated as {lower_key: [display, count, serving_count, recurring_count]} then flattened
+    # to {display: count} (by_owner), {display: serving_count} (serving_by_owner), and
+    # {display: recurring_count} (recurring_by_owner) so the roster shows real names while a
+    # mixed-case store can't split one owner into two rows.
     # `serving_by_owner` is the escalation-priority twin of the flat roster: the by_owner
     # volume tells a lead who carries the MOST drift, but not who carries the PRODUCTION drift
     # — an owner sitting on five low-severity offline captures reads louder than the one owner
@@ -2192,6 +2193,12 @@ def _incident_summary(records: List[dict]) -> dict:
     # serving_by_severity), tallied off the SAME `is_serving` flag so it can never disagree
     # with the `serving` marginal, and it holds only owners with ≥1 serving incident (an owner
     # with none is absent, not a `0` row) so "who do I page first?" reads at a glance.
+    # `recurring_by_owner` is the chronic-axis twin of that: which owner keeps carrying FLAPPING
+    # drift (incidents seen ≥2×), the person-axis parity of recurring_by_kind. High volume with
+    # zero recurring is a churny-but-fresh owner; a lower volume that keeps coming back is a
+    # festering-contract owner the lead should lean on to fix root cause, not re-triage. Tallied
+    # off the SAME count>=2 test as `recurring` so it can never disagree with that marginal, and
+    # like serving_by_owner it holds only owners with ≥1 recurring incident (no `0` rows).
     owner_acc: dict = {}
     for r in records:
         sev = r.get("severity")
@@ -2226,11 +2233,18 @@ def _incident_summary(records: List[dict]) -> dict:
         for name in _incident_owner_names(r):
             slot = owner_acc.get(name.lower())
             if slot is None:
-                owner_acc[name.lower()] = [name, 1, 1 if is_serving else 0]
+                owner_acc[name.lower()] = [
+                    name,
+                    1,
+                    1 if is_serving else 0,
+                    1 if is_recurring else 0,
+                ]
             else:
                 slot[1] += 1
                 if is_serving:
                     slot[2] += 1
+                if is_recurring:
+                    slot[3] += 1
         # Attribute the incident to each dimension it recorded (deduped so a malformed repeat
         # can't double-count within one incident). No / empty / non-list `kinds` = a legacy
         # record with no tracked dimension → `unknown`, counted once.
@@ -2263,9 +2277,12 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_by_kind": serving_by_kind,
         "recurring_by_kind": recurring_by_kind,
         "unowned": unowned,
-        "by_owner": {display: cnt for display, cnt, _sv in owner_acc.values()},
+        "by_owner": {display: cnt for display, cnt, _sv, _rc in owner_acc.values()},
         "serving_by_owner": {
-            display: sv for display, _cnt, sv in owner_acc.values() if sv
+            display: sv for display, _cnt, sv, _rc in owner_acc.values() if sv
+        },
+        "recurring_by_owner": {
+            display: rc for display, _cnt, _sv, rc in owner_acc.values() if rc
         },
         "total_sightings": total_sightings,
     }
@@ -2792,14 +2809,27 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # all-orphan or empty store), so it adds no noise.
         bo = summary["by_owner"]
         if bo:
-            # Annotate each owner with their serving-path share (⚠️N) when nonzero — the
-            # escalation-priority signal the flat volume can't carry: "Alice 5 (⚠️2)" says two
-            # of Alice's five are production pages, so she leads the call even if Bob's raw
-            # count is higher. Owners with no serving drift stay bare (no "⚠️0" noise), mirroring
-            # the conditional serving splits elsewhere in this rollup.
+            # Annotate each owner with their serving-path share (⚠️N) and chronic share (🔁N)
+            # when nonzero — the escalation-priority signals the flat volume can't carry:
+            # "Alice 5 (⚠️2 🔁1)" says two of Alice's five are production pages and one keeps
+            # recurring, so she leads the call even if Bob's raw count is higher. Both are shares
+            # of the SAME owner's by_owner count (each ≤ it by construction), so an owner can
+            # carry either mark, both, or neither; owners with no serving/chronic drift stay bare
+            # (no "⚠️0 🔁0" noise). Serving leads recurring — a live production page outranks a
+            # chronic-but-offline one — matching `_kind_share_suffix`'s ordering for dimensions.
             sbo = summary["serving_by_owner"]
+            rbo = summary["recurring_by_owner"]
+
+            def _owner_share_suffix(name: str) -> str:
+                marks = []
+                if sbo.get(name):
+                    marks.append(f"⚠️{sbo[name]}")
+                if rbo.get(name):
+                    marks.append(f"🔁{rbo[name]}")
+                return f" ({' '.join(marks)})" if marks else ""
+
             owner_parts = [
-                f"{name} {cnt}" + (f" (⚠️{sbo[name]})" if sbo.get(name) else "")
+                f"{name} {cnt}" + _owner_share_suffix(name)
                 for name, cnt in sorted(bo.items(), key=lambda kv: (-kv[1], kv[0].lower()))
             ]
             _emit(f"- 👤 by owner: {' · '.join(owner_parts)}")
