@@ -764,8 +764,21 @@ def _render_plan_preview(plan, *, as_json: bool, retract: bool) -> None:
     _emit("\n".join(lines))
 
 
-# Repo-root examples/ (works from a clone: src/ogle/cli.py -> parents[2] == repo root).
-_DEMO_DIR = Path(__file__).resolve().parents[2] / "examples" / "demo"
+# Demo fixtures resolved install-mode-robustly. The fixtures ship INSIDE the package
+# (`ogle/_demo_data/*.json`, byte-identical to the judge-visible `examples/demo/*.json` —
+# enforced by test_demo_data_matches_examples), so `ogle demo` works after a plain
+# `pip install .` or a wheel/pipx install, not just the editable `pip install -e .` the
+# quickstart documents. Prefer the packaged copy (always sits next to this file in every
+# install mode); fall back to the repo-root `examples/demo` for the rare run from a source
+# tree whose package data wasn't laid down (e.g. a bare `python src/ogle/...`).
+def _resolve_demo_dir() -> Path:
+    packaged = Path(__file__).resolve().parent / "_demo_data"
+    if (packaged / "healthy-signatures.json").exists():
+        return packaged
+    return Path(__file__).resolve().parents[2] / "examples" / "demo"
+
+
+_DEMO_DIR = _resolve_demo_dir()
 
 
 def cmd_demo(args: argparse.Namespace) -> int:

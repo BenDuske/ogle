@@ -49,6 +49,11 @@ ogle = "ogle.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the demo fixtures inside the wheel so `ogle demo` works after a non-editable
+# `pip install .` / wheel / pipx install, not only the editable install the quickstart shows.
+[tool.setuptools.package-data]
+ogle = ["_demo_data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
