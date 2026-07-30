@@ -91,6 +91,22 @@ def _emit(text: str, *, stream=None) -> None:
     stream.write(text.encode(enc, errors="replace").decode(enc) + "\n")
 
 
+def _exc_diag(exc: BaseException) -> str:
+    """Render an exception for an operator with its type name always attached.
+
+    The live seams (`_walk_live`, `_do_writeback`, `_do_retract`) catch a broad
+    `Exception` because the DataHub SDK / network can raise almost anything. Many of those
+    raise *empty-message* instances — a bare `ConnectionError()`, `TimeoutError()`, or a
+    socket error whose `str()` is `""` — so `f"...: {exc}"` would print `live walk failed: `
+    with no cause at all, exactly when an operator most needs to know it was the network.
+    Prefixing `type(exc).__name__` guarantees a diagnostic even for a message-less
+    exception, and still reads naturally when there is a message. Mirrors the
+    already-established `f"{type(exc).__name__}: {exc}"` convention in `watch.py`.
+    """
+    detail = str(exc)
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
 def _atomic_write_text(target: Path, text: str) -> Path:
     """Write `text` to `target` atomically (temp file in the same dir, then `os.replace`).
 
@@ -467,7 +483,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"ogle check: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:  # live-walk failure (SDK/network) — report, don't traceback
-        print(f"ogle check: live walk failed: {exc}", file=sys.stderr)
+        print(f"ogle check: live walk failed: {_exc_diag(exc)}", file=sys.stderr)
         return 2
 
     report = run_drift_check(
@@ -552,7 +568,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     kind_tags=getattr(args, "write_back_kind", False),
                 )
             except Exception as exc:
-                print(f"ogle check: write-back failed: {exc}", file=sys.stderr)
+                print(f"ogle check: write-back failed: {_exc_diag(exc)}", file=sys.stderr)
                 # Alert still fires — the check itself succeeded; the write-back is an
                 # optional side-effect, so its failure must not upgrade the exit code past
                 # what the drift/blind gates decided. Route through the same _check_exit_fail
@@ -618,7 +634,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     unreachable_urns=unreachable,
                 )
             except Exception as exc:
-                print(f"ogle check: retract failed: {exc}", file=sys.stderr)
+                print(f"ogle check: retract failed: {_exc_diag(exc)}", file=sys.stderr)
                 # Same contract as write-back: the check succeeded; retraction is an
                 # optional side-effect, so don't upgrade the exit code on its account.
                 return 1 if _check_exit_fail(report, args) else 0

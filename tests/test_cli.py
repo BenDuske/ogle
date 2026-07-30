@@ -6341,3 +6341,38 @@ def test_incidents_standing_and_sort_registered_in_help():
     assert ns.func.__name__ == "cmd_incidents"
     assert ns.standing == "2w"
     assert ns.sort == "standing"
+
+
+# ---------------------------------------------------------------------------------------
+# Live-seam exception diagnostics — a message-less network exception must still name its
+# type so the operator learns it was the network, not a silent " failed: " with no cause.
+# ---------------------------------------------------------------------------------------
+
+
+def test_exc_diag_names_type_when_message_is_empty():
+    from ogle.cli import _exc_diag
+
+    # A bare ConnectionError()/TimeoutError() stringifies to "" — the exact case that used
+    # to print "live walk failed: " with no cause.
+    assert _exc_diag(ConnectionError()) == "ConnectionError"
+    assert _exc_diag(TimeoutError()) == "TimeoutError"
+    # With a message, both the type and the message survive.
+    assert _exc_diag(ConnectionError("gms unreachable")) == "ConnectionError: gms unreachable"
+
+
+def test_check_live_walk_failure_surfaces_exception_type(tmp_path, capsys, monkeypatch):
+    """A message-less SDK/network error from the live walk still tells the operator WHAT
+    failed. Regression guard: `f"live walk failed: {exc}"` would print an empty cause for a
+    bare ConnectionError; `_exc_diag` guarantees the type name lands on stderr."""
+
+    def _boom(gms, models, discover):
+        raise ConnectionError()  # empty message — the papercut case
+
+    monkeypatch.setattr("ogle.cli._walk_live", _boom)
+    store = tmp_path / "b.json"
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "live walk failed: ConnectionError" in err
+    # FAULT-INJECTION: bare `{exc}` here would have left a trailing ": " with nothing after.
+    assert not err.rstrip().endswith("live walk failed:")
