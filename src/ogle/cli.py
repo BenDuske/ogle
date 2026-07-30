@@ -2126,6 +2126,20 @@ def _incident_summary(records: List[dict]) -> dict:
     # for every dimension. `unknown` holds serving incidents with no recorded dimension.
     serving_by_kind = {k.value: 0 for k in DriftKind}
     serving_by_kind["unknown"] = 0
+    # Recurring ∩ dimension cross-tab — the chronic-axis twin of serving_by_kind (and the kind-
+    # axis twin of recurring_by_severity): of the drift that keeps coming back, WHICH dimension
+    # is it? A flat `recurring` says "N incidents flap" but not whether the SAME schema break
+    # recurs (a structural upstream-contract problem — fix the producer) or freshness keeps going
+    # stale (a flaky loader/scheduler — fix the pipeline plumbing); those are different root-cause
+    # hunts, so the split changes where the operator digs first. NON-exclusive exactly like
+    # by_kind (a recurring incident spanning schema+volume counts in both), so
+    # sum(recurring_by_kind) can EXCEED `recurring`; it is a per-dimension tally of the recurring
+    # subset, not a partition. Tallied off the SAME count>=2 test and the SAME dimension buckets
+    # as by_kind, so it can never disagree with the `recurring` marginal or the `by_kind` roster:
+    # recurring_by_kind[d] <= by_kind[d] for every dimension. `unknown` holds recurring incidents
+    # with no recorded dimension.
+    recurring_by_kind = {k.value: 0 for k in DriftKind}
+    recurring_by_kind["unknown"] = 0
     serving = 0
     recurring = 0
     # Serving ∩ recurring — the worst single class: drift on a live serving path that ALSO
@@ -2231,6 +2245,10 @@ def _incident_summary(records: List[dict]) -> dict:
             # never exceed its `by_kind` marginal (serving_by_kind[d] <= by_kind[d]).
             if is_serving:
                 serving_by_kind[b] += 1
+            # Same buckets gated on the recurring test → the recurring ∩ dimension cross-tab can
+            # never exceed its `by_kind` marginal (recurring_by_kind[d] <= by_kind[d]).
+            if is_recurring:
+                recurring_by_kind[b] += 1
     return {
         "total": len(records),
         "by_severity": by_severity,
@@ -2243,6 +2261,7 @@ def _incident_summary(records: List[dict]) -> dict:
         "serving_unowned_recurring": serving_unowned_recurring,
         "by_kind": by_kind,
         "serving_by_kind": serving_by_kind,
+        "recurring_by_kind": recurring_by_kind,
         "unowned": unowned,
         "by_owner": {display: cnt for display, cnt, _sv in owner_acc.values()},
         "serving_by_owner": {
@@ -2250,6 +2269,29 @@ def _incident_summary(records: List[dict]) -> dict:
         },
         "total_sightings": total_sightings,
     }
+
+
+def _kind_share_suffix(dim: str, serving_by_kind: dict, recurring_by_kind: dict) -> str:
+    """Render the per-dimension cross-tab annotation for a `by dimension` line.
+
+    Appends the serving share (⚠️N) and/or the recurring share (🔁N) for one dimension when
+    nonzero, e.g. " (⚠️2 🔁1)" — two of this dimension's incidents touch a serving path, one
+    keeps recurring. Both are shares of the SAME dimension's `by_kind` count (each ≤ it by
+    construction), so a dimension can carry either mark, both, or neither. Returns "" when both
+    shares are zero so a dimension with no serving/chronic drift stays bare (no "⚠️0 🔁0" noise),
+    matching the conditional cross-tab treatment elsewhere in the rollup. Serving leads recurring
+    because a live production page outranks a chronic-but-offline one when deciding what to touch
+    first. Shared by the `incidents --summary` rollup and the `status` snapshot so the two human
+    dimension lines can never drift apart in format.
+    """
+    marks = []
+    sv = serving_by_kind.get(dim, 0)
+    if sv:
+        marks.append(f"⚠️{sv}")
+    rc = recurring_by_kind.get(dim, 0)
+    if rc:
+        marks.append(f"🔁{rc}")
+    return f" ({' '.join(marks)})" if marks else ""
 
 
 def _resolve_fingerprint(store: BaselineStore, needle: str) -> Tuple[Optional[str], List[str]]:
@@ -2725,11 +2767,16 @@ def cmd_incidents(args: argparse.Namespace) -> int:
         # call even if freshness's raw count is higher. Dimensions with no serving drift stay
         # bare (no "⚠️0" noise), mirroring the owner line and the conditional serving splits
         # elsewhere in this rollup. serving_by_kind[d] <= by_kind[d] by construction.
+        # Each dimension also carries its recurring-path share (🔁N) alongside the serving share
+        # (⚠️N): "schema 5 (⚠️2 🔁3)" says two of five schema incidents touch production and
+        # three keep coming back — the recurring ∩ kind cross-tab `metrics` exposes as
+        # ogle_incidents_recurring_by_kind. Dimensions with neither serving nor chronic drift
+        # stay bare. recurring_by_kind[d] <= by_kind[d] by construction.
         bks = summary["by_kind"]
         sbk = summary["serving_by_kind"]
+        rbk = summary.get("recurring_by_kind") or {}
         kind_parts = [
-            f"{d.value} {bks[d.value]}"
-            + (f" (⚠️{sbk[d.value]})" if sbk.get(d.value) else "")
+            f"{d.value} {bks[d.value]}" + _kind_share_suffix(d.value, sbk, rbk)
             for d in DriftKind
             if bks[d.value]
         ]
@@ -3167,6 +3214,22 @@ def _render_prometheus(
         "ogle_incidents_serving_by_kind",
         "Remembered serving-path incidents carrying each drift dimension (serving AND dimension; non-exclusive).",
         [({"kind": k}, sbk.get(k, 0)) for k in kind_order],
+    )
+    # Recurring ∩ dimension cross-tab — of the drift that keeps coming back, WHICH dimension
+    # keeps recurring? The chronic twin of ogle_incidents_serving_by_kind and the kind-axis twin
+    # of ogle_incidents_recurring_by_severity: a chronic SCHEMA series points at a structural
+    # upstream-contract problem (fix the producer); chronic FRESHNESS points at a flaky loader
+    # (fix the plumbing) — different fixes, so the split drives where the operator digs. Graph
+    # `ogle_incidents_recurring_by_kind{kind="schema"}` to alert on a dimension that won't stop
+    # flapping. NON-exclusive exactly like ogle_incidents_by_kind (a recurring incident spanning
+    # two dimensions counts in both), so summing over the label can exceed ogle_incidents_recurring;
+    # per label it never exceeds ogle_incidents_by_kind (same buckets, gated on count>=2). Emitted
+    # for every kind (honest 0s) so an alert series never vanishes.
+    rbk = inc.get("recurring_by_kind") or {}
+    family(
+        "ogle_incidents_recurring_by_kind",
+        "Remembered recurring incidents carrying each drift dimension (seen >=2x AND dimension; non-exclusive).",
+        [({"kind": k}, rbk.get(k, 0)) for k in kind_order],
     )
     family(
         "ogle_incidents_sightings",
@@ -3710,11 +3773,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     # "schema 5 (⚠️2)" says two of five schema incidents touch production. The serving ∩ kind
     # cross-tab `metrics` exposes as ogle_incidents_serving_by_kind. Dimensions with no serving
     # drift stay bare (no "⚠️0" noise); serving_by_kind[d] <= by_kind[d] by construction.
+    # Each dimension also carries its recurring-path share (🔁N) alongside the serving share
+    # (⚠️N) — the recurring ∩ kind cross-tab `metrics` exposes as ogle_incidents_recurring_by_kind,
+    # brought to the human snapshot: "schema 5 (⚠️2 🔁3)" says two touch production and three keep
+    # recurring. Dimensions with neither stay bare; recurring_by_kind[d] <= by_kind[d].
     bk = inc["by_kind"]
     sbk = inc.get("serving_by_kind") or {}
+    rbk = inc.get("recurring_by_kind") or {}
     kind_parts = [
-        f"{d.value} {bk[d.value]}"
-        + (f" (⚠️{sbk[d.value]})" if sbk.get(d.value) else "")
+        f"{d.value} {bk[d.value]}" + _kind_share_suffix(d.value, sbk, rbk)
         for d in DriftKind
         if bk[d.value]
     ]

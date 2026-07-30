@@ -2377,6 +2377,35 @@ def test_incidents_summary_by_dimension_serving_share_annotation(tmp_path, capsy
     assert "by dimension: schema 2 (⚠️2) · volume 2 (⚠️1)" in out
 
 
+def test_incidents_summary_by_dimension_recurring_share_annotation(tmp_path, capsys):
+    # The by-dimension line also annotates each dimension with its recurring-path share (🔁N)
+    # alongside the serving share (⚠️N) — the recurring ∩ kind cross-tab. Here the schema
+    # incident is BOTH serving and chronic (seen twice) while the one-shot volume incident is
+    # neither, so schema reads "schema 1 (⚠️1 🔁1)" and volume stays bare.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema"], serving=True)
+    s.record_incident("a", severity="high", title="A", kinds=["schema"], serving=True)  # recurs
+    s.record_incident("b", severity="low", title="B", kinds=["volume"], serving=False)
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 1 (⚠️1 🔁1) · volume 1" in out
+
+
+def test_incidents_summary_by_dimension_no_recurring_annotation_when_one_shot(tmp_path, capsys):
+    # A dimension with no chronic drift stays bare of the 🔁 mark (no "🔁0" noise), mirroring
+    # the serving-share treatment.
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema"])  # one-shot
+    s.save()
+    assert main(["incidents", "--store", str(store_path), "--summary"]) == 0
+    out = capsys.readouterr().out
+    assert "by dimension: schema 1" in out
+    assert "🔁" not in out.split("by dimension:", 1)[1].splitlines()[0]
+
+
 def test_incidents_summary_by_dimension_no_serving_annotation_when_offline(tmp_path, capsys):
     # A dimension with no serving-path drift stays bare (no "⚠️0" noise), mirroring the owner
     # line and the conditional serving splits elsewhere in the rollup.

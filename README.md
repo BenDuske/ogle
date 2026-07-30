@@ -290,7 +290,12 @@ legacy incidents is omitted here and the line is skipped entirely when nothing i
 dimension annotated with its **serving-path share** (`⚠️N`) when nonzero — the serving ∩ dimension
 cross-tab `ogle_incidents_serving_by_kind{kind="…"}` exposes, telling the on-call *which* dimension is
 hitting production (a schema break to redeploy vs. freshness staleness to unstick — different fixes),
-so `schema 2 (⚠️1)` means one of the two schema incidents is on a live serving path (`serving_by_kind[d] ≤ by_kind[d]`) — a
+so `schema 2 (⚠️1)` means one of the two schema incidents is on a live serving path (`serving_by_kind[d] ≤ by_kind[d]`).
+Each dimension also carries its **recurring share** (`🔁N`) alongside the serving share — the recurring ∩ dimension
+cross-tab `ogle_incidents_recurring_by_kind{kind="…"}` exposes, telling the operator *which* dimension keeps coming
+back (a repeating schema break points at a structural upstream-contract problem — fix the producer — while chronic
+freshness points at a flaky loader — fix the plumbing), so `schema 2 (⚠️1 🔁2)` means one of the two schema incidents
+is on a serving path and both keep recurring (`recurring_by_kind[d] ≤ by_kind[d]`, dimensions with neither share stay bare) — a
 **by-owner** roster (`👤 by owner: Alice 2 · Bob 1`) naming who is carrying how much remembered
 drift, the people twin of the by-dimension line that completes the ownership axis alongside
 `incidents --owner NAME` (one person's queue) and `incidents --unowned` (nobody's). It is likewise
@@ -407,7 +412,13 @@ incidents with no recorded dimension) and its serving cross-tab
 hitting a live serving path, the kind-axis twin of `ogle_incidents_serving_by_severity`; alert
 `{kind="freshness"} > 0` for a production freshness spike specifically; **non-exclusive** like its
 marginal, and per label it never exceeds `ogle_incidents_by_kind` since it is the same buckets gated
-on serving),
+on serving) and its chronic cross-tab
+`ogle_incidents_recurring_by_kind{kind="…"}` (the recurring ∩ dimension split — *which* dimension keeps
+coming back, the kind-axis twin of `ogle_incidents_recurring_by_severity` and the chronic twin of
+`ogle_incidents_serving_by_kind`; alert `{kind="schema"} > 0` for a schema break that won't stop flapping
+— a structural upstream-contract problem vs. a chronic-freshness flaky loader; **non-exclusive** like its
+marginal, and per label it never exceeds `ogle_incidents_by_kind` since it is the same buckets gated on
+`count ≥ 2`),
 `ogle_incidents_unowned` (orphaned drift with no recorded owner — the alerting twin of
 `incidents --unowned`; a rising count is a coverage gap, not a data problem, so alert
 `ogle_incidents_unowned > 0` to push a lead to assign owners before ownerless drift silently rots),

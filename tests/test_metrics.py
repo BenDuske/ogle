@@ -96,6 +96,7 @@ def test_metrics_every_family_declares_help_and_type_once(tmp_path, capsys):
         "ogle_incidents_serving_recurring",
         "ogle_incidents_by_kind",
         "ogle_incidents_serving_by_kind",
+        "ogle_incidents_recurring_by_kind",
         "ogle_incidents_sightings",
         "ogle_incidents_unowned",
         "ogle_incidents_serving_unowned",
@@ -439,6 +440,65 @@ def test_incident_summary_serving_by_kind_counts_only_serving():
     assert inc["serving_by_kind"]["schema"] == 1  # only the serving schema incident
     assert inc["by_kind"]["schema"] == 2
     assert inc["serving_by_kind"]["unknown"] == 1  # serving legacy incident
+    assert inc["by_kind"]["unknown"] == 1
+
+
+def test_recurring_by_kind_disambiguates_which_dimension_keeps_flapping(tmp_path, capsys):
+    """Flat recurring + flat by_kind can't say WHICH dimension keeps coming back.
+
+    A RECURRING freshness incident next to a one-shot schema incident gives recurring=1 and
+    by_kind{schema}=1, by_kind{freshness}=1 — yet the only chronic drift is freshness. Only the
+    recurring ∩ kind cross-tab tells the operator the flapping is a flaky loader (fix the
+    plumbing), not a repeating schema break (fix the producer) — a different root-cause hunt.
+    """
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("fr", severity="high", title="FRESH", kinds=["freshness"])
+    s.record_incident("fr", severity="high", title="FRESH", kinds=["freshness"])  # freshness recurs
+    s.record_incident("sc", severity="high", title="SCHEMA", kinds=["schema"])  # schema seen once
+    s.save()
+
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+
+    # The misleading flat view: both dimensions look "present".
+    assert samples['ogle_incidents_by_kind{kind="schema"}'] == "1"
+    assert samples['ogle_incidents_by_kind{kind="freshness"}'] == "1"
+    # The truth the cross-tab surfaces: only freshness is chronic.
+    assert samples['ogle_incidents_recurring_by_kind{kind="freshness"}'] == "1"
+    assert samples['ogle_incidents_recurring_by_kind{kind="schema"}'] == "0"
+
+
+def test_recurring_by_kind_never_exceeds_by_kind(tmp_path, capsys):
+    """Invariant: the recurring subset can never exceed its by_kind marginal, per dimension."""
+    store_path = tmp_path / "baselines.json"
+    s = BaselineStore(path=store_path)
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"])
+    s.record_incident("a", severity="high", title="A", kinds=["schema", "volume"])  # recurs
+    s.record_incident("b", severity="low", title="B", kinds=["schema"])  # one-shot
+    s.save()
+    assert main(["metrics", "--store", str(store_path)]) == 0
+    samples, _, _ = _parse_prom(capsys.readouterr().out)
+    for kind in ("schema", "volume", "quality", "distribution", "freshness", "unknown"):
+        rc = int(samples[f'ogle_incidents_recurring_by_kind{{kind="{kind}"}}'])
+        bk = int(samples[f'ogle_incidents_by_kind{{kind="{kind}"}}'])
+        assert rc <= bk
+
+
+def test_incident_summary_recurring_by_kind_counts_only_recurring():
+    """Pure-helper check: only recurring (count>=2) incidents feed recurring_by_kind."""
+    from ogle.cli import _incident_summary
+
+    inc = _incident_summary(
+        [
+            {"severity": "high", "count": 2, "kinds": ["schema"]},   # chronic schema
+            {"severity": "high", "count": 1, "kinds": ["schema"]},   # one-shot schema
+            {"severity": "low", "count": 3},  # legacy chronic: no kinds → unknown
+        ]
+    )
+    assert inc["recurring_by_kind"]["schema"] == 1  # only the chronic schema incident
+    assert inc["by_kind"]["schema"] == 2
+    assert inc["recurring_by_kind"]["unknown"] == 1  # chronic legacy incident
     assert inc["by_kind"]["unknown"] == 1
 
 
