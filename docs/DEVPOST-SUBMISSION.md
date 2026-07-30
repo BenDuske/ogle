@@ -125,8 +125,12 @@ ogle check --gms http://localhost:8080 --discover --store live.json
 `ogle demo` in step 2 needs no DataHub and no API key — it's the same drift-check
 code path as a live walk, and its section-2 alert is captured verbatim in
 `examples/alerts/churn-orders-drift.md`. The two explicit `ogle check` lines below it
-are the same demo driven by hand. See `docs/live-verification.md` for a full
-transcript of the live path against the DataHub quickstart.
+are the same demo driven by hand. `ogle demo` section 3 then fires the freshness
+showcase — the 9th dimension, a silent stall the other eight can't see — captured
+verbatim in `examples/alerts/freshness-stall.md`; it's opt-in and clock-driven
+(`ogle check --freshness-max-age 24h`), so `ogle demo` pins the clock to keep that
+capture deterministic. See `docs/live-verification.md` for a full transcript of the
+live path against the DataHub quickstart.
 
 ---
 
