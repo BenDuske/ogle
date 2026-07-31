@@ -42,6 +42,7 @@ ogle-storage/
 .ogle-mem/
 .demo-mem/
 .dryrun-mem/
+demo.json
 
 # Backups
 .backup-*/
