@@ -140,7 +140,7 @@ live path against the DataHub quickstart.
 |---|---|
 | Public repo | https://github.com/BenDuske/ogle |
 | **Apache 2.0** license | ✅ present at repo root |
-| Demo video (< 3 min, YouTube public/unlisted) | 🟡 W3 |
+| Demo video (< 3 min, YouTube public/unlisted) | 🟡 script ready — [`docs/DEMO-VIDEO-SCRIPT.md`](DEMO-VIDEO-SCRIPT.md) (turnkey shot-list + narration); awaits Ben's record + upload |
 | Text description | 🟢 drafted (technical story done; Inspiration awaits Ben's voice pass) |
 | Setup instructions in README | 🟡 W1 → refined W3 |
 | Sample outputs in `examples/` | ✅ `examples/alerts/` + runnable `examples/demo/` fixtures |
