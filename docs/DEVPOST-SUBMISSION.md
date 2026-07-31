@@ -58,8 +58,8 @@ a **scheduler** (cron/APScheduler-friendly `watch` tick), a **lineage-walk** tha
 traverses DataHub's graph via the MCP server / Skills layer, a **scorer** that
 computes per-asset signatures and anomaly scores, a **narrative writer** that turns
 a flagged walk plus DataHub ownership/docs context into an actionable alert, and an
-**alert writer** that persists the narrative and writes an `ogle:flagged` tag back
-to the graph. Between runs Ogle keeps a persistent **baseline + incident memory**
+**alert writer** that persists the narrative and writes an `ogle-drift-flagged` tag back
+to the graph (plus a per-severity `ogle-drift-high` tag with `--write-back-severity`). Between runs Ogle keeps a persistent **baseline + incident memory**
 (the `BaselineStore`): the last known-good signature per asset, the fingerprints of
 incidents it has already paged on, and operator-muted assets — so a scheduled loop
 pages **once per incident** instead of every tick. That store sits behind one seam

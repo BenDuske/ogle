@@ -47,7 +47,7 @@
   actionable narrative using: the walk trace, DataHub ownership/docs
   metadata, and Ogle-Brain's recall of related past incidents.
 - **Alert writer.** Persists the narrative to a local `examples/alerts/`
-  file *and* writes a `ogle:flagged` tag back to DataHub on the affected
+  file *and* writes an `ogle-drift-flagged` tag back to DataHub on the affected
   asset — the write-back that hits the judging rubric's "contribute back
   to the graph" line.
 

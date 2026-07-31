@@ -64,9 +64,9 @@ Show the root-cause paragraph, then the `urn ← tag` write-back preview.
 > "Add two flags and you get the other two flagship features in the same keyless command. First, a
 > root-cause narrative your on-call can act on in about thirty seconds — what moved, where, and why it
 > matters." *(if Ollama up: "written by a local LLM"; else: "a plain-English root-cause summary")*
-> "Second, the tag write-back — the exact `drift` and `ogle-drift-high` annotations Ogle would stamp
-> back onto the drifted dataset *in* DataHub, shown here as a dry run that touches no catalog. The
-> alert becomes evidence that lives next to the data."
+> "Second, the tag write-back — the exact `ogle-drift-flagged` and `ogle-drift-high` annotations Ogle
+> would stamp back onto the drifted dataset *in* DataHub, shown here as a dry run that touches no
+> catalog. The alert becomes evidence that lives next to the data."
 
 ---
 
