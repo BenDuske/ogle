@@ -41,6 +41,23 @@ def _run_module(*args):
     )
 
 
+def _run_cli_module(*args):
+    """Invoke `python -m ogle.cli …` as a real subprocess; return the CompletedProcess.
+
+    This is the SECOND documented module entry point: docs/w3-writeback.md tells
+    users to run `py -3.11 -m ogle.cli check …` directly against cli.py, which fires
+    cli.py's own `if __name__ == "__main__": sys.exit(main())` guard rather than
+    __main__.py's. `python -m ogle` above pins one boundary; a broken guard here would
+    silently break the exact command string in the docs while everything else stays
+    green, so this pins the other.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "ogle.cli", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_module_entrypoint_version_exits_zero():
     cp = _run_module("--version")
     assert cp.returncode == 0
@@ -67,5 +84,28 @@ def test_module_entrypoint_propagates_returned_exit_code():
     # dropped the return value (bare `main()`) would exit 0 here — this is the
     # test that distinguishes the two.
     cp = _run_module("check", "--freshness-max-age", "not-a-duration")
+    assert cp.returncode == 2
+    assert "freshness-max-age" in cp.stderr
+
+
+# --- `python -m ogle.cli` process-boundary contract -------------------------
+# The docs (docs/w3-writeback.md) instruct users to run cli.py directly as a
+# module — `py -3.11 -m ogle.cli check …` — which trips cli.py's OWN __main__
+# guard, a different code path from __main__.py that `python -m ogle` above
+# exercises. Without these, that guard could be removed or its exit code dropped
+# and the documented command would break with every other test still green.
+
+
+def test_cli_module_entrypoint_version_exits_zero():
+    cp = _run_cli_module("--version")
+    assert cp.returncode == 0
+    assert "ogle" in cp.stdout.lower()
+
+
+def test_cli_module_entrypoint_propagates_returned_exit_code():
+    # Same stronger contract as for `python -m ogle`: a main() that RETURNS 2
+    # (not an argparse sys.exit) only becomes the OS exit status because cli.py's
+    # guard does `sys.exit(main())`. A bare `main()` would exit 0 here.
+    cp = _run_cli_module("check", "--freshness-max-age", "not-a-duration")
     assert cp.returncode == 2
     assert "freshness-max-age" in cp.stderr
