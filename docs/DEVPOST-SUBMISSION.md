@@ -20,10 +20,14 @@ in 30 seconds, and remembers past incidents so it gets sharper over time.
 ## Project Story
 
 ### Inspiration
-*(Ben's voice — final personal pass in W3. Factual seed: every ML team lives one
-silent training-data change away from a bad model in prod. The lineage already
-exists in DataHub; what's missing is an agent that walks it on a schedule and
-catches the change before the deploy.)*
+I spend my day job running building automation for a hospital. Mission-critical,
+no room for "mostly works" — when a chiller drifts, someone gets paged before the
+ward gets warm. Then I look at ML pipelines and see the opposite: the training data
+can silently shift under a serving model for weeks and nobody notices until the
+downstream metrics tank. The lineage graph is already sitting in DataHub. What's
+missing is something that stares at it on a schedule, catches the drift, and pages
+the on-call before the next deploy — with a root cause they can act on in thirty
+seconds. That's Ogle.
 
 ### What it does
 Ogle walks your DataHub lineage graph on a schedule and catches silent
@@ -68,7 +72,7 @@ built to swap onto the salience-ranked
 store of facts, episodes, and preferences — so past false positives and real
 incidents sharpen future walks. The whole suite is keyless and
 Docker-free to test — every network call is monkeypatched — so `pytest -q` runs
-green with no DataHub and no API key (1000+ tests at submission).
+green with no DataHub and no API key (1,365 tests at submission).
 
 ### Challenges we ran into
 - **Scoping drift to what matters.** A naïve diff flags every table that moves.
@@ -94,9 +98,9 @@ clean from a fresh clone.
 ### What's next
 With the nine drift dimensions and their distribution-distance layer already shipped
 (above), what's ahead is memory and reach: swapping the `BaselineStore` onto the
-salience-ranked Aegis MemoryAgent so past false positives and real incidents sharpen
-future walks; agent-to-agent Ogle deployments that share incident memory across teams
-so one team's confirmed drift primes another's; and publishing Ogle's DataHub Skill
+Aegis MemoryAgent seam so past false positives and real incidents sharpen future
+walks; agent-to-agent Ogle deployments that share incident memory across teams so
+one team's confirmed drift primes another's; and publishing Ogle's DataHub Skill
 wrapper back upstream as an OSS contribution.
 
 ---
@@ -140,12 +144,12 @@ live path against the DataHub quickstart.
 |---|---|
 | Public repo | https://github.com/BenDuske/ogle |
 | **Apache 2.0** license | ✅ present at repo root |
-| Demo video (< 3 min, YouTube public/unlisted) | 🟡 script ready — [`docs/DEMO-VIDEO-SCRIPT.md`](DEMO-VIDEO-SCRIPT.md) (turnkey shot-list + narration); awaits Ben's record + upload |
-| Text description | 🟢 drafted (technical story done; Inspiration awaits Ben's voice pass) |
-| Setup instructions in README | 🟡 W1 → refined W3 |
+| Demo video (< 3 min, YouTube public/unlisted) | 🟡 script + Argo-driven recording pipeline ready — [`docs/DEMO-VIDEO-SCRIPT.md`](DEMO-VIDEO-SCRIPT.md) (two-track SCREEN/VOICE, narration via Ben's ElevenLabs voice clone); awaits render + upload |
+| Text description | ✅ complete (Inspiration + technical story + What's next all drafted) |
+| Setup instructions in README | ✅ verified: keyless `ogle demo` Quickstart + live-DataHub Docker path, all commands runnable from a fresh clone |
 | Sample outputs in `examples/` | ✅ `examples/alerts/` + runnable `examples/demo/` fixtures |
-| Live demo URL or Docker Compose one-liner | 🟢 `ogle demo` — one keyless command, zero setup |
-| Optional: OSS contribution back to DataHub | 🟡 W2–W3 stretch |
+| Live demo URL or Docker Compose one-liner | 🟢 no hosted URL — Ogle is a schedule-driven agent, not a web app; the reviewable path is one keyless CLI command (`ogle demo`) reproducing the flagship alert with zero setup, plus `datahub docker quickstart` for the live-DataHub path (README Quickstart). Devpost URL field → https://github.com/BenDuske/ogle |
+| Optional: OSS contribution back to DataHub | 📋 post-submission roadmap — Ogle's DataHub Skill wrapper is a stretch upstream contribution, not part of this submission (documented in *What's next*) |
 
 ---
 
@@ -158,4 +162,3 @@ live path against the DataHub quickstart.
 | **Originality** | Memory-augmented lineage agent — most submissions will be stateless |
 | **Real-World Usefulness** | Catches silent drift before deploy; every ML team ships without this |
 | **Submission Quality** | Under-3-min video, clean README, working `examples/` |
-| **Bonus: OSS contribution** | Ogle's DataHub Skill wrapper published upstream (stretch) |
