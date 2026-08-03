@@ -5384,6 +5384,36 @@ def test_diff_profile_timestamp_unchanged_reveals_silent_stall(tmp_path, capsys)
     assert "profile timestamp: unchanged (2026-08-01T00:00:00Z)" in capsys.readouterr().out
 
 
+def test_diff_profile_timestamp_absent_both_sides_emits_no_line(tmp_path, capsys):
+    # Completes the freshness render matrix: the fourth branch is drift landing on a pair that
+    # NEVER carried a profile stamp (old None, new None → unchanged). There is nothing to report,
+    # so the render must stay silent — no bare `unchanged (None)` line — while the real drift
+    # (rows moved) still prints. Pins the `elif ca["old"] is not None` guard against regressing
+    # into a misleading None-valued freshness line.
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+                computed_at=None,
+            )
+        },
+    ).save()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25}, computed_at=None)],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "rows: 1000 → 1200 (+200)" in out  # the real drift still surfaces
+    assert "profile timestamp" not in out     # ...but no meaningless None-valued freshness line
+
+
 def test_diff_profile_timestamp_dropped_shows_unknown(tmp_path, capsys):
     # `computed_at` is Optional, so a candidate can arrive with the profile stamp gone entirely
     # (known → None) — provenance lost even as data drifted. The changed-branch fallback renders
