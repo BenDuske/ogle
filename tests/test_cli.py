@@ -15,7 +15,7 @@ import pytest
 
 import io
 
-from ogle.cli import _emit, _fmt_age, _parse_age, _use_utf8_stdio, build_parser, load_signatures_file, main
+from ogle.cli import _emit, _fmt_age, _parse_age, _use_utf8_stdio, _walk_live, build_parser, load_signatures_file, main
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -6638,3 +6638,84 @@ def test_check_live_walk_failure_surfaces_exception_type(tmp_path, capsys, monke
     assert "live walk failed: ConnectionError" in err
     # FAULT-INJECTION: bare `{exc}` here would have left a trailing ": " with nothing after.
     assert not err.rstrip().endswith("live walk failed:")
+
+
+# ---------------------------------------------------------------------------------------
+# `_walk_live` internals — the live-DataHub entry wrapper. The failure test above stubs the
+# whole function out; these drive its ACTUAL body (dedup, --discover merge, no-models guard,
+# sorted serving urns) with the walker deps faked, so the SDK/Docker stay out of the loop.
+# ---------------------------------------------------------------------------------------
+
+
+class _FakeWalkResult:
+    """Minimal stand-in for walker.WalkResult — only what `_walk_live` reads off it."""
+
+    def __init__(self, signatures=(), serving=frozenset()):
+        self.signatures = list(signatures)
+        self.serving_dataset_urns = serving
+
+
+def _patch_walker(monkeypatch, *, discovered=(), result=None, capture=None):
+    """Patch `ogle.walker.DataHubBackend` + `walk_models` (both lazily imported inside
+    `_walk_live`). Records the gms passed to the backend and the ordered urn list handed to
+    `walk_models` into `capture` (a dict) so callers can assert the dedup/merge contract."""
+    result = result if result is not None else _FakeWalkResult()
+
+    class _FakeBackend:
+        def __init__(self, gms_server):
+            if capture is not None:
+                capture["gms"] = gms_server
+
+        def discover_deployed_models(self):
+            return list(discovered)
+
+    def _fake_walk(backend, ordered):
+        if capture is not None:
+            capture["ordered"] = list(ordered)
+        return result
+
+    monkeypatch.setattr("ogle.walker.DataHubBackend", _FakeBackend)
+    monkeypatch.setattr("ogle.walker.walk_models", _fake_walk)
+
+
+def test_walk_live_dedups_models_first_seen_wins_preserving_order(monkeypatch):
+    """A model URN passed more than once is walked ONCE, in first-seen order, so downstream
+    diagnostics list each model a single time (cli.py:190-192)."""
+    cap = {}
+    _patch_walker(monkeypatch, capture=cap)
+    _walk_live("http://gms:8080", ["a", "b", "a", "c", "b"], discover=False)
+    assert cap["ordered"] == ["a", "b", "c"]
+    assert cap["gms"] == "http://gms:8080"  # gms threaded to the backend verbatim
+
+
+def test_walk_live_discover_appends_discovered_models_then_dedups(monkeypatch):
+    """--discover extends the explicit list with backend.discover_deployed_models(), and a
+    discovered urn that overlaps an explicit one is deduped away (cli.py:184-192)."""
+    cap = {}
+    _patch_walker(monkeypatch, discovered=["disc1", "b"], capture=cap)
+    _walk_live("http://x", ["a", "b"], discover=True)
+    assert cap["ordered"] == ["a", "b", "disc1"]  # explicit first, dup 'b' dropped
+
+
+def test_walk_live_no_models_raises_valueerror(monkeypatch):
+    """Empty explicit list AND --discover turning up nothing is a hard error, not a silent
+    empty walk — the operator gets told to pass --models or --discover (cli.py:186-189)."""
+    _patch_walker(monkeypatch, discovered=[])
+    with pytest.raises(ValueError, match="no models to walk"):
+        _walk_live("http://x", [], discover=True)
+
+
+def test_walk_live_returns_signatures_and_sorted_serving_urns(monkeypatch):
+    """The frozenset of serving urns comes back SORTED (deterministic diagnostics), and the
+    raw WalkResult rides along as the third element for writeback reuse (cli.py:193-194)."""
+    # An explicitly-unsorted sequence (not a frozenset, whose hash order could accidentally
+    # already be sorted) so a dropped `sorted()` is caught deterministically — `_walk_live`
+    # only ever calls sorted() on this, so any iterable is a faithful stand-in.
+    result = _FakeWalkResult(
+        signatures=["s1", "s2"], serving=("urn:z", "urn:a", "urn:m")
+    )
+    _patch_walker(monkeypatch, result=result)
+    sigs, serving, walk_result = _walk_live("http://x", ["a"], discover=False)
+    assert sigs == ["s1", "s2"]
+    assert serving == ["urn:a", "urn:m", "urn:z"]  # sorted, not source iteration order
+    assert walk_result is result
