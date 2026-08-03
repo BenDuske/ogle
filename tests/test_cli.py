@@ -717,6 +717,40 @@ def test_readme_quickstart_signatures_pair_runs_verbatim(tmp_path, capsys):
     assert "🔴 HIGH drift across 2 datasets on a serving path" in out
 
 
+def test_demo_video_three_command_sequence_debounces_third_run(tmp_path, capsys):
+    """The DEMO-VIDEO-SCRIPT films THREE commands over the bundled fixtures, not two:
+
+        ogle check --store demo.json --signatures examples/demo/healthy-signatures.json   # exit 0
+        ogle check --store demo.json --signatures examples/demo/drifted-signatures.json   # exit 1
+        ogle check --store demo.json --signatures examples/demo/drifted-signatures.json   # exit 0
+
+    The README pin above stops at the first drift (0 -> 1). The on-camera beat the video is
+    built around is the THIRD run: re-present the SAME drifted fixtures and the incident is
+    already fingerprinted, so it debounces to a quiet exit 0 ("run it again — it stays quiet").
+    That third exit-0 over the REAL judge-visible fixtures through main() is unpinned — the
+    existing debounce test uses synthesized single-dataset signatures, not `examples/demo/*`.
+    A dedup regression or a fixture rename would silently break the filmed take (the sole
+    remaining hackathon deliverable) with the whole suite still green. Pin the full sequence.
+    """
+    from pathlib import Path
+
+    demo_dir = Path(__file__).resolve().parents[1] / "examples" / "demo"
+    healthy = demo_dir / "healthy-signatures.json"
+    drifted = demo_dir / "drifted-signatures.json"
+
+    store = tmp_path / "demo.json"
+    assert main(["check", "--store", str(store), "--signatures", str(healthy)]) == 0  # seed
+    capsys.readouterr()
+
+    assert main(["check", "--store", str(store), "--signatures", str(drifted)]) == 1  # new incident
+    capsys.readouterr()
+
+    # Third run: identical drifted fixtures, incident already recorded -> debounced, no re-alert.
+    assert main(["check", "--store", str(store), "--signatures", str(drifted)]) == 0
+    third_out = capsys.readouterr().out
+    assert "HIGH drift" not in third_out  # the headline the second run paged must be silent now
+
+
 def test_demo_data_matches_examples():
     """The demo fixtures live in TWO places on purpose and must stay byte-identical.
 
