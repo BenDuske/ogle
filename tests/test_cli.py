@@ -5291,6 +5291,46 @@ def test_diff_row_count_delta_shown(tmp_path, capsys):
     assert "rows: 1000 → 1200 (+200)" in capsys.readouterr().out
 
 
+def test_diff_row_count_profiling_dropped_shows_unknown(tmp_path, capsys):
+    # DatasetProfile.rowCount is Optional — a candidate can arrive with profiling gone
+    # (100 → None). That IS drift (row_changed True) but the delta is uncomputable, so the
+    # render must fall back to "unknown" rather than crash or hide the transition.
+    store = tmp_path / "s.json"
+    _seed_diff(store)
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=None,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "rows: 1000 → unknown" in capsys.readouterr().out
+
+
+def test_diff_row_count_profiling_appeared_shows_unknown_source(tmp_path, capsys):
+    # Reverse of the drop: baseline had no profiled row count, the candidate now does
+    # (None → 1200). Still uncomputable delta; the "unknown" belongs on the OLD side.
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=None,
+                field_null_fractions={"email": 0.25},
+            )
+        },
+    ).save()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25})],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "rows: unknown → 1200" in capsys.readouterr().out
+
+
 def test_diff_not_watched_exits_two(tmp_path, capsys):
     store = tmp_path / "s.json"
     _seed_diff(store)
