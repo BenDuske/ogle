@@ -121,6 +121,24 @@ def test_check_warns_and_recovers_on_corrupt_store(tmp_path, capsys):
     assert store.exists()  # clean store re-written in place
 
 
+def test_check_warns_but_survives_store_save_failure(tmp_path, capsys, monkeypatch):
+    # A failed persist (disk full / permission denied mid-write) must not crash a scheduled
+    # run: the drift check already succeeded, so we warn on stderr and exit on the gate the
+    # check decided — the save is a best-effort side-effect, not part of the verdict.
+    store = tmp_path / "baselines.json"
+    sigs = _write_sigs(tmp_path / "s.json", [_sig()])
+
+    def _boom(self, path=None):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr("ogle.cli.BaselineStore.save", _boom)
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs)])
+    assert rc == 0  # first-run seed decides exit 0; the save failure must not upgrade it
+    err = capsys.readouterr().err
+    assert "could not save store" in err
+    assert "No space left on device" in err  # underlying cause surfaced for the operator
+
+
 def test_new_incident_exits_one(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()
