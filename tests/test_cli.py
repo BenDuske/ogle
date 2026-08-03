@@ -6451,6 +6451,59 @@ def test_writeback_failure_exits_1_when_incident_meets_floor(tmp_path, capsys, m
     assert rc == 1                                          # LOW incident >= --fail-on low
 
 
+def _boom_retract(*a, **k):
+    raise RuntimeError("catalog write endpoint down")
+
+
+def test_retract_failure_is_a_no_op_on_the_exit_gate_when_healthy(tmp_path, capsys, monkeypatch):
+    """A --retract-cleared exception on a CLEAN run must not invent a failure exit code.
+
+    Retraction is an optional side-effect (it runs on healthy runs — recovery is exactly the
+    no-new-incident case). When the check itself is clean, a thrown `_do_retract` still exits
+    0: the error is surfaced on stderr, but it never upgrades the exit code. This is the exact
+    twin of the write-back-error contract (both route through `_check_exit_fail`).
+    """
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    seed = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=2000)]
+    wr = WalkResult(signatures=seed, serving_dataset_urns=set(), dataset_to_models={})
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (seed, [], wr))
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])  # seed healthy
+    capsys.readouterr()
+    # Both datasets score healthy again -> recovered candidates -> retract runs (and throws).
+    monkeypatch.setattr("ogle.cli._do_retract", _boom_retract)
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover", "--retract-cleared"])
+    assert "retract failed" in capsys.readouterr().err  # failure IS surfaced
+    assert rc == 0                                       # ...but a clean run never pages
+
+
+def test_retract_failure_preserves_a_concurrent_incident_exit(tmp_path, capsys, monkeypatch):
+    """When the SAME run also has a new incident, a thrown retract must not mask the exit-1 page.
+
+    `_do_retract` runs because a co-scored dataset recovered; routing its failure through the
+    shared `_check_exit_fail` gate leaves the still-live incident's exit 1 intact — the retract
+    error suppresses nothing the drift gate decided.
+    """
+    from ogle.walker import WalkResult
+
+    store = tmp_path / "b.json"
+    seed = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=2000)]
+    wr_seed = WalkResult(signatures=seed, serving_dataset_urns=set(), dataset_to_models={})
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (seed, [], wr_seed))
+    main(["check", "--store", str(store), "--gms", "http://x", "--discover"])  # seed healthy
+    capsys.readouterr()
+    # ORDERS collapses (new incident -> exit gate wants 1); CUSTOMERS stays healthy so it is a
+    # recovered candidate -> retract runs -> throws.
+    cur = [_sig(CUSTOMERS_URN, row_count=1000), _sig(ORDERS_URN, row_count=5)]
+    wr = WalkResult(signatures=cur, serving_dataset_urns=set(), dataset_to_models={})
+    monkeypatch.setattr("ogle.cli._walk_live", lambda gms, models, discover: (cur, [], wr))
+    monkeypatch.setattr("ogle.cli._do_retract", _boom_retract)
+    rc = main(["check", "--store", str(store), "--gms", "http://x", "--discover", "--retract-cleared"])
+    assert "retract failed" in capsys.readouterr().err
+    assert rc == 1  # ORDERS drift still pages despite the retract error
+
+
 def test_retract_cleared_catalog_dry_run_previews_without_applying(tmp_path, capsys, monkeypatch):
     """--retract-cleared --catalog-dry-run previews the clear plan and never calls _do_retract."""
     from ogle.walker import WalkResult
