@@ -15,7 +15,7 @@ import pytest
 
 import io
 
-from ogle.cli import _emit, _fmt_age, _parse_age, _use_utf8_stdio, _walk_live, build_parser, load_signatures_file, main
+from ogle.cli import _do_retract, _do_writeback, _emit, _fmt_age, _parse_age, _use_utf8_stdio, _walk_live, build_parser, load_signatures_file, main
 from ogle.signature import build_signature
 from ogle.store import BaselineStore
 
@@ -6719,3 +6719,134 @@ def test_walk_live_returns_signatures_and_sorted_serving_urns(monkeypatch):
     assert sigs == ["s1", "s2"]
     assert serving == ["urn:a", "urn:m", "urn:z"]  # sorted, not source iteration order
     assert walk_result is result
+
+
+# --- _do_writeback / _do_retract: the live tag-mutation wrappers (cli.py:197-231) ---
+# Thin lazy-import shims around ogle.writeback. They own one job each: construct the live
+# backend with the operator's gms, hand the caller's args to the PURE planner unchanged,
+# and return (plan, apply-result). A silently dropped flag or a renamed kwarg here would
+# write the wrong tags to a real DataHub, so pin the threading with fakes (no live GMS).
+
+
+def _patch_writeback(monkeypatch, capture):
+    """Stub ogle.writeback's backend + plan/apply so the wrappers run with no live GMS.
+
+    The wrappers lazy-import ``from .writeback import ...`` at call time, so patching the
+    names on the ``ogle.writeback`` module is what the shim actually binds. Every hop
+    records into ``capture`` so a test can assert exactly what was threaded where."""
+
+    class _FakeWritebackBackend:
+        def __init__(self, gms_server):
+            capture["gms"] = gms_server
+
+    def _fake_plan_writeback(findings, walk_result=None, severity_tags=False, kind_tags=False):
+        capture["plan_writeback"] = {
+            "findings": findings,
+            "walk_result": walk_result,
+            "severity_tags": severity_tags,
+            "kind_tags": kind_tags,
+        }
+        return "PLAN_WB"
+
+    def _fake_plan_retract(
+        recovered_urns,
+        active_findings=(),
+        walk_result=None,
+        also_drifting_urns=(),
+        unreachable_urns=(),
+    ):
+        capture["plan_retract"] = {
+            "recovered_urns": recovered_urns,
+            "active_findings": active_findings,
+            "walk_result": walk_result,
+            "also_drifting_urns": also_drifting_urns,
+            "unreachable_urns": unreachable_urns,
+        }
+        return "PLAN_RE"
+
+    def _fake_apply(plan, backend):
+        capture["apply"] = (plan, backend)
+        return "RESULT_WB"
+
+    def _fake_apply_retract(plan, backend):
+        capture["apply_retract"] = (plan, backend)
+        return "RESULT_RE"
+
+    monkeypatch.setattr("ogle.writeback.DataHubWritebackBackend", _FakeWritebackBackend)
+    monkeypatch.setattr("ogle.writeback.plan_writeback", _fake_plan_writeback)
+    monkeypatch.setattr("ogle.writeback.plan_retract", _fake_plan_retract)
+    monkeypatch.setattr("ogle.writeback.apply", _fake_apply)
+    monkeypatch.setattr("ogle.writeback.apply_retract", _fake_apply_retract)
+
+
+def test_do_writeback_threads_gms_flags_and_returns_plan_and_apply_result(monkeypatch):
+    """`_do_writeback` builds the backend with the operator's gms, forwards findings +
+    walk_result + both tag flags to the pure planner, and returns (plan, apply(plan,
+    backend)) — the SAME plan object it hands `apply`, not a re-planned one (cli.py:200-207)."""
+    cap = {}
+    _patch_writeback(monkeypatch, cap)
+    plan, result = _do_writeback(
+        "FINDINGS", "WALK", "http://gms:8080", severity_tags=True, kind_tags=True
+    )
+    assert cap["gms"] == "http://gms:8080"  # gms threaded to the live backend verbatim
+    assert cap["plan_writeback"] == {
+        "findings": "FINDINGS",
+        "walk_result": "WALK",
+        "severity_tags": True,
+        "kind_tags": True,
+    }
+    assert plan == "PLAN_WB"
+    assert result == "RESULT_WB"
+    applied_plan, applied_backend = cap["apply"]
+    assert applied_plan == "PLAN_WB"  # apply gets the exact plan the caller receives back
+    assert cap["gms"] == "http://gms:8080" and applied_backend is not None
+
+
+def test_do_writeback_defaults_both_tag_flags_off(monkeypatch):
+    """Called without the optional flags, `_do_writeback` forwards severity_tags=kind_tags=
+    False — a default flip would tag entities the operator never asked to (cli.py:197-206)."""
+    cap = {}
+    _patch_writeback(monkeypatch, cap)
+    _do_writeback("F", "W", "http://x")
+    assert cap["plan_writeback"]["severity_tags"] is False
+    assert cap["plan_writeback"]["kind_tags"] is False
+
+
+def test_do_retract_maps_suppressed_to_also_drifting_and_threads_unreachable(monkeypatch):
+    """`_do_retract` renames at the boundary: the caller's ``suppressed_urns`` becomes the
+    planner's ``also_drifting_urns`` (muted-but-drifting still protects downstream models),
+    and ``unreachable_urns`` passes straight through. A mis-wired kwarg here would clear a
+    tag off a model whose upstream might still be broken (cli.py:210-231)."""
+    cap = {}
+    _patch_writeback(monkeypatch, cap)
+    plan, result = _do_retract(
+        "RECOVERED",
+        "ACTIVE",
+        "WALK",
+        "http://gms:9",
+        suppressed_urns=("urn:muted",),
+        unreachable_urns=("urn:down",),
+    )
+    assert cap["gms"] == "http://gms:9"
+    assert cap["plan_retract"] == {
+        "recovered_urns": "RECOVERED",
+        "active_findings": "ACTIVE",
+        "walk_result": "WALK",
+        "also_drifting_urns": ("urn:muted",),  # suppressed_urns -> also_drifting_urns
+        "unreachable_urns": ("urn:down",),
+    }
+    assert plan == "PLAN_RE"
+    assert result == "RESULT_RE"
+    applied_plan, _ = cap["apply_retract"]
+    assert applied_plan == "PLAN_RE"  # apply_retract gets the returned plan, not a fresh one
+
+
+def test_do_retract_defaults_suppressed_and_unreachable_to_empty(monkeypatch):
+    """Omitting the optional protect-lists means empty tuples reach the planner — a
+    None/absent default would break the retract math instead of protecting nothing
+    (cli.py:210-231)."""
+    cap = {}
+    _patch_writeback(monkeypatch, cap)
+    _do_retract("R", "A", "W", "http://x")
+    assert cap["plan_retract"]["also_drifting_urns"] == ()
+    assert cap["plan_retract"]["unreachable_urns"] == ()
