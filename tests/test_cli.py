@@ -970,6 +970,37 @@ def test_demo_narrate_bad_spec_exits_two(capsys, monkeypatch):
     assert rc == 2
 
 
+def test_demo_missing_bundled_fixture_exits_two(capsys, tmp_path, monkeypatch):
+    """A demo dir missing its fixtures is an input error (exit 2), not a crash.
+
+    Guards the install-integrity branch: if a wheel/pipx layout ever ships without the
+    packaged `_demo_data/*.json`, `ogle demo` names the missing file on stderr and exits 2
+    rather than tracebacking on the first `load_signatures_file`.
+    """
+    monkeypatch.setattr("ogle.cli._DEMO_DIR", tmp_path)  # empty dir: fixtures absent
+    rc = main(["demo"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "bundled fixture not found" in captured.err
+    assert "healthy-signatures.json" in captured.err
+
+
+def test_demo_corrupt_bundled_fixture_exits_two(capsys, monkeypatch):
+    """A corrupted bundled fixture surfaces as an input error (exit 2), not a traceback.
+
+    Twin of the missing-fixture guard on the parse side: the existence check passes but
+    `load_signatures_file` raises ValueError; the demo reports the cause and exits 2.
+    """
+    def _corrupt(_path):
+        raise ValueError("truncated JSON in bundled fixture")
+
+    monkeypatch.setattr("ogle.cli.load_signatures_file", _corrupt)
+    rc = main(["demo"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "truncated JSON in bundled fixture" in captured.err
+
+
 def test_parser_demo_narrate_defaults_to_ollama():
     args = build_parser().parse_args(["demo", "--narrate"])
     assert args.narrate == "ollama"
