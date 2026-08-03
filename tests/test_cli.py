@@ -5331,6 +5331,85 @@ def test_diff_row_count_profiling_appeared_shows_unknown_source(tmp_path, capsys
     assert "rows: unknown → 1200" in capsys.readouterr().out
 
 
+def test_diff_profile_timestamp_advance_shown_alongside_drift(tmp_path, capsys):
+    # `computed_at` is intentionally excluded from the `identical` verdict (a healthy refresh
+    # advances it), so the informational timestamp line only renders when OTHER drift already
+    # forced the diff open. When it does, an advancing stamp is shown so the operator can read
+    # "the profile genuinely re-ran" next to whatever moved. That render path was unexercised.
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+                computed_at="2026-08-01T00:00:00Z",
+            )
+        },
+    ).save()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25}, computed_at="2026-08-02T00:00:00Z")],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "profile timestamp: 2026-08-01T00:00:00Z → 2026-08-02T00:00:00Z" in capsys.readouterr().out
+
+
+def test_diff_profile_timestamp_unchanged_reveals_silent_stall(tmp_path, capsys):
+    # The thesis case: real drift landed but the profile stamp did NOT advance — the feed moved
+    # yet the profiler never re-ran. The diff surfaces that stall as an "unchanged" timestamp so
+    # the stall is legible in the investigative view, not just in `check --freshness`.
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+                computed_at="2026-08-01T00:00:00Z",
+            )
+        },
+    ).save()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25}, computed_at="2026-08-01T00:00:00Z")],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "profile timestamp: unchanged (2026-08-01T00:00:00Z)" in capsys.readouterr().out
+
+
+def test_diff_profile_timestamp_dropped_shows_unknown(tmp_path, capsys):
+    # `computed_at` is Optional, so a candidate can arrive with the profile stamp gone entirely
+    # (known → None) — provenance lost even as data drifted. The changed-branch fallback renders
+    # the missing side as "unknown" rather than a bare `None`.
+    store = tmp_path / "s.json"
+    BaselineStore(
+        path=store,
+        baselines={
+            CUSTOMERS_URN: _sig(
+                schema_fields=[("id", "int"), ("email", "string")],
+                row_count=1000,
+                field_null_fractions={"email": 0.25},
+                computed_at="2026-08-01T00:00:00Z",
+            )
+        },
+    ).save()
+    cand = _write_sigs(
+        tmp_path / "c.json",
+        [_sig(schema_fields=[("id", "int"), ("email", "string")], row_count=1200,
+              field_null_fractions={"email": 0.25}, computed_at=None)],
+    )
+    rc = main(["diff", CUSTOMERS_URN, "--store", str(store), "--signatures", str(cand)])
+    assert rc == 1
+    assert "profile timestamp: 2026-08-01T00:00:00Z → unknown" in capsys.readouterr().out
+
+
 def test_diff_not_watched_exits_two(tmp_path, capsys):
     store = tmp_path / "s.json"
     _seed_diff(store)
