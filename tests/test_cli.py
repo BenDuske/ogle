@@ -6490,6 +6490,43 @@ def test_retract_failures_warn_on_stderr(capsys):
     assert CUSTOMERS_URN in cap.err
 
 
+def test_render_retract_json_emits_plan_and_result(capsys):
+    """--json retract mode dumps a single sorted-keys JSON blob carrying BOTH the pure plan
+    and the apply result (so a wrapper can reconcile intent vs. what was cleared) — and
+    writes nothing else to stdout."""
+    from ogle.cli import _render_retract
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    a1 = _tag_action(CUSTOMERS_URN)
+    plan = WritebackPlan(actions=[a1])
+    result = WritebackResult(applied=[a1], unchanged=[], failed=[])
+    _render_retract(plan, result, as_json=True)
+    out = json.loads(capsys.readouterr().out)  # sole stdout payload is valid JSON
+    assert set(out) == {"plan", "result"}
+    assert out["result"]["tagged_entities"] == [CUSTOMERS_URN]
+    assert out["plan"] == plan.to_dict()
+
+
+def test_render_retract_markdown_lists_cleared_entities_with_footnotes(capsys):
+    """The human render names every CLEARED entity under the 'Cleared Ogle's drift tag'
+    headline, then footnotes the already-clean skips and the removals that failed — the
+    counts must match the result buckets, not the plan size."""
+    from ogle.cli import _render_retract
+    from ogle.writeback import WritebackPlan, WritebackResult
+
+    cleared = _tag_action(CUSTOMERS_URN)
+    already = _tag_action(ORDERS_URN)
+    broke = _tag_action("urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.z_zed,PROD)")
+    plan = WritebackPlan(actions=[cleared, already, broke])
+    result = WritebackResult(applied=[cleared], unchanged=[already], failed=[broke])
+    _render_retract(plan, result, as_json=False)
+    out = capsys.readouterr().out
+    assert "Cleared Ogle's drift tag from 1 entity(ies):" in out
+    assert f"- `{CUSTOMERS_URN}`" in out
+    assert "(1 already clean, skipped)" in out
+    assert "(1 failed — see stderr)" in out
+
+
 # ---- incidents --standing / --sort standing: the longevity axis (first_seen) --------------
 
 
