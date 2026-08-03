@@ -1170,6 +1170,22 @@ def test_empirical_cvm_positive_when_the_distributions_separate():
     assert _empirical_cvm(b, c) > 0.0
 
 
+def test_empirical_family_is_none_for_coincident_point_masses():
+    """A shared probability band whose mass all sits at ONE value has no bin between two distinct
+    values (`len(xs) < 2`) — nothing separable to measure. CvM/AD/Cramér are documented as guarded
+    identically, so each returns None rather than a spurious 0. Pins the len(xs)<2 guard for all
+    three siblings; a genuine two-value pair still returns a real number (the contrast case)."""
+    point = [(0.25, 10.0), (0.75, 10.0)]  # distinct probability levels, single value -> xs == {10.0}
+    assert _empirical_cvm(point, point) is None
+    assert _empirical_ad(point, point) is None
+    assert _empirical_cramer(point, point) is None
+    # contrast: introduce a second distinct value and the guard no longer fires
+    two_valued = [(0.25, 10.0), (0.75, 30.0)]
+    assert _empirical_cvm(point, two_valued) is not None
+    assert _empirical_ad(point, two_valued) is not None
+    assert _empirical_cramer(point, two_valued) is not None
+
+
 def test_empirical_cvm_ranks_a_broad_shift_above_a_narrow_spike_relative_to_ks():
     """CvM's reason to exist: for the SAME KS height, a broad consistent gap scores nearer KS than
     a narrow one. Compare each pair's CvM/KS ratio — the broad separation keeps more of its sup."""
