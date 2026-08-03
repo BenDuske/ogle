@@ -423,6 +423,68 @@ def test_json_output_is_parseable(tmp_path, capsys):
     assert payload["incident"] is not None
 
 
+# ---- check --narrate: the LLM incident summary appended to the report -------------
+def test_check_narrate_appends_incident_summary(tmp_path, capsys, monkeypatch):
+    """`check --narrate` on a drifting run appends the LLM summary under a divider,
+    naming who to page from the incident's normalized owner map."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(row_count=0)])
+    # Inject a narrator so no live Ollama is touched; capture the args it is handed.
+    seen = {}
+
+    def _fake_narrate(findings, llm=None, owners=None):
+        seen["n_findings"] = len(findings)
+        seen["owners"] = owners
+        return "INJECTED-CHECK-SUMMARY"
+
+    monkeypatch.setattr("ogle.cli.build_narrator", lambda spec: (lambda prompt: prompt))
+    monkeypatch.setattr("ogle.cli.narrate", _fake_narrate)
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs), "--narrate"])
+    assert rc == 1  # narrate is a side-section; the drift exit code still governs
+    out = capsys.readouterr().out
+    assert "**Incident summary**" in out
+    assert "INJECTED-CHECK-SUMMARY" in out
+    assert seen["n_findings"] >= 1  # the drift finding was forwarded to the narrator
+
+
+def test_check_narrate_suppressed_in_json_mode(tmp_path, capsys, monkeypatch):
+    """JSON mode must stay pure — the markdown incident summary is skipped so the
+    payload never gets corrupted, even with --narrate set."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(row_count=0)])
+
+    def _boom(spec):  # would be called only if the branch wrongly ran under --json
+        raise AssertionError("build_narrator must not be reached in JSON mode")
+
+    monkeypatch.setattr("ogle.cli.build_narrator", _boom)
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--narrate", "--json"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    json.loads(out)  # stdout is still a single clean JSON document
+    assert "Incident summary" not in out
+
+
+def test_check_narrate_bad_spec_exits_two(tmp_path, capsys, monkeypatch):
+    """A malformed --narrate SPEC on `check` is a usage error (exit 2), and the drift
+    report was already emitted before the narrator was even built."""
+    store = tmp_path / "baselines.json"
+    BaselineStore(path=store, baselines={CUSTOMERS_URN: _sig(row_count=1000)}).save()
+    sigs = _write_sigs(tmp_path / "s.json", [_sig(row_count=0)])
+
+    def _reject(spec):
+        raise ValueError("unknown narrator backend: bogus")
+
+    monkeypatch.setattr("ogle.cli.build_narrator", _reject)
+    rc = main(["check", "--store", str(store), "--signatures", str(sigs),
+               "--narrate", "bogus"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "ogle check:" in err and "unknown narrator backend" in err
+
+
 # ---- parser + no-command behavior -------------------------------------------------
 def test_no_command_prints_help_exits_zero(capsys):
     rc = main([])
