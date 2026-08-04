@@ -38,6 +38,32 @@ from .signature import DatasetSignature
 STORE_VERSION = 1
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of a directory so a completed rename is durable.
+
+    `os.replace` swaps the temp file into place atomically, but on POSIX the *directory
+    entry* that now points at the new file is itself only persisted once the parent
+    directory is fsync'd. Without this, a crash right after the rename can lose the rename
+    even though the file's bytes were already flushed — the store reverts to its pre-save
+    name (or the entry vanishes). This closes that last gap in the atomic-write guarantee.
+
+    Best-effort by design: directory fsync is not portable. On Windows (and some network
+    filesystems) opening a directory for fsync raises, and rename durability there rests on
+    the platform's own semantics — so those errors are swallowed rather than failing a save
+    whose data is already on disk.
+    """
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return  # platform/filesystem doesn't allow opening a dir for fsync (e.g. Windows)
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass  # data is already durable; a failed dir-fsync must not sink the save
+    finally:
+        os.close(dir_fd)
+
+
 @dataclass
 class _IncidentRecord:
     """What Ogle remembers about one incident fingerprint across runs.
@@ -558,6 +584,10 @@ class BaselineStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, target)
+            # The rename is atomic, but its durability lives in the parent directory entry:
+            # fsync the directory so a crash right after the swap can't lose the rename and
+            # revert the store to its pre-save name. Best-effort (no-op where unsupported).
+            _fsync_dir(target.parent)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)

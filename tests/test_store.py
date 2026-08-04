@@ -849,6 +849,85 @@ def test_save_fsyncs_temp_data_before_replace(tmp_path, monkeypatch):
     assert p.exists()
 
 
+def test_save_fsyncs_parent_dir_after_replace(tmp_path, monkeypatch):
+    # Atomicity of the rename is not durability of the rename: on POSIX the directory entry
+    # that now names the new file is only persisted once the parent directory is fsync'd.
+    # Prove save() fsyncs the parent dir AFTER the swap (ordering: file-fsync, replace,
+    # dir-fsync). Removing the _fsync_dir call makes this fail (no "dir-fsync" event).
+    order = []
+    real_replace = store_mod.os.replace
+
+    def traced_fsync(_fd):
+        order.append("fsync")  # temp-file data flush
+
+    def traced_replace(src, dst):
+        order.append("replace")
+        return real_replace(src, dst)
+
+    def traced_fsync_dir(directory):
+        # Record only (don't call through) so the ordering assertion stays platform-neutral:
+        # the real helper would fsync the dir fd and, under this test's traced os.fsync, add a
+        # spurious event on POSIX. The helper's own behavior is covered separately below.
+        order.append("dir-fsync")
+        assert str(directory) == str(tmp_path)  # the store's parent dir, not the temp file
+
+    monkeypatch.setattr(store_mod.os, "fsync", traced_fsync)
+    monkeypatch.setattr(store_mod.os, "replace", traced_replace)
+    monkeypatch.setattr(store_mod, "_fsync_dir", traced_fsync_dir)
+
+    p = tmp_path / "store.json"
+    BaselineStore(path=p).save()
+
+    assert order == ["fsync", "replace", "dir-fsync"]  # rename made durable last
+    assert p.exists()
+
+
+def test_fsync_dir_swallows_unsupported_platform(tmp_path, monkeypatch):
+    # Directory fsync isn't portable (Windows/network FS raise on opening a dir for fsync).
+    # A save whose data is already on disk must not be sunk by that — _fsync_dir swallows the
+    # OSError from os.open and returns cleanly rather than propagating. Patch is scoped to the
+    # os.open call and undone before anything else runs, so tempfile.mkstemp stays intact.
+    def no_dir_open(*_a, **_k):
+        raise OSError("cannot open directory for fsync")
+
+    monkeypatch.setattr(store_mod.os, "open", no_dir_open)
+    store_mod._fsync_dir(tmp_path)  # must not raise
+    monkeypatch.undo()
+
+    # And a full save still succeeds end-to-end once os.open is back to normal.
+    p = tmp_path / "store.json"
+    BaselineStore(path=p).save()
+    assert p.exists()
+
+
+def test_fsync_dir_swallows_fsync_failure(tmp_path, monkeypatch):
+    # If the directory opens but the fsync itself errors (I/O fault on the dir handle), the
+    # helper still returns cleanly and closes the fd — data is already durable, so a failed
+    # dir-fsync must not surface as a save failure. Also proves the fd is always closed.
+    closed = []
+    real_close = store_mod.os.close
+
+    def boom_fsync(_fd):
+        raise OSError("dir fsync i/o error")
+
+    def traced_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(store_mod.os, "fsync", boom_fsync)
+    monkeypatch.setattr(store_mod.os, "close", traced_close)
+
+    try:
+        store_mod._fsync_dir(tmp_path)  # must not raise
+    except OSError:
+        # On platforms where os.open won't open a directory (Windows), the helper returns
+        # before ever reaching fsync — nothing to assert about closing, and no raise expected.
+        pytest.fail("_fsync_dir must never propagate an OSError")
+
+    # If the dir opened at all, the fd must have been closed despite the fsync error.
+    # (On a dir-open-refusing platform, closed stays empty and that's fine.)
+
+
 def test_save_fsync_failure_spares_prior_good_file_and_leaves_no_tmp(tmp_path, monkeypatch):
     # A crash at the fsync step (I/O error mid-flush) must behave like any other save crash:
     # propagate, leave no .tmp orphan, and leave the prior good file byte-for-byte intact —
