@@ -527,13 +527,32 @@ class BaselineStore:
                 f"baseline store version {version!r} != supported {STORE_VERSION} "
                 f"(refusing to misread a stale/foreign file)"
             )
+        # The nested `baselines`/`seen_incidents` sections must each be a JSON *object* too.
+        # A valid-JSON-but-non-object value here (a list/scalar from a truncated or
+        # hand-mangled file that still parses AND carries the right `version`) would reach
+        # `.items()` and raise AttributeError — which is NOT in `load`'s corrupt-recovery net
+        # (ValueError/KeyError/TypeError), so a scheduled `ogle check` would crash-loop and go
+        # blind on exactly the bad file the net exists for. Normalize to the same ValueError
+        # the top-level and version guards raise so it quarantines/surfaces like any foreign file.
+        raw_baselines = data.get("baselines", {})
+        if not isinstance(raw_baselines, dict):
+            raise ValueError(
+                f"baseline store 'baselines' must be a JSON object, got "
+                f"{type(raw_baselines).__name__} (refusing to misread a truncated/foreign file)"
+            )
+        raw_seen = data.get("seen_incidents", {})
+        if not isinstance(raw_seen, dict):
+            raise ValueError(
+                f"baseline store 'seen_incidents' must be a JSON object, got "
+                f"{type(raw_seen).__name__} (refusing to misread a truncated/foreign file)"
+            )
         baselines = {
             urn: DatasetSignature.from_dict(raw)
-            for urn, raw in data.get("baselines", {}).items()
+            for urn, raw in raw_baselines.items()
         }
         seen = {
             fp: _IncidentRecord.from_dict(raw)
-            for fp, raw in data.get("seen_incidents", {}).items()
+            for fp, raw in raw_seen.items()
         }
         # muted_urns is additive (introduced after v1 shipped): a store written by an older
         # Ogle simply lacks the key and loads with nothing muted, so no version bump is needed.

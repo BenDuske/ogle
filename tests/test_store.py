@@ -1110,6 +1110,33 @@ def test_from_dict_rejects_non_dict_directly(tmp_path):
             BaselineStore.from_dict(bad)
 
 
+@pytest.mark.parametrize("section", ["baselines", "seen_incidents"])
+@pytest.mark.parametrize("bad_value", [[1, 2, 3], 42, "a string", True])
+def test_load_recovers_from_nested_section_that_is_not_an_object(tmp_path, section, bad_value):
+    """The top-level guard isn't enough: a file with the correct `version` but whose nested
+    `baselines`/`seen_incidents` value is a valid-JSON-but-non-object (list/scalar from a
+    truncated or hand-mangled file) reaches `.items()` and raises AttributeError — which is NOT
+    in load()'s (ValueError/KeyError/TypeError) recovery net, so a scheduled `ogle check` would
+    crash-loop and go blind. It must quarantine like any other foreign file."""
+    payload = {"version": 1, "baselines": {}, "seen_incidents": {}}
+    payload[section] = bad_value
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces a clean, section-named ValueError (not AttributeError).
+    with pytest.raises(ValueError, match=f"'{section}' must be a JSON object"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the bad file and hands back a fresh, re-baselineable store.
+    store = BaselineStore.load(p)
+    assert len(store) == 0
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    assert not p.exists()
+    # The recovered store is fully usable: a fresh baseline saves + reloads clean.
+    store.put_baseline(_sig())
+    store.save()
+    assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN) is not None
+
+
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
     # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
     p = tmp_path / "store.json"
