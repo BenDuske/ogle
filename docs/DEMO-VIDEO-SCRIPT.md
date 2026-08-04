@@ -100,6 +100,13 @@ stage directions, no parenthetical asides). Total narration budget ≈ 430 words
 ### Scene 4 — It remembers (debounce) (2:15 → 2:42)
 
 **SCREEN**
+- **PRECONDITION (do this before rolling):** ensure `demo.json` does **not** exist
+  yet — `rm -f demo.json`. Scene 4 depends on a fresh store: the first `check` seeds
+  the baseline (exit 0), the second pages the new drift (exit 1), the third is
+  debounced (exit 0). A leftover `demo.json` from a rehearsal already holds the
+  incident, so the very first `check` finds pre-existing drift and the sequence
+  inverts to `1 → 0 → 0` — silently breaking the "it remembers" narration on camera.
+  (Verified 2026-08-04: stale store → `1 → 0 → 0`; fresh store → `0 → 1 → 0`.)
 - 2:15 Clear the terminal. Run these three commands back-to-back, letting each
   finish:
   ```bash
