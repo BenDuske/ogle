@@ -586,11 +586,26 @@ class BaselineStore:
                 f"{type(raw_muted).__name__} (refusing to misread a truncated/foreign file)"
             )
         muted = set(raw_muted)
+
+        # The three mute-metadata fields below are all JSON objects (urn -> value maps). A
+        # non-dict value (truncated/foreign/hand-edited file) must be *rejected*, not coerced:
+        # `dict(["12","34"])` silently char-pairs a list of 2-char strings into `{"1":"2",...}`
+        # — the exact silent-misread the `muted_urns` guard above was written to prevent. Raise
+        # the same clean ValueError contract so `load()` quarantines it like any foreign file.
+        def _require_map(key: str) -> dict:
+            raw = data.get(key, {})
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"baseline store '{key}' must be a JSON object, got "
+                    f"{type(raw).__name__} (refusing to misread a truncated/foreign file)"
+                )
+            return raw
+
         # muted_until (timed snoozes) is likewise additive; older files lack it. Guard against
         # a URN being both permanent and snoozed (permanent wins) so state stays coherent.
         muted_until = {
             urn: float(exp)
-            for urn, exp in dict(data.get("muted_until", {})).items()
+            for urn, exp in _require_map("muted_until").items()
             if urn not in muted
         }
         # mute_reasons (introduced after muted_until) is likewise additive; older files lack
@@ -598,7 +613,7 @@ class BaselineStore:
         # legacy file can't resurrect an orphan reason for an unmuted dataset.
         mute_reasons = {
             urn: str(reason)
-            for urn, reason in dict(data.get("mute_reasons", {})).items()
+            for urn, reason in _require_map("mute_reasons").items()
             if urn in muted or urn in muted_until
         }
         # muted_at (age stamps, introduced after mute_reasons) is likewise additive; older
@@ -606,7 +621,7 @@ class BaselineStore:
         # still muted, so a legacy/hand-edited file can't resurrect an orphan stamp.
         muted_at = {
             urn: float(ts)
-            for urn, ts in dict(data.get("muted_at", {})).items()
+            for urn, ts in _require_map("muted_at").items()
             if urn in muted or urn in muted_until
         }
         return cls(

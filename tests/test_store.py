@@ -1181,9 +1181,9 @@ def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
     NO exception, so the operator's intended mute vanishes and the dataset it was meant to
     silence starts paging again — quietly wrong, the worst failure for a suppression list (a
     scalar like `42` would raise TypeError that load() happens to catch, but the string case
-    slips straight through). Unlike the sibling `muted_until`/`mute_reasons`/`muted_at` sections
-    (whose `dict(...)` raises ValueError/TypeError on a bad shape), this needs an explicit
-    list guard so a foreign value quarantines like any other corrupt file."""
+    slips straight through). The sibling `muted_until`/`mute_reasons`/`muted_at` sections have
+    their own object guard now (see the test below); this one needs the explicit list guard so
+    a foreign value quarantines like any other corrupt file."""
     payload = {"version": 1, "baselines": {}, "seen_incidents": {}, "muted_urns": bad_value}
     p = tmp_path / "store.json"
     p.write_text(json.dumps(payload), encoding="utf-8")
@@ -1201,6 +1201,39 @@ def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
     store.mute(CUSTOMERS_URN)
     store.save()
     assert BaselineStore.load(p).is_muted(CUSTOMERS_URN)
+
+
+@pytest.mark.parametrize("field", ["muted_until", "mute_reasons", "muted_at"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        ["12", "34"],  # the nastiest case: dict(["12","34"]) SILENTLY char-pairs -> {"1":"2","3":"4"}
+        "urn:li:dataset:x",
+        42,
+        True,
+        [["a", "b"]],
+    ],
+)
+def test_load_recovers_from_mute_metadata_that_is_not_an_object(tmp_path, field, bad_value):
+    """Twin of the `muted_urns` guard for the three mute-metadata maps. Each is built with
+    `dict(data.get(field, {}))`, and `dict(...)` degrades in the same silent-misread way the
+    `muted_urns` `set(...)` did: a JSON list of 2-char strings (`["12","34"]`) char-pairs into
+    a bogus `{"1":"2","3":"4"}` snooze/reason/stamp map with NO exception — a hand-edited or
+    truncated file would quietly resurrect fabricated mutes. An explicit object guard rejects
+    a non-dict shape with the same clean, section-named ValueError so load() quarantines it."""
+    payload = {"version": 1, "baselines": {}, "seen_incidents": {}, "muted_urns": [], field: bad_value}
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode: clean, section-named ValueError — never a silent char-pair or cryptic crash.
+    with pytest.raises(ValueError, match=f"'{field}' must be a JSON object"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the foreign file and hands back a fresh, empty, usable store.
+    store = BaselineStore.load(p)
+    assert store.muted_until == {}
+    assert store.mute_reasons == {}
+    assert store.muted_at == {}
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
 
 
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
