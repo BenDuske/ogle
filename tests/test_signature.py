@@ -357,6 +357,46 @@ def test_from_dict_without_quantiles_is_backward_compatible():
     assert restored.field_quantiles == {}
 
 
+def test_from_dict_resorts_unordered_persisted_quantiles():
+    """A hand-edited/corrupt baseline with out-of-order levels loads sorted, not as-written.
+
+    The empirical scorers trust every quantile set to be sorted by level (`_quantile_at` and the
+    Wasserstein helpers that read it). `from_dict` must uphold that invariant on the load path just
+    as `build_signature` does on the build path, or a reordered persisted set would silently poison
+    the earth-mover integral.
+    """
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "field_quantiles": {"amount": [[0.75, 30.0], [0.25, 10.0], [0.5, 20.0]]},
+    }
+    restored = DatasetSignature.from_dict(persisted)
+    assert restored.field_quantiles == {"amount": ((0.25, 10.0), (0.5, 20.0), (0.75, 30.0))}
+
+
+def test_from_dict_rejects_backwards_persisted_quantiles():
+    """A persisted quantile function that runs backwards is nonsense — load must raise, matching
+    `build_signature`, so `BaselineStore.load` can quarantine the file instead of scoring garbage."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["f", "double"]],
+        "field_quantiles": {"f": [[0.25, 5.0], [0.75, 1.0]]},
+    }
+    with pytest.raises(ValueError, match="non-decreasing"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_drops_thin_persisted_quantile_set():
+    """A persisted single-point set can't describe a distribution — dropped on load, as on build."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["f", "double"]],
+        "field_quantiles": {"f": [[0.5, 1.0]]},
+    }
+    restored = DatasetSignature.from_dict(persisted)
+    assert restored.field_quantiles == {}
+
+
 # ---- parse_iso_epoch: the single clock-free reader behind staleness + the freshness dimension ----
 
 # Oracle epochs computed the tz-explicit way, so these assertions hold on any host timezone.

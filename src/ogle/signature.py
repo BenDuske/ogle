@@ -191,10 +191,17 @@ class DatasetSignature:
             field_stdevs=dict(data.get("field_stdevs", {})),
             field_mins=dict(data.get("field_mins", {})),
             field_maxes=dict(data.get("field_maxes", {})),
-            field_quantiles={
-                path: tuple((float(p), float(v)) for p, v in pairs)
-                for path, pairs in data.get("field_quantiles", {}).items()
-            },
+            # Route persisted quantiles through the SAME validator the builder uses rather than a
+            # bare float() coercion. The empirical scorers (`_quantile_at` and the Wasserstein/KS/JS
+            # helpers that read it) trust every quantile set to be a genuine quantile function —
+            # sorted by level, strictly increasing in p, non-decreasing in v, >= 2 points — and
+            # explicitly credit `_clean_quantiles` for that guarantee. A persisted baseline can be
+            # hand-edited or corrupt, so re-validating on load keeps the deserialization path from
+            # smuggling in an unsorted/non-monotonic set that would silently poison the earth-mover
+            # integral. A malformed set raises ValueError, which `BaselineStore.load` already catches
+            # to quarantine the file and re-baseline — so a poisoned store degrades loudly (drift
+            # re-learned) instead of scoring garbage.
+            field_quantiles=_clean_quantiles(data.get("field_quantiles")),
             computed_at=data.get("computed_at"),
         )
 

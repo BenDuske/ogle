@@ -887,6 +887,35 @@ def test_load_recovers_from_wrong_version_by_default(tmp_path):
     assert store.corrupt_backup_path.exists()
 
 
+def test_load_quarantines_baseline_with_poisoned_quantiles(tmp_path):
+    """A store whose baseline carries a malformed quantile set (here a backwards quantile
+    function) must be quarantined and re-baselined — NOT loaded with the poison intact. The
+    empirical scorers trust quantiles to be a genuine quantile function; a silently-loaded bad
+    set would flip the earth-mover integral and mis-score drift. `DatasetSignature.from_dict`
+    now re-validates, so the store's existing corrupt-recovery net catches it."""
+    p = tmp_path / "store.json"
+    poisoned = {
+        "version": STORE_VERSION,
+        "baselines": {
+            CUSTOMERS_URN: {
+                "urn": CUSTOMERS_URN,
+                "schema_fields": [["amount", "double"]],
+                # Q(0.75) < Q(0.25): a quantile function cannot run backwards.
+                "field_quantiles": {"amount": [[0.25, 5.0], [0.75, 1.0]]},
+            }
+        },
+    }
+    p.write_text(json.dumps(poisoned), encoding="utf-8")
+    # Strict mode surfaces the raw error rather than swallowing it.
+    with pytest.raises(ValueError, match="non-decreasing"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the bad file and hands back a fresh store to re-baseline.
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is True
+    assert len(store) == 0
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+
+
 def test_corrupt_backup_never_clobbers_prior_forensic_copy(tmp_path):
     p = tmp_path / "store.json"
     # First recovery claims <name>.corrupt
