@@ -397,6 +397,94 @@ def test_from_dict_drops_thin_persisted_quantile_set():
     assert restored.field_quantiles == {}
 
 
+# ---- Load-path enforcement of the SCALAR invariants (not just quantiles) ---------------------
+# `from_dict` delegates to `build_signature`, so every per-field invariant the scorers trust is
+# re-checked on load — a poisoned baseline degrades LOUDLY (ValueError -> BaselineStore.load
+# quarantines + re-baselines) instead of feeding a NaN/negative/inverted value into a scorer,
+# where it would compare false against every threshold and SILENTLY miss real drift.
+
+
+def test_from_dict_full_scalar_signature_round_trips():
+    """A clean signature carrying every scalar family survives to_dict/from_dict unchanged — the
+    strengthened load path must not reject legitimately-built data (validators idempotent on it)."""
+    sig = build_signature(
+        "urn:x",
+        [("amount", "double")],
+        row_count=1000,
+        field_null_fractions={"amount": 0.1},
+        field_unique_fractions={"amount": 0.9},
+        field_means={"amount": 42.5},
+        field_stdevs={"amount": 3.0},
+        field_mins={"amount": -5.0},
+        field_maxes={"amount": 88.0},
+    )
+    restored = DatasetSignature.from_dict(sig.to_dict())
+    assert restored == sig
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_from_dict_rejects_non_finite_persisted_mean(bad):
+    """A NaN/inf mean in a hand-edited baseline would make the mean-drift delta NaN, which
+    compares false against the threshold — real covariate shift silently missed. Load must raise."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "field_means": {"amount": bad},
+    }
+    with pytest.raises(ValueError, match="mean"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_rejects_negative_persisted_stdev():
+    """A standard deviation below zero is nonsense a dispersion can't take — load rejects it just
+    as the build path does, rather than poison the relative-spread math in the scorer."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "field_stdevs": {"amount": -1.0},
+    }
+    with pytest.raises(ValueError, match="stdev"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_rejects_inverted_persisted_envelope():
+    """A persisted min > max is an inverted envelope: the baseline span goes negative and the
+    range-breach math scores garbage. Load must reject it, matching `build_signature`."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "field_mins": {"amount": 10.0},
+        "field_maxes": {"amount": 1.0},
+    }
+    with pytest.raises(ValueError, match="must be <= max"):
+        DatasetSignature.from_dict(persisted)
+
+
+@pytest.mark.parametrize("frac", [-0.1, 1.5])
+def test_from_dict_rejects_out_of_range_persisted_null_fraction(frac):
+    """A null fraction outside [0,1] is impossible for a proportion — load rejects it on the way
+    in rather than let a >1 or negative fraction distort the quality-drift score."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "field_null_fractions": {"amount": frac},
+    }
+    with pytest.raises(ValueError, match="null fraction"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_rejects_negative_persisted_row_count():
+    """A negative row count can't describe a table — load raises, matching the build path, so a
+    corrupt volume baseline is quarantined instead of inverting the volume-drift ratio."""
+    persisted = {
+        "urn": "urn:x",
+        "schema_fields": [["amount", "double"]],
+        "row_count": -5,
+    }
+    with pytest.raises(ValueError, match="row_count"):
+        DatasetSignature.from_dict(persisted)
+
+
 # ---- parse_iso_epoch: the single clock-free reader behind staleness + the freshness dimension ----
 
 # Oracle epochs computed the tz-explicit way, so these assertions hold on any host timezone.

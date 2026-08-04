@@ -178,30 +178,38 @@ class DatasetSignature:
 
     @classmethod
     def from_dict(cls, data: dict) -> "DatasetSignature":
-        """Inverse of `to_dict`. Ignores the denormalized `schema_hash` (recomputed)."""
-        return cls(
+        """Inverse of `to_dict`. Ignores the denormalized `schema_hash` (recomputed).
+
+        Deserialization runs the persisted payload back through `build_signature` — the SAME
+        constructor the walker uses — rather than populating the dataclass field-by-field. That
+        is deliberate: `build_signature` is where EVERY per-field invariant the scorers trust is
+        enforced (null/unique fractions in [0,1]; means finite; stdevs finite and non-negative;
+        min/max finite with min <= max; row_count >= 0; quantiles a genuine quantile function).
+        A hand-edited or corrupt baseline can carry any of these violations — a NaN mean, a
+        negative stdev, an inverted min>max envelope, an out-of-[0,1] fraction — and every one of
+        them would SILENTLY poison its scorer: a NaN moment makes the drift delta NaN, and a NaN
+        compares false against every threshold, so real drift is quietly *missed* — the one thing
+        a drift detector must never do. `e64e278` closed this hole for quantiles alone via a bare
+        `_clean_quantiles` call here; delegating to the builder generalizes that to the full
+        invariant set instead of re-validating one field and trusting six others. A round-trip of
+        any legitimately-built signature is unaffected (its values already passed these checks on
+        the build path — the validators are idempotent on clean data); only a poisoned payload
+        raises ValueError, which `BaselineStore.load` already catches to quarantine the file and
+        re-baseline — so a corrupt store degrades LOUDLY (drift re-learned) instead of scoring
+        garbage. `schema_fields` arrive as [path, type] pairs, exactly the tuple sequence the
+        builder expects (its dedup is a no-op on already-deduped persisted fields).
+        """
+        return build_signature(
             urn=data["urn"],
-            schema_fields=tuple(
-                SchemaField(path=p, native_type=t) for p, t in data.get("schema_fields", [])
-            ),
+            schema_fields=[tuple(pair) for pair in data.get("schema_fields", [])],
             row_count=data.get("row_count"),
-            field_null_fractions=dict(data.get("field_null_fractions", {})),
-            field_unique_fractions=dict(data.get("field_unique_fractions", {})),
-            field_means=dict(data.get("field_means", {})),
-            field_stdevs=dict(data.get("field_stdevs", {})),
-            field_mins=dict(data.get("field_mins", {})),
-            field_maxes=dict(data.get("field_maxes", {})),
-            # Route persisted quantiles through the SAME validator the builder uses rather than a
-            # bare float() coercion. The empirical scorers (`_quantile_at` and the Wasserstein/KS/JS
-            # helpers that read it) trust every quantile set to be a genuine quantile function —
-            # sorted by level, strictly increasing in p, non-decreasing in v, >= 2 points — and
-            # explicitly credit `_clean_quantiles` for that guarantee. A persisted baseline can be
-            # hand-edited or corrupt, so re-validating on load keeps the deserialization path from
-            # smuggling in an unsorted/non-monotonic set that would silently poison the earth-mover
-            # integral. A malformed set raises ValueError, which `BaselineStore.load` already catches
-            # to quarantine the file and re-baseline — so a poisoned store degrades loudly (drift
-            # re-learned) instead of scoring garbage.
-            field_quantiles=_clean_quantiles(data.get("field_quantiles")),
+            field_null_fractions=data.get("field_null_fractions"),
+            field_unique_fractions=data.get("field_unique_fractions"),
+            field_means=data.get("field_means"),
+            field_stdevs=data.get("field_stdevs"),
+            field_mins=data.get("field_mins"),
+            field_maxes=data.get("field_maxes"),
+            field_quantiles=data.get("field_quantiles"),
             computed_at=data.get("computed_at"),
         )
 
