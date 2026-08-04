@@ -1075,6 +1075,41 @@ def test_load_of_good_store_is_not_flagged_recovered(tmp_path):
     assert not p.with_name(p.name + ".corrupt").exists()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    ["[1, 2, 3]", "42", "3.14", '"a bare string"', "null", "true"],
+)
+def test_load_recovers_from_valid_json_that_is_not_an_object(tmp_path, payload):
+    """A file that parses as JSON but isn't a top-level object (array, number, string, null,
+    bool) is still a broken store — e.g. a truncated or partially-overwritten file. It must be
+    quarantined like any other corrupt file, NOT crash `load` with an uncaught AttributeError
+    (which would defeat the whole crash-loop-protection net a scheduled `ogle check` relies on)."""
+    p = tmp_path / "store.json"
+    p.write_text(payload, encoding="utf-8")
+    # Strict mode surfaces a clean ValueError (not AttributeError) for a foreign shape.
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the bad file and hands back a fresh, re-baselineable store.
+    store = BaselineStore.load(p)
+    assert len(store) == 0
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    assert p.with_name(p.name + ".corrupt").read_text(encoding="utf-8") == payload
+    assert not p.exists()
+    # The recovered store is fully usable: a fresh baseline saves + reloads clean.
+    store.put_baseline(_sig())
+    store.save()
+    assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN) is not None
+
+
+def test_from_dict_rejects_non_dict_directly(tmp_path):
+    """`from_dict` is the seam behind `load`; guard it directly so a non-dict raises ValueError
+    (quarantine-able) rather than AttributeError, independent of the load() catch tuple."""
+    for bad in ([1, 2], 7, "x", None, True):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            BaselineStore.from_dict(bad)
+
+
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
     # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
     p = tmp_path / "store.json"

@@ -508,6 +508,19 @@ class BaselineStore:
 
     @classmethod
     def from_dict(cls, data: dict, path: Optional[Path] = None) -> "BaselineStore":
+        # A store file must be a JSON *object*. A valid-JSON-but-non-object payload (a
+        # top-level array, number, string, or null — e.g. a truncated/partially-overwritten
+        # file that still parses) would otherwise reach `data.get(...)` and raise
+        # AttributeError, which `load`'s corrupt-recovery net does NOT catch — so a scheduled
+        # `ogle check` would crash-loop and go blind to drift on exactly the class of bad file
+        # the net exists for. Normalize it to the same ValueError the version/shape guards
+        # raise, so it quarantines (default) or surfaces cleanly (strict) like any other
+        # foreign file.
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"baseline store must be a JSON object, got {type(data).__name__} "
+                f"(refusing to misread a truncated/foreign file)"
+            )
         version = data.get("version")
         if version != STORE_VERSION:
             raise ValueError(
