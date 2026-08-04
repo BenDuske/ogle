@@ -570,7 +570,22 @@ class BaselineStore:
         }
         # muted_urns is additive (introduced after v1 shipped): a store written by an older
         # Ogle simply lacks the key and loads with nothing muted, so no version bump is needed.
-        muted = set(data.get("muted_urns", []))
+        # It must be a JSON *list* when present, though. Unlike the sibling mute sections below
+        # (which go through `dict(...)` — a string/scalar there raises ValueError/TypeError that
+        # `load` catches to quarantine), `set(...)` degrades SILENTLY on a non-list: a hand-
+        # edited/truncated `"muted_urns": "urn:li:dataset:x"` char-splits into a set of single
+        # characters ({'u','r','n',':',...}) with no exception, so the operator's intended mute
+        # vanishes and the dataset it was meant to silence starts paging again — quietly wrong,
+        # the worst failure for a suppression list. Normalize a present-but-non-list value to the
+        # same ValueError the other shape guards raise so it quarantines/surfaces like any foreign
+        # file (mirrors the `serving_urns` guard in cli.load_signatures_file).
+        raw_muted = data.get("muted_urns", [])
+        if not isinstance(raw_muted, list):
+            raise ValueError(
+                f"baseline store 'muted_urns' must be a JSON list, got "
+                f"{type(raw_muted).__name__} (refusing to misread a truncated/foreign file)"
+            )
+        muted = set(raw_muted)
         # muted_until (timed snoozes) is likewise additive; older files lack it. Guard against
         # a URN being both permanent and snoozed (permanent wins) so state stays coherent.
         muted_until = {

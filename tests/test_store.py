@@ -1173,6 +1173,36 @@ def test_incident_record_from_dict_rejects_non_dict_directly():
             _IncidentRecord.from_dict(bad)
 
 
+@pytest.mark.parametrize("bad_value", [42, "urn:li:dataset:sales", True, {"a": "b"}, None])
+def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
+    """`muted_urns` is the one mute section built with `set(...)` instead of `dict(...)`, and
+    `set(...)` degrades SILENTLY on a non-list: a hand-edited/truncated `"muted_urns":
+    "urn:li:dataset:sales"` char-splits into a set of single characters ({'u','r','n',...}) with
+    NO exception, so the operator's intended mute vanishes and the dataset it was meant to
+    silence starts paging again — quietly wrong, the worst failure for a suppression list (a
+    scalar like `42` would raise TypeError that load() happens to catch, but the string case
+    slips straight through). Unlike the sibling `muted_until`/`mute_reasons`/`muted_at` sections
+    (whose `dict(...)` raises ValueError/TypeError on a bad shape), this needs an explicit
+    list guard so a foreign value quarantines like any other corrupt file."""
+    payload = {"version": 1, "baselines": {}, "seen_incidents": {}, "muted_urns": bad_value}
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces a clean, section-named ValueError (not a silent char-split / TypeError).
+    with pytest.raises(ValueError, match="'muted_urns' must be a JSON list"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the bad file and hands back a fresh, re-baselineable store —
+    # crucially with an EMPTY mute set, never the char-split junk the old code would have kept.
+    store = BaselineStore.load(p)
+    assert store.muted_urns == set()
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    assert not p.exists()
+    # The recovered store is fully usable: a fresh mute saves + reloads clean.
+    store.mute(CUSTOMERS_URN)
+    store.save()
+    assert BaselineStore.load(p).is_muted(CUSTOMERS_URN)
+
+
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
     # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
     p = tmp_path / "store.json"
