@@ -112,6 +112,20 @@ class _IncidentRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "_IncidentRecord":
+        # Each seen_incidents VALUE must be a JSON object. The store-level guard (3844ade)
+        # proves the `seen_incidents` *section* is a dict, but a per-entry value can still be
+        # a valid-JSON-but-non-object (a list/scalar from a truncated or hand-mangled file
+        # that still parses AND carries the right version): `{"seen_incidents": {"fp": [1,2]}}`.
+        # That value would reach `data.get(...)` and raise AttributeError — which is NOT in
+        # `BaselineStore.load`'s corrupt-recovery net (ValueError/KeyError/TypeError), so a
+        # scheduled `ogle check` would crash-loop and go blind on exactly the bad file the net
+        # exists for. Normalize to the same ValueError the section/version guards raise so it
+        # quarantines (default) or surfaces cleanly (strict) like any other foreign file.
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"incident record must be a JSON object, got {type(data).__name__} "
+                f"(refusing to misread a truncated/foreign file)"
+            )
         ls = data.get("last_seen")
         fs = data.get("first_seen")
         raw_kinds = data.get("kinds")

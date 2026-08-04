@@ -10,7 +10,7 @@ import pytest
 
 from ogle import store as store_mod
 from ogle.signature import DatasetSignature, build_signature
-from ogle.store import STORE_VERSION, BaselineStore
+from ogle.store import STORE_VERSION, BaselineStore, _IncidentRecord
 
 CUSTOMERS_URN = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.customers,PROD)"
 ORDERS_URN = "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.orders,PROD)"
@@ -1135,6 +1135,42 @@ def test_load_recovers_from_nested_section_that_is_not_an_object(tmp_path, secti
     store.put_baseline(_sig())
     store.save()
     assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN) is not None
+
+
+@pytest.mark.parametrize("bad_value", [[1, 2, 3], 42, "a string", True, None])
+def test_load_recovers_from_seen_incident_entry_that_is_not_an_object(tmp_path, bad_value):
+    """One layer deeper than the section guard: the `seen_incidents` section IS a dict (passes
+    the 3844ade guard) but a per-ENTRY value is a valid-JSON-but-non-object (list/scalar from a
+    truncated or hand-mangled file that still parses AND carries the right version). That value
+    reaches `_IncidentRecord.from_dict`, whose `data.get(...)` raises AttributeError — NOT in
+    load()'s (ValueError/KeyError/TypeError) recovery net — so a scheduled `ogle check` would
+    crash-loop and go blind on exactly the bad file the net exists for. It must quarantine like
+    any other foreign file."""
+    payload = {"version": 1, "baselines": {}, "seen_incidents": {"abc123": bad_value}}
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces a clean, record-named ValueError (not AttributeError).
+    with pytest.raises(ValueError, match="incident record must be a JSON object"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the bad file and hands back a fresh, re-baselineable store.
+    store = BaselineStore.load(p)
+    assert len(store.seen_incidents) == 0
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    assert not p.exists()
+    # The recovered store is fully usable: a fresh incident records + reloads clean.
+    store.record_incident("fp", severity="high")
+    store.save()
+    assert BaselineStore.load(p).has_seen("fp")
+
+
+def test_incident_record_from_dict_rejects_non_dict_directly():
+    """`_IncidentRecord.from_dict` is the seam behind the seen_incidents rebuild; guard it
+    directly so a non-dict raises ValueError (quarantine-able) rather than AttributeError,
+    independent of the load() catch tuple."""
+    for bad in ([1, 2], 7, "x", None, True):
+        with pytest.raises(ValueError, match="incident record must be a JSON object"):
+            _IncidentRecord.from_dict(bad)
 
 
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
