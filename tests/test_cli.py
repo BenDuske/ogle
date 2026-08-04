@@ -89,6 +89,25 @@ def test_load_wrong_toplevel_type_raises(tmp_path):
         load_signatures_file(f)
 
 
+def test_load_serving_urns_string_raises_not_silently_split(tmp_path):
+    # A string `serving_urns` must be rejected, NOT coerced into its characters. Without the
+    # isinstance guard `list("urn:x")` silently yields ['u','r','n',...] — bogus serving URNs
+    # that mis-drive severity escalation. This is the worst failure mode: quietly wrong.
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"signatures": [], "serving_urns": "urn:abc"}), encoding="utf-8")
+    with pytest.raises(ValueError, match='"serving_urns" must be a JSON list'):
+        load_signatures_file(f)
+
+
+def test_load_serving_urns_scalar_raises_valueerror_not_typeerror(tmp_path):
+    # A scalar `serving_urns` must surface as the function's documented ValueError (CLI exit 2),
+    # not an uncaught TypeError from `list(5)` that tracebacks past the "malformed input" contract.
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"signatures": [], "serving_urns": 5}), encoding="utf-8")
+    with pytest.raises(ValueError, match='"serving_urns" must be a JSON list'):
+        load_signatures_file(f)
+
+
 # ---- exit codes: the contract a cron wrapper branches on --------------------------
 def test_first_run_seeds_and_exits_zero(tmp_path, capsys):
     store = tmp_path / "baselines.json"

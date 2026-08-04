@@ -153,15 +153,25 @@ def load_signatures_file(path: Path) -> Tuple[List[DatasetSignature], List[str]]
         raise ValueError(f"signatures file is not valid JSON ({path}): {exc}")
 
     if isinstance(data, list):
-        raw_sigs, serving = data, []
+        raw_sigs, raw_serving = data, []
     elif isinstance(data, dict):
         raw_sigs = data.get("signatures", [])
-        serving = list(data.get("serving_urns", []))
+        raw_serving = data.get("serving_urns", [])
     else:
         raise ValueError("signatures file must be a JSON list or object")
 
     if not isinstance(raw_sigs, list):
         raise ValueError('"signatures" must be a JSON list')
+
+    # `serving_urns` must be a JSON list too — mirror the `signatures` guard. Without it a
+    # bare `list(raw_serving)` coercion silently misreads a non-list: a string splits into
+    # its characters (`"urn:x"` -> ['u','r','n',...] bogus serving URNs) and a scalar raises
+    # an uncaught TypeError, breaking this function's "malformed input -> ValueError -> exit 2"
+    # contract. Serving status drives severity escalation, so a silently-misread list would
+    # mis-flag which assets sit on a serving path — quietly wrong is the worst failure here.
+    if not isinstance(raw_serving, list):
+        raise ValueError('"serving_urns" must be a JSON list')
+    serving = list(raw_serving)
 
     signatures: List[DatasetSignature] = []
     for i, item in enumerate(raw_sigs):
