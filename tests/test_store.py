@@ -820,6 +820,60 @@ def test_failed_save_leaves_no_tmp_orphan_and_spares_prior_good_file(tmp_path, m
     assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN).field_null_fractions == {"email": 0.1}
 
 
+def test_save_fsyncs_temp_data_before_replace(tmp_path, monkeypatch):
+    # Durability, not just atomicity: the temp file's bytes must be forced to disk BEFORE the
+    # rename swaps it into place, else a crash right after os.replace becomes durable can
+    # surface a truncated/zero-length store. Prove the ordering (fsync-then-replace) and that
+    # fsync targeted a real integer fd. Removing the fsync line makes this fail (no "fsync"
+    # event precedes "replace").
+    order = []
+    real_fsync = store_mod.os.fsync
+    real_replace = store_mod.os.replace
+
+    def traced_fsync(fd):
+        assert isinstance(fd, int)  # a live file descriptor, not a path/handle
+        order.append("fsync")
+        return real_fsync(fd)
+
+    def traced_replace(src, dst):
+        order.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store_mod.os, "fsync", traced_fsync)
+    monkeypatch.setattr(store_mod.os, "replace", traced_replace)
+
+    p = tmp_path / "store.json"
+    BaselineStore(path=p).save()
+
+    assert order == ["fsync", "replace"]  # data durable before the swap, exactly once each
+    assert p.exists()
+
+
+def test_save_fsync_failure_spares_prior_good_file_and_leaves_no_tmp(tmp_path, monkeypatch):
+    # A crash at the fsync step (I/O error mid-flush) must behave like any other save crash:
+    # propagate, leave no .tmp orphan, and leave the prior good file byte-for-byte intact —
+    # the rename never runs, so the old baseline stands.
+    p = tmp_path / "store.json"
+    good = BaselineStore(path=p)
+    good.put_baseline(_sig(field_null_fractions={"email": 0.1}))
+    good.save()
+    original = p.read_bytes()
+
+    doomed = BaselineStore(path=p)
+    doomed.put_baseline(_sig(field_null_fractions={"email": 0.9}))
+
+    def boom(_fd):
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(store_mod.os, "fsync", boom)
+    with pytest.raises(OSError, match="input/output error"):
+        doomed.save()
+
+    assert list(tmp_path.glob(".ogle-store-*.tmp")) == []  # finally-block cleanup ran
+    assert p.read_bytes() == original  # prior good baseline untouched (rename never happened)
+    assert BaselineStore.load(p).get_baseline(CUSTOMERS_URN).field_null_fractions == {"email": 0.1}
+
+
 def test_save_creates_parent_dirs(tmp_path):
     p = tmp_path / "nested" / "deep" / "store.json"
     store = BaselineStore()

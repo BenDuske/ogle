@@ -549,6 +549,14 @@ class BaselineStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(blob)
+                # Force the temp file's bytes to disk BEFORE the rename. os.replace makes the
+                # swap atomic, but atomicity of the rename is not durability of the data: a
+                # crash/power-loss right after the rename becomes durable can otherwise surface
+                # a truncated or zero-length store under the real name. Flushing + fsync here is
+                # what makes the module-header "a crash mid-write can't corrupt the baseline"
+                # guarantee true at the data level, not just the rename level.
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, target)
         finally:
             if os.path.exists(tmp):
