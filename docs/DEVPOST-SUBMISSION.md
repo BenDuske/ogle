@@ -72,7 +72,7 @@ built to swap onto the salience-ranked
 store of facts, episodes, and preferences — so past false positives and real
 incidents sharpen future walks. The whole suite is keyless and
 Docker-free to test — every network call is monkeypatched — so `pytest -q` runs
-green with no DataHub and no API key (1,365 tests at submission).
+green with no DataHub and no API key (1,452 tests at submission).
 
 ### Challenges we ran into
 - **Scoping drift to what matters.** A naïve diff flags every table that moves.
