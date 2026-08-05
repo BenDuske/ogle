@@ -1236,6 +1236,67 @@ def test_load_recovers_from_mute_metadata_that_is_not_an_object(tmp_path, field,
     assert not p.exists()
 
 
+@pytest.mark.parametrize("bad_token", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("field", ["muted_until", "muted_at"])
+def test_load_recovers_from_non_finite_mute_time(tmp_path, field, bad_token):
+    """`json.loads` accepts the non-standard `NaN`/`Infinity`/`-Infinity` tokens by default, so a
+    hand-edited or truncated store can carry a non-finite mute time that a bare `float(...)`
+    preserves without complaint. That is silently wrong for a suppression list — the same failure
+    class the `muted_urns` list-guard exists to stop:
+
+      * a NaN `muted_until` makes `is_muted`'s `exp > now` always False, so the snooze VANISHES and
+        the dataset it was meant to silence starts paging again, while `purge_expired_mutes`'
+        `exp <= now` is also False so the dead entry never clears (a zombie);
+      * an Infinity `muted_until` can NEVER expire, masquerading as a permanent mute.
+
+    The finite guard rejects both with a clean, section-named ValueError so `load()` quarantines
+    the foreign file like any other corrupt one."""
+    # muted_at is only retained for a still-muted URN, so keep it permanently muted for that field;
+    # muted_until is dropped for permanently-muted URNs, so leave it unmuted there.
+    muted_urns = [CUSTOMERS_URN] if field == "muted_at" else []
+    bad = {"NaN": float("nan"), "Infinity": float("inf"), "-Infinity": float("-inf")}[bad_token]
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {},
+        "muted_urns": muted_urns,
+        field: {CUSTOMERS_URN: bad},
+    }
+    p = tmp_path / "store.json"
+    # json.dumps emits the literal NaN/Infinity tokens (allow_nan default) — exactly what a
+    # truncated/hand-edited file on disk would contain.
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces the clean, section-named ValueError (never a NaN silently kept).
+    with pytest.raises(ValueError, match=f"'{field}' time for .* must be finite"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the foreign file and hands back a fresh, empty, usable store —
+    # crucially with NO non-finite mute lingering to either vanish-page or never-expire.
+    store = BaselineStore.load(p)
+    assert store.muted_until == {}
+    assert store.muted_at == {}
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
+
+
+def test_finite_mute_times_still_load(tmp_path):
+    """The finite guard must not reject legitimate snoozes — a normal (finite, even negative or
+    zero) mute time round-trips untouched, proving the guard rejects only NaN/Infinity."""
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {},
+        "muted_urns": [],
+        "muted_until": {CUSTOMERS_URN: 1_900_000_000.0, ORDERS_URN: 0.0},
+        "muted_at": {CUSTOMERS_URN: 1_800_000_000.0},
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    store = BaselineStore.load(p, recover_corrupt=False)
+    assert store.muted_until == {CUSTOMERS_URN: 1_900_000_000.0, ORDERS_URN: 0.0}
+    assert store.muted_at == {CUSTOMERS_URN: 1_800_000_000.0}
+    assert store.recovered_from_corruption is False
+
+
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
     # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
     p = tmp_path / "store.json"

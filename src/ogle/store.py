@@ -26,6 +26,7 @@ run reproducible and the file diffable.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -36,6 +37,33 @@ from .signature import DatasetSignature
 
 # Bump when the on-disk shape changes so a stale file can be detected rather than misread.
 STORE_VERSION = 1
+
+
+def _finite_mute_time(value: object, *, key: str, urn: str) -> float:
+    """Coerce a mute timestamp (epoch seconds) to a *finite* float, rejecting NaN/Infinity.
+
+    `json.loads` accepts the non-standard `NaN`/`Infinity`/`-Infinity` tokens by default, so a
+    hand-edited or truncated store can carry a non-finite mute time that a bare `float(...)`
+    happily preserves. That is silently wrong for a suppression list — the same class of bug the
+    `muted_urns` list-guard was written to stop:
+
+      * a NaN `muted_until` makes `is_muted`'s `exp > now` always False, so the snooze VANISHES
+        and the dataset it was meant to silence starts paging again — while `purge_expired_mutes`'
+        `exp <= now` is also False, so the dead entry never clears (a zombie snooze);
+      * an Infinity `muted_until` can NEVER expire, masquerading as a permanent mute through the
+        timed-snooze channel that the `muted_urns` set is supposed to own.
+
+    Reject both with the same ValueError the sibling shape guards raise, so `load()` quarantines
+    the foreign file rather than misreading it. (A non-numeric value already raises
+    ValueError/TypeError from `float(...)`, which `load()` catches identically.)
+    """
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError(
+            f"baseline store '{key}' time for {urn!r} must be finite, got {f} "
+            f"(refusing to misread a truncated/foreign file)"
+        )
+    return f
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -604,7 +632,7 @@ class BaselineStore:
         # muted_until (timed snoozes) is likewise additive; older files lack it. Guard against
         # a URN being both permanent and snoozed (permanent wins) so state stays coherent.
         muted_until = {
-            urn: float(exp)
+            urn: _finite_mute_time(exp, key="muted_until", urn=urn)
             for urn, exp in _require_map("muted_until").items()
             if urn not in muted
         }
@@ -620,7 +648,7 @@ class BaselineStore:
         # files lack it and their mutes simply read as undated. Keep only stamps whose URN is
         # still muted, so a legacy/hand-edited file can't resurrect an orphan stamp.
         muted_at = {
-            urn: float(ts)
+            urn: _finite_mute_time(ts, key="muted_at", urn=urn)
             for urn, ts in _require_map("muted_at").items()
             if urn in muted or urn in muted_until
         }
