@@ -1203,6 +1203,40 @@ def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
     assert BaselineStore.load(p).is_muted(CUSTOMERS_URN)
 
 
+@pytest.mark.parametrize("bad_entry", [123, True, None, ["nested"], {"a": "b"}, 1.5])
+def test_load_recovers_from_muted_urns_with_a_non_string_entry(tmp_path, bad_entry):
+    """The container list-guard proves `muted_urns` is a *list*, but not that its ELEMENTS are
+    string URNs. A hand-edited/truncated file can carry a non-string entry
+    (`"muted_urns": ["urn:li:dataset:sales", 123]`). Unlike the sibling incident-record lists
+    (`kinds`/`owners`/`urns`), which `str()`-coerce each element on load, `muted_urns` is built
+    as a raw `set(...)`, so a non-string entry survives — and can NEVER equal a real string URN
+    in `is_muted`'s set lookup (`"urn:..." in {123}` is False). The intended mute silently
+    vanishes and the dataset it was meant to silence starts paging again: the exact silent-
+    suppression-loss the container guard stops, one level deeper. The element guard rejects it
+    with the same section-named ValueError so `load()` quarantines the foreign file."""
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {},
+        "muted_urns": [CUSTOMERS_URN, bad_entry],
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode: clean, section-named ValueError — never a silently dead mute.
+    with pytest.raises(ValueError, match="'muted_urns' entries must be strings"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the foreign file and hands back a fresh, empty, usable store —
+    # never the good URN paired with a dead non-string entry.
+    store = BaselineStore.load(p)
+    assert store.muted_urns == set()
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
+    # Fully usable after recovery: a fresh mute saves + reloads clean.
+    store.mute(CUSTOMERS_URN)
+    store.save()
+    assert BaselineStore.load(p).is_muted(CUSTOMERS_URN)
+
+
 @pytest.mark.parametrize("field", ["muted_until", "mute_reasons", "muted_at"])
 @pytest.mark.parametrize(
     "bad_value",

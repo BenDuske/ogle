@@ -613,6 +613,22 @@ class BaselineStore:
                 f"baseline store 'muted_urns' must be a JSON list, got "
                 f"{type(raw_muted).__name__} (refusing to misread a truncated/foreign file)"
             )
+        # Every muted_urns ELEMENT must be a string URN. The list-guard above only proves the
+        # *container* is a list; a hand-edited/truncated file can still carry a non-string element
+        # (`"muted_urns": ["urn:li:dataset:x", 123, true]`). Unlike the sibling incident-record
+        # lists (`kinds`/`owners`/`urns`), which `str()`-coerce each element on load, this set is
+        # built raw — and a non-string entry can NEVER equal a real string URN in `is_muted`'s set
+        # lookup (`"urn:..." in {123}` is False), so the intended mute silently VANISHES and the
+        # dataset it was meant to silence starts paging again. That is the same silent-suppression-
+        # loss the container guard was written to stop, one level deeper (element vs container).
+        # Coercing to str wouldn't help — a bogus `"123"` still can't match a real URN — so reject
+        # with the same ValueError contract and let `load()` quarantine the foreign file.
+        for entry in raw_muted:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"baseline store 'muted_urns' entries must be strings, got "
+                    f"{type(entry).__name__} (refusing to misread a truncated/foreign file)"
+                )
         muted = set(raw_muted)
 
         # The three mute-metadata fields below are all JSON objects (urn -> value maps). A
