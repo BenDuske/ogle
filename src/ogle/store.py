@@ -65,15 +65,29 @@ def _finite_mute_time(value: object, *, key: str, urn: str) -> float:
     suppression-loss this guard exists to stop, just wearing a bool instead of a NaN. Reject it
     explicitly (before `float(...)` can launder it) with the same ValueError contract.
     """
+    return _finite_epoch(value, context=f"'{key}' time for {urn!r}")
+
+
+def _finite_epoch(value: object, *, context: str) -> float:
+    """Coerce an epoch-seconds value to a *finite* float, rejecting bool/NaN/Infinity.
+
+    The shared core behind every store timestamp guard: `json.loads` accepts the non-standard
+    `NaN`/`Infinity`/`-Infinity` tokens, and `bool` is an `int` subclass so `float(True)` is a
+    silent finite `1.0` — both launder a hand-edited/truncated store past a bare `float(...)`.
+    A non-finite or bool-derived epoch reads as garbage everywhere a time is compared (age math,
+    recency/longevity sorts, stale/fresh windows), so reject it with the same ValueError contract
+    the sibling shape guards raise and let `load()` quarantine the foreign file. `context` names
+    which field/URN for the operator; a non-numeric value already raises from `float(...)`, which
+    `load()` catches identically. See `_finite_mute_time` for the mute-side rationale in full."""
     if isinstance(value, bool):
         raise ValueError(
-            f"baseline store '{key}' time for {urn!r} must be a number, got bool "
+            f"baseline store {context} must be a number, got bool "
             f"(refusing to misread a truncated/foreign file)"
         )
     f = float(value)
     if not math.isfinite(f):
         raise ValueError(
-            f"baseline store '{key}' time for {urn!r} must be finite, got {f} "
+            f"baseline store {context} must be finite, got {f} "
             f"(refusing to misread a truncated/foreign file)"
         )
     return f
@@ -178,8 +192,15 @@ class _IncidentRecord:
             title=data.get("title"),
             datasets=int(data.get("datasets", 0)),
             serving=bool(data.get("serving", False)),
-            last_seen=float(ls) if ls is not None else None,
-            first_seen=float(fs) if fs is not None else None,
+            # last_seen/first_seen drive every age display, the recent/standing sorts, and the
+            # --stale/--fresh/--standing windows + age gauges. A bare float() here would launder a
+            # NaN/Infinity/bool epoch from a truncated/foreign file the same way the mute-time path
+            # did before _finite_mute_time — and a NaN last_seen is the nastiest: `now - NaN` is
+            # False against BOTH the stale and fresh cutoffs, so the incident silently vanishes from
+            # both filtered views (and sorts unstably). Route through the shared finite guard so such
+            # a file quarantines via load() instead of misreading. None stays None (legacy/untimed).
+            last_seen=_finite_epoch(ls, context="incident record 'last_seen'") if ls is not None else None,
+            first_seen=_finite_epoch(fs, context="incident record 'first_seen'") if fs is not None else None,
             kinds=[str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else [],
             owners=[str(o) for o in raw_owners] if isinstance(raw_owners, list) else [],
             urns=[str(u) for u in raw_urns] if isinstance(raw_urns, list) else [],

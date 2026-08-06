@@ -1366,6 +1366,82 @@ def test_finite_mute_times_still_load(tmp_path):
     assert store.recovered_from_corruption is False
 
 
+@pytest.mark.parametrize("bad_token", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("field", ["last_seen", "first_seen"])
+def test_load_recovers_from_non_finite_incident_time(tmp_path, field, bad_token):
+    """The incident-record timestamps (`last_seen`/`first_seen`) are the older twin of the mute
+    times and were laundering NaN/Infinity/-Infinity through a bare `float(...)` on load. That is
+    silently wrong: a NaN `last_seen` compares False against BOTH the `--stale` and `--fresh`
+    cutoffs (`now - NaN`), so the incident VANISHES from both filtered views and sorts unstably in
+    `incidents recent`; an Infinity `first_seen` pins a record atop `incidents standing` forever and
+    poisons the age gauges. The shared finite guard rejects them with a clean, section-named
+    ValueError so `load()` quarantines the foreign file like any other corrupt one."""
+    bad = {"NaN": float("nan"), "Infinity": float("inf"), "-Infinity": float("-inf")}[bad_token]
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {"deadbeefdeadbeef": {"count": 2, field: bad}},
+        "muted_urns": [],
+    }
+    p = tmp_path / "store.json"
+    # json.dumps emits the literal NaN/Infinity tokens (allow_nan default) — exactly what a
+    # truncated/hand-edited file on disk would contain.
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces the clean, section-named ValueError (never a NaN silently kept).
+    with pytest.raises(ValueError, match=f"incident record '{field}' must be finite"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the foreign file and hands back a fresh, empty, usable store — with
+    # NO non-finite incident time lingering to vanish from filters or poison the age sorts/gauges.
+    store = BaselineStore.load(p)
+    assert store.seen_incidents == {}
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
+
+
+@pytest.mark.parametrize("bad_value", [True, False])
+@pytest.mark.parametrize("field", ["last_seen", "first_seen"])
+def test_load_recovers_from_bool_incident_time(tmp_path, field, bad_value):
+    """A JSON boolean slips past `float(...)` the same way for incident timestamps as for mute
+    times (`bool` subclasses `int`, so `float(True)` is a silent finite `1.0`). A hand-edited
+    `"last_seen": true` would then read as epoch second 1.0 (Jan 1970), making a live incident look
+    decades stale — wrong age everywhere it's shown and a spurious `--stale` hit. The shared guard
+    rejects it with the same clean, section-named ValueError so `load()` quarantines the file."""
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {"deadbeefdeadbeef": {"count": 2, field: bad_value}},
+        "muted_urns": [],
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=f"incident record '{field}' must be a number, got bool"):
+        BaselineStore.load(p, recover_corrupt=False)
+    store = BaselineStore.load(p)
+    assert store.seen_incidents == {}
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
+
+
+def test_finite_incident_times_still_load(tmp_path):
+    """The finite guard must not reject legitimate incident timestamps — normal (finite, even zero)
+    last_seen/first_seen values round-trip untouched, proving the guard rejects only NaN/Infinity."""
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {
+            "deadbeefdeadbeef": {"count": 3, "last_seen": 1_900_000_000.0, "first_seen": 0.0},
+        },
+        "muted_urns": [],
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    store = BaselineStore.load(p, recover_corrupt=False)
+    rec = store.seen_incidents["deadbeefdeadbeef"]
+    assert rec.last_seen == 1_900_000_000.0
+    assert rec.first_seen == 0.0
+    assert store.recovered_from_corruption is False
+
+
 def test_recovery_flags_excluded_from_equality_and_persistence(tmp_path):
     # The runtime-only recovery flags must not leak into the on-disk shape or break eq.
     p = tmp_path / "store.json"
