@@ -210,7 +210,23 @@ class DatasetSignature:
         store's `muted_urns`/`dict(...)` guards close, one layer deeper. Reject a non-list/
         tuple element with a ValueError, which `BaselineStore.load` catches to quarantine the
         foreign file and re-baseline — loud degradation over a silently corrupted signature.
+
+        The persisted payload itself must be a JSON object. `BaselineStore.from_dict` proves
+        the `baselines` *section* is a dict, but a per-URN VALUE can still be a valid-JSON-but-
+        non-object (a list/scalar from a truncated or hand-mangled file that still parses AND
+        carries the right version): `{"baselines": {"urn:x": [1,2]}}`. That value reaches
+        `data.get(...)` and raises AttributeError — which is NOT in `BaselineStore.load`'s
+        corrupt-recovery net (ValueError/KeyError/TypeError), so a scheduled `ogle check` crash-
+        loops and goes blind on exactly the bad file the net exists for. `_IncidentRecord.from_dict`
+        already closes this on the seen_incidents side (3844ade); this is the symmetric guard the
+        baselines side was missing. Reject a non-dict with the same ValueError contract so load()
+        quarantines the foreign file and re-baselines LOUDLY.
         """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"dataset signature must be a JSON object, got {type(data).__name__} "
+                f"(refusing to misread a truncated/foreign file)"
+            )
         raw_fields = data.get("schema_fields", [])
         for pair in raw_fields:
             if not isinstance(pair, (list, tuple)):

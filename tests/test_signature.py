@@ -574,6 +574,46 @@ def test_from_dict_accepts_both_list_and_tuple_schema_field_pairs():
     ]
 
 
+# ---- non-dict baseline VALUE: the seen_incidents-record guard's twin, on the baselines side ------
+# BaselineStore.from_dict proves the `baselines` SECTION is a dict, but a per-URN VALUE can still be
+# a valid-JSON-but-non-object (a list/scalar from a truncated/hand-mangled file that still parses AND
+# carries the right version): {"baselines": {"urn:x": [1,2]}}. That value reaches `data.get(...)` in
+# DatasetSignature.from_dict and raises AttributeError — OUTSIDE BaselineStore.load's (ValueError,
+# KeyError, TypeError) net → crash-loop on exactly the file the net exists to quarantine.
+# _IncidentRecord.from_dict already guards this on the seen_incidents side; the baselines side did not.
+
+@pytest.mark.parametrize("bad", [[1, 2], "urn", 5, 0.5, None, True])
+def test_from_dict_rejects_non_dict_payload(bad):
+    """A baseline persisted as a JSON array/scalar/null must raise ValueError (caught by load),
+    not AttributeError (which escapes load's recovery net and crash-loops the scheduled check)."""
+    with pytest.raises(ValueError, match="dataset signature must be a JSON object"):
+        DatasetSignature.from_dict(bad)
+
+
+def test_from_dict_non_dict_baseline_survives_store_load(tmp_path):
+    """End-to-end: a non-dict baseline VALUE QUARANTINES, never crash-loops.
+
+    Regression guard for the AttributeError hole on the baselines side — a list/scalar value
+    reaching `data.get(...)` escaped BaselineStore.load's (ValueError, KeyError, TypeError) net.
+    The from_dict guard converts it to a caught ValueError so the scheduled check re-baselines
+    loudly instead of going blind to drift on exactly the corrupt file the net exists for."""
+    from ogle.store import BaselineStore, STORE_VERSION
+
+    p = tmp_path / "baselines.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {"urn:x": [1, 2]},  # value is a list, not a signature object
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is True
+    assert store.get_baseline("urn:x") is None
+
+
 # ---- non-dict per-field maps: a JSON array where a {path: value} object belongs ----------------
 # A hand-edited/foreign store can carry a LIST where a per-field map should be an object, and the
 # two map families fail differently — both wrong. The dict(...)-fed maps SILENTLY coerce a list of
