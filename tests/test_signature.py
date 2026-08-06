@@ -1,5 +1,7 @@
 """Unit tests for ogle.signature — the dataset fingerprint."""
 
+import json
+
 import pytest
 
 from ogle.signature import (
@@ -332,6 +334,69 @@ def test_quantiles_level_out_of_range_rejected():
 def test_quantiles_non_finite_value_rejected(bad):
     with pytest.raises(ValueError, match="quantile value.*finite"):
         build_signature("urn:x", field_quantiles={"f": [(0.25, 1.0), (0.75, bad)]})
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_quantiles_bool_level_rejected(bad):
+    """A bool quantile level must be rejected, not laundered via float(True/False).
+
+    `float(True) == 1.0` / `float(False) == 0.0` would forge a valid-looking probability
+    level the empirical scorer trusts — the exact silent-misread class every sibling numeric
+    guard (mean/stdev/min/max/fractions/row_count) already rejects. Quantiles was the last
+    carrier still coercing a bare `float(...)`; it must reject a bool like the moments do.
+    """
+    with pytest.raises(ValueError, match="quantile level.*finite"):
+        build_signature("urn:x", field_quantiles={"f": [(bad, 1.0), (0.75, 2.0)]})
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_quantiles_bool_value_rejected(bad):
+    """A bool quantile value must be rejected, not laundered to 1.0/0.0 via float()."""
+    with pytest.raises(ValueError, match="quantile value.*finite"):
+        build_signature("urn:x", field_quantiles={"f": [(0.25, 1.0), (0.75, bad)]})
+
+
+@pytest.mark.parametrize("bad", [(0.25, 1.0, 9.0), (0.25,), "ab", 0.5, None])
+def test_quantiles_malformed_pair_rejected_as_valueerror(bad):
+    """A wrong-arity / non-array quantile pair must raise ValueError, not IndexError/TypeError.
+
+    A truncated `[0.25]` or a scalar would raise IndexError/TypeError from `pair[1]`, and
+    IndexError falls OUTSIDE `BaselineStore.load`'s (ValueError, KeyError, TypeError) recovery
+    net — a scheduled `ogle check` would crash-loop on exactly the corrupt file the net exists
+    to quarantine. Reject up front with the ValueError contract so load() quarantines instead.
+    """
+    with pytest.raises(ValueError, match="quantile pair for 'f'.*\\[level, value\\]"):
+        build_signature("urn:x", field_quantiles={"f": [(0.25, 5.0), bad]})
+
+
+def test_quantiles_malformed_pair_survives_store_load(tmp_path):
+    """End-to-end: a baseline with a truncated quantile pair QUARANTINES, never crash-loops.
+
+    Proves the ValueError from the arity guard is caught by `BaselineStore.load`'s recovery
+    net (which an IndexError would have escaped), so an operator's scheduled check degrades
+    loudly (re-baseline) instead of going blind.
+    """
+    from ogle.store import BaselineStore, STORE_VERSION
+
+    p = tmp_path / "baselines.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {
+                    "urn:x": {
+                        "urn": "urn:x",
+                        "schema_fields": [["amount", "double"]],
+                        "field_quantiles": {"amount": [[0.25, 5.0], [0.75]]},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is True
+    assert store.get_baseline("urn:x") is None
 
 
 def test_quantiles_duplicate_level_rejected():

@@ -380,12 +380,28 @@ def _clean_quantiles(
     for path, pairs in (field_quantiles or {}).items():
         cleaned: List[Tuple[float, float]] = []
         for pair in pairs:
+            # A pair must be a genuine 2-element [level, value] array. A non-sequence or
+            # wrong-arity element (a truncated `[0.25]`, a scalar, a 3-tuple) would otherwise
+            # raise IndexError/TypeError from `pair[1]` — and IndexError is OUTSIDE
+            # `BaselineStore.load`'s (ValueError, KeyError, TypeError) recovery net, so a
+            # scheduled `ogle check` crash-loops on exactly the corrupt file the net exists to
+            # quarantine. Reject with the same ValueError contract so load() quarantines and
+            # re-baselines LOUDLY. (A length-2 string like "ab" is not a list/tuple, so it is
+            # rejected here rather than char-splitting into ('a','b') — one layer deeper than the
+            # schema_fields guard in `from_dict`.)
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise ValueError(
+                    f"quantile pair for {path!r} must be a [level, value] array, got {pair!r}"
+                )
+            # bool laundering: `float(True) == 1.0` would forge a p=1.0 (or v=1.0) reading the
+            # empirical scorer trusts — the exact silent-misread class every sibling numeric
+            # guard (mean/stdev/min/max/fractions/row_count) already rejects; quantiles was the
+            # last carrier still coercing a bare `float(...)`. A str/None would defer a crash into
+            # the scorer instead of quarantining now. Require a genuine finite real up front, the
+            # same contract (and message) `_require_finite_real` raises for the moments.
+            _require_finite_real(pair[0], "quantile level", path)
+            _require_finite_real(pair[1], "quantile value", path)
             p, v = float(pair[0]), float(pair[1])
-            for label, val in (("quantile level", p), ("quantile value", v)):
-                if val != val or val in (float("inf"), float("-inf")):
-                    raise ValueError(
-                        f"{label} for {path!r} must be a finite number, got {val!r}"
-                    )
             if not 0.0 <= p <= 1.0:
                 raise ValueError(
                     f"quantile level for {path!r} must be in [0,1], got {p!r}"
