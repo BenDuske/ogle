@@ -269,8 +269,24 @@ def build_signature(
     to the last occurrence — DataHub occasionally reports nested duplicates and we want a
     single truth per path so the hash and null-fraction lookups stay consistent.
     """
+    # Both halves of a schema field must be genuine strings. A persisted [path, type] pair
+    # can carry a non-string (a bare number/null/nested array in a hand-edited or foreign
+    # store) that the sibling numeric guards never see, and it corrupts the schema hash in
+    # two distinct ways: a UNIFORM non-string type (e.g. `null`) builds silently but hashes
+    # to a value that differs from the real string type — schema drift then quietly mis-scores,
+    # the one thing this detector must never do — while a MIXED set (an int path beside a str
+    # path) DEFERS a `TypeError` to `schema_hash`'s `sorted()`, a crash in the scorer instead
+    # of a quarantine at load. Reject a non-str up front with the same ValueError contract the
+    # moment/fraction guards raise so `BaselineStore.load` quarantines the foreign file and
+    # re-baselines LOUDLY. (bool is not a str subclass, so `isinstance(True, str)` is False —
+    # it is rejected here like any other non-string, matching the numeric guards.)
     deduped: Dict[str, str] = {}
     for path, native_type in schema_fields:
+        if not isinstance(path, str) or not isinstance(native_type, str):
+            raise ValueError(
+                f"schema field must be (str path, str type), got "
+                f"({path!r}, {native_type!r})"
+            )
         deduped[path] = native_type
     fields = tuple(SchemaField(path=p, native_type=t) for p, t in deduped.items())
 

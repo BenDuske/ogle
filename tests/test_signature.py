@@ -509,6 +509,55 @@ def test_from_dict_accepts_both_list_and_tuple_schema_field_pairs():
     ]
 
 
+# ---- non-string schema-field path/type: the moment guards' schema-hash twin --------------------
+# A [path, type] pair whose halves are the right ARITY but the wrong TYPE (a bare number/null/nested
+# array in a hand-edited or foreign store) is invisible to both the char-split guard above (it IS a
+# 2-array) and the numeric guards below. It corrupts the schema hash two ways: a UNIFORM non-string
+# type builds silently but hashes DIFFERENTLY from the real string type (schema drift mis-scores —
+# the cardinal sin), and a MIXED set (int path beside str path) DEFERS a `TypeError` to
+# `schema_hash`'s `sorted()` — a crash in the scorer, not a quarantine at load. Reject at build/load.
+
+@pytest.mark.parametrize(
+    "schema_fields",
+    [
+        [("col", None)],          # uniform non-string TYPE -> silent mis-hash
+        [("col", 123)],           # uniform non-string TYPE (number)
+        [(123, "double")],        # non-string PATH
+        [(True, "double")],       # bool path (isinstance(True, str) is False)
+        [("col", True)],          # bool type
+        [(1, "t"), ("col", "t")],  # MIXED path types -> deferred sorted() TypeError
+        [(["nested"], "t")],      # non-string (unhashable) path
+    ],
+)
+def test_non_string_schema_field_rejected(schema_fields):
+    """A non-str path or native_type must raise at build so a corrupt store quarantines LOUDLY
+    instead of silently mis-hashing the schema or deferring a TypeError into the scorer."""
+    with pytest.raises(ValueError, match="schema field must be"):
+        build_signature("urn:x", schema_fields=schema_fields)
+
+
+@pytest.mark.parametrize(
+    "bad_pair",
+    [["col", None], ["col", 123], [123, "double"], [True, "double"], ["col", True]],
+)
+def test_from_dict_rejects_non_string_schema_field(bad_pair):
+    """The persisted-store path: a non-string half raises on load so BaselineStore quarantines."""
+    persisted = {"urn": "urn:x", "schema_fields": [bad_pair]}
+    with pytest.raises(ValueError, match="schema field must be"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_string_schema_field_still_builds_and_hashes():
+    """The guard must not disturb a legitimately-typed schema — it still builds AND its
+    hash is reachable (the deferred-crash path the mixed-type case used to take)."""
+    sig = build_signature("urn:x", schema_fields=[("amount", "double"), ("id", "bigint")])
+    assert [(f.path, f.native_type) for f in sig.schema_fields] == [
+        ("amount", "double"),
+        ("id", "bigint"),
+    ]
+    assert isinstance(sig.schema_hash, str) and len(sig.schema_hash) == 64
+
+
 # ---- bool / non-number laundering of persisted numeric scalars -------------------------------
 # `float(True) == 1.0`, so a bare JSON `true` in a hand-edited/foreign store slips past the
 # NaN/inf finiteness checks as a real 1.0 (or 0.0 for `false`) and SILENTLY poisons its scorer —
