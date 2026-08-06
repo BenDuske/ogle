@@ -233,6 +233,23 @@ class DatasetSignature:
         )
 
 
+def _require_finite_real(value: object, kind: str, path: str) -> None:
+    """Reject a persisted numeric scalar that is a bool or not a finite real number.
+
+    bool is the *silent* laundering case: ``float(True) == 1.0``, so a bare ``true`` in a
+    hand-edited or foreign store slips past a plain finiteness check as a real 1.0 — exactly
+    the class the store's timestamp path closed with ``_finite_epoch``. A str/None never trips
+    the ``x != x`` / inf checks either, so it would pass build here and only blow up later in
+    the scorer's arithmetic (a *deferred* crash on a future check run) instead of quarantining
+    the file now at load. Reusing the finiteness guard's message keeps existing tests unchanged;
+    only the newly-rejected bool/non-number cases are new behavior.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{kind} for {path!r} must be a finite number, got {value!r}")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"{kind} for {path!r} must be a finite number, got {value!r}")
+
+
 def build_signature(
     urn: str,
     schema_fields: Sequence[Tuple[str, str]] = (),
@@ -257,51 +274,48 @@ def build_signature(
         deduped[path] = native_type
     fields = tuple(SchemaField(path=p, native_type=t) for p, t in deduped.items())
 
+    # A fraction is a bool-or-non-number away from silent corruption: bool laundering
+    # (`float(True) == 1.0`) slips a `true` past the [0,1] range check as a real 1.0 (a
+    # "0% / 100%" reading the scorer trusts), so reject the bool type up front. A str/None
+    # trips the comparison with a TypeError, which `BaselineStore.load` already catches to
+    # quarantine — only the in-range bool misreads silently.
     nulls = dict(field_null_fractions or {})
     for path, frac in nulls.items():
-        if not 0.0 <= frac <= 1.0:
+        if isinstance(frac, bool) or not 0.0 <= frac <= 1.0:
             raise ValueError(
                 f"null fraction for {path!r} must be in [0,1], got {frac!r}"
             )
     uniques = dict(field_unique_fractions or {})
     for path, frac in uniques.items():
-        if not 0.0 <= frac <= 1.0:
+        if isinstance(frac, bool) or not 0.0 <= frac <= 1.0:
             raise ValueError(
                 f"unique fraction for {path!r} must be in [0,1], got {frac!r}"
             )
     # A mean is an unbounded real (unlike the fractions above): only reject non-finite
-    # values (NaN/inf would poison the relative-shift math in the scorer), never a range.
+    # values (NaN/inf would poison the relative-shift math in the scorer) and the bool/
+    # non-number laundering `_require_finite_real` guards, never a range.
     means = dict(field_means or {})
     for path, mval in means.items():
-        if mval != mval or mval in (float("inf"), float("-inf")):
-            raise ValueError(
-                f"mean for {path!r} must be a finite number, got {mval!r}"
-            )
-    # A stdev is a non-negative, finite real (a dispersion): reject NaN/inf like the mean, and
-    # additionally reject a negative value — a standard deviation below zero is nonsense that
-    # would poison the relative-shift math in the scorer.
+        _require_finite_real(mval, "mean", path)
+    # A stdev is a non-negative, finite real (a dispersion): reject NaN/inf and bool/non-number
+    # like the mean, and additionally reject a negative value — a standard deviation below zero
+    # is nonsense that would poison the relative-shift math in the scorer.
     stdevs = dict(field_stdevs or {})
     for path, sval in stdevs.items():
-        if sval != sval or sval in (float("inf"), float("-inf")):
-            raise ValueError(
-                f"stdev for {path!r} must be a finite number, got {sval!r}"
-            )
+        _require_finite_real(sval, "stdev", path)
         if sval < 0.0:
             raise ValueError(
                 f"stdev for {path!r} must be >= 0 (a dispersion), got {sval!r}"
             )
-    # A min/max is a signed, unbounded finite real (like the mean): reject only NaN/inf, never
-    # a range. Additionally, where a field carries BOTH a min and a max, the min may not exceed
-    # the max — an inverted envelope is nonsense that would make the baseline span negative and
-    # poison the breach math in the scorer. Reject it up front rather than emit garbage.
+    # A min/max is a signed, unbounded finite real (like the mean): reject NaN/inf and bool/
+    # non-number, never a range. Additionally, where a field carries BOTH a min and a max, the
+    # min may not exceed the max — an inverted envelope is nonsense that would make the baseline
+    # span negative and poison the breach math in the scorer. Reject it up front.
     mins = dict(field_mins or {})
     maxes = dict(field_maxes or {})
     for label, mapping in (("min", mins), ("max", maxes)):
         for path, val in mapping.items():
-            if val != val or val in (float("inf"), float("-inf")):
-                raise ValueError(
-                    f"{label} for {path!r} must be a finite number, got {val!r}"
-                )
+            _require_finite_real(val, label, path)
     for path in mins.keys() & maxes.keys():
         if mins[path] > maxes[path]:
             raise ValueError(
@@ -314,7 +328,10 @@ def build_signature(
     # integral negative). Fewer than two points can't span a probability band, so it is dropped
     # rather than half-recorded. Reject a malformed set up front rather than emit garbage.
     quantiles = _clean_quantiles(field_quantiles)
-    if row_count is not None and row_count < 0:
+    # A row_count is a non-negative int. A bool laundering (`True < 0` is False) would slip a
+    # `true` through as a real 1-row count, so reject the bool type alongside the range — the
+    # same silent-misread class the numeric maps above guard.
+    if row_count is not None and (isinstance(row_count, bool) or row_count < 0):
         raise ValueError(f"row_count must be >= 0, got {row_count!r}")
 
     return DatasetSignature(

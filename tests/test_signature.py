@@ -509,6 +509,101 @@ def test_from_dict_accepts_both_list_and_tuple_schema_field_pairs():
     ]
 
 
+# ---- bool / non-number laundering of persisted numeric scalars -------------------------------
+# `float(True) == 1.0`, so a bare JSON `true` in a hand-edited/foreign store slips past the
+# NaN/inf finiteness checks as a real 1.0 (or 0.0 for `false`) and SILENTLY poisons its scorer —
+# the exact class the store's timestamp path closed with `_finite_epoch` (9df2132). A str/None in
+# a finite-only *moment* map (mean/stdev/min/max) is worse: it trips no NaN/inf check either, so it
+# passes build and only crashes later in the scorer's arithmetic — a *deferred* failure on a future
+# `ogle check`. Both must be rejected at build/load so a corrupt store quarantines LOUDLY instead.
+
+@pytest.mark.parametrize(
+    "kind,kwargs",
+    [
+        ("mean", {"field_means": {"f": True}}),
+        ("stdev", {"field_stdevs": {"f": True}}),
+        ("min", {"field_mins": {"f": True}}),
+        ("max", {"field_maxes": {"f": True}}),
+    ],
+)
+def test_bool_moment_rejected(kind, kwargs):
+    """A bool in a moment map launders as 1.0 past the finiteness check — reject the type."""
+    with pytest.raises(ValueError, match=f"{kind}.*finite"):
+        build_signature("urn:x", **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kind,kwargs",
+    [
+        ("mean", {"field_means": {"f": "1.5"}}),
+        ("stdev", {"field_stdevs": {"f": "1.5"}}),
+        ("min", {"field_mins": {"f": "1.5"}}),
+        ("max", {"field_maxes": {"f": "1.5"}}),
+    ],
+)
+def test_non_number_moment_rejected(kind, kwargs):
+    """A str moment trips no NaN/inf check, so it used to pass build and defer a crash to the
+    scorer. The type guard rejects it at build so the file quarantines at load instead."""
+    with pytest.raises(ValueError, match=f"{kind}.*finite"):
+        build_signature("urn:x", **kwargs)
+
+
+@pytest.mark.parametrize(
+    "match,kwargs",
+    [
+        ("null fraction", {"field_null_fractions": {"f": True}}),
+        ("unique fraction", {"field_unique_fractions": {"f": True}}),
+    ],
+)
+def test_bool_fraction_rejected(match, kwargs):
+    """`True` is 1.0 and 1.0 IS in [0,1], so a bool fraction passes the range check — a bogus
+    "100% null/unique" reading. Reject the bool type before it reaches the scorer."""
+    with pytest.raises(ValueError, match=match):
+        build_signature("urn:x", **kwargs)
+
+
+def test_bool_row_count_rejected():
+    """`True < 0` is False, so a bool row_count slips through as a real 1-row count. Reject it."""
+    with pytest.raises(ValueError, match="row_count"):
+        build_signature("urn:x", row_count=True)
+
+
+@pytest.mark.parametrize(
+    "match,field,payload",
+    [
+        ("mean.*finite", "field_means", {"amount": True}),
+        ("stdev.*finite", "field_stdevs", {"amount": True}),
+        ("min.*finite", "field_mins", {"amount": True}),
+        ("max.*finite", "field_maxes", {"amount": True}),
+        ("null fraction", "field_null_fractions", {"amount": True}),
+        ("unique fraction", "field_unique_fractions", {"amount": True}),
+    ],
+)
+def test_from_dict_rejects_bool_persisted_scalar(match, field, payload):
+    """A `true` persisted in any numeric map must raise on load so BaselineStore quarantines the
+    file and re-baselines, rather than score a laundered 1.0 as if it were real data."""
+    persisted = {"urn": "urn:x", "schema_fields": [["amount", "double"]], field: payload}
+    with pytest.raises(ValueError, match=match):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_rejects_bool_persisted_row_count():
+    persisted = {"urn": "urn:x", "schema_fields": [["amount", "double"]], "row_count": True}
+    with pytest.raises(ValueError, match="row_count"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_int_moment_and_row_count_still_load():
+    """The bool guard must not reject a genuine int — a JSON integer mean/count is legitimate
+    (bool is an int SUBTYPE, so the guard keys on `isinstance(bool)`, not int-ness)."""
+    sig = build_signature(
+        "urn:x", row_count=5, field_means={"amount": 42}, field_mins={"amount": 0}
+    )
+    assert sig.row_count == 5
+    assert sig.field_means == {"amount": 42}
+    assert sig.field_mins == {"amount": 0}
+
+
 # ---- parse_iso_epoch: the single clock-free reader behind staleness + the freshness dimension ----
 
 # Oracle epochs computed the tz-explicit way, so these assertions hold on any host timezone.
