@@ -485,6 +485,30 @@ def test_from_dict_rejects_negative_persisted_row_count():
         DatasetSignature.from_dict(persisted)
 
 
+@pytest.mark.parametrize("bad_elem", ["ab", {"foo": 1, "bar": 2}])
+def test_from_dict_rejects_char_splittable_schema_field(bad_elem):
+    """A length-2 string / 2-key dict schema_fields element must be REJECTED, not char-split.
+
+    `tuple("ab")` -> `('a','b')` and `tuple({"foo":1,"bar":2})` -> `('foo','bar')` both slip
+    through the builder's `(path, native_type)` unpack silently and forge a bogus SchemaField,
+    poisoning the schema hash so real schema drift is quietly mis-scored. (A 3+-char string or
+    other-arity dict already raises an unpack error caught by load — only the length-2 case
+    misreads silently.) Load must raise so BaselineStore.load quarantines the foreign file."""
+    persisted = {"urn": "urn:x", "schema_fields": [bad_elem]}
+    with pytest.raises(ValueError, match="schema_fields entries must be"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_accepts_both_list_and_tuple_schema_field_pairs():
+    """The guard rejects only non-array elements — genuine list AND tuple pairs still load."""
+    persisted = {"urn": "urn:x", "schema_fields": [["a", "string"], ("n", "int")]}
+    restored = DatasetSignature.from_dict(persisted)
+    assert [(f.path, f.native_type) for f in restored.schema_fields] == [
+        ("a", "string"),
+        ("n", "int"),
+    ]
+
+
 # ---- parse_iso_epoch: the single clock-free reader behind staleness + the freshness dimension ----
 
 # Oracle epochs computed the tz-explicit way, so these assertions hold on any host timezone.

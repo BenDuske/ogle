@@ -198,10 +198,29 @@ class DatasetSignature:
         re-baseline — so a corrupt store degrades LOUDLY (drift re-learned) instead of scoring
         garbage. `schema_fields` arrive as [path, type] pairs, exactly the tuple sequence the
         builder expects (its dedup is a no-op on already-deduped persisted fields).
+
+        Each `schema_fields` element must be a genuine JSON array (a [path, type] pair),
+        not just any 2-item iterable. A bare `tuple(pair)` char-splits a length-2 STRING
+        (`"ab"` -> `('a','b')`) and key-splits a 2-key DICT (`{"foo":1,"bar":2}` ->
+        `('foo','bar')`) — both slip through the builder's `for path, native_type in ...`
+        unpack SILENTLY and forge a bogus SchemaField, poisoning the schema hash so real
+        schema drift is quietly mis-scored (a 3+-char string / other-arity dict raises
+        "too many/not enough values to unpack" and is already caught, so ONLY the length-2
+        string/dict misreads silently). This is the same char-split silent-misread class the
+        store's `muted_urns`/`dict(...)` guards close, one layer deeper. Reject a non-list/
+        tuple element with a ValueError, which `BaselineStore.load` catches to quarantine the
+        foreign file and re-baseline — loud degradation over a silently corrupted signature.
         """
+        raw_fields = data.get("schema_fields", [])
+        for pair in raw_fields:
+            if not isinstance(pair, (list, tuple)):
+                raise ValueError(
+                    f"schema_fields entries must be [path, type] arrays, got "
+                    f"{type(pair).__name__} (refusing to char-split a truncated/foreign file)"
+                )
         return build_signature(
             urn=data["urn"],
-            schema_fields=[tuple(pair) for pair in data.get("schema_fields", [])],
+            schema_fields=[tuple(pair) for pair in raw_fields],
             row_count=data.get("row_count"),
             field_null_fractions=data.get("field_null_fractions"),
             field_unique_fractions=data.get("field_unique_fractions"),
