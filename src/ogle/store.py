@@ -56,7 +56,20 @@ def _finite_mute_time(value: object, *, key: str, urn: str) -> float:
     Reject both with the same ValueError the sibling shape guards raise, so `load()` quarantines
     the foreign file rather than misreading it. (A non-numeric value already raises
     ValueError/TypeError from `float(...)`, which `load()` catches identically.)
+
+    A JSON boolean is the one non-number that slips past `float(...)`: `bool` is a subclass of
+    `int`, so `float(True)` is a silent, *finite* `1.0` (and `float(False)` a `0.0`) — both pass
+    `math.isfinite`. A hand-edited/truncated `"muted_until": {urn: true}` would then read as epoch
+    second 1.0 (Jan 1 1970), which `is_muted`'s `exp > now` treats as long-expired: the snooze
+    VANISHES and the dataset it was meant to silence starts paging again — the exact silent-
+    suppression-loss this guard exists to stop, just wearing a bool instead of a NaN. Reject it
+    explicitly (before `float(...)` can launder it) with the same ValueError contract.
     """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"baseline store '{key}' time for {urn!r} must be a number, got bool "
+            f"(refusing to misread a truncated/foreign file)"
+        )
     f = float(value)
     if not math.isfinite(f):
         raise ValueError(

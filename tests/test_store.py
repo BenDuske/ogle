@@ -1312,6 +1312,41 @@ def test_load_recovers_from_non_finite_mute_time(tmp_path, field, bad_token):
     assert not p.exists()
 
 
+@pytest.mark.parametrize("bad_value", [True, False])
+@pytest.mark.parametrize("field", ["muted_until", "muted_at"])
+def test_load_recovers_from_bool_mute_time(tmp_path, field, bad_value):
+    """A JSON boolean is the one non-number that slips past `float(...)`: `bool` subclasses `int`,
+    so `float(True)` is a silent, finite `1.0` (and `float(False)` a `0.0`) — both pass the
+    non-finite guard. A hand-edited/truncated `"muted_until": {urn: true}` would then read as epoch
+    second 1.0 (Jan 1970), which `is_muted` treats as long-expired, so the snooze VANISHES and the
+    dataset it was meant to silence starts paging again — the same silent-suppression-loss the
+    finite guard exists to stop, just wearing a bool instead of a NaN. The guard rejects it with the
+    same clean, section-named ValueError so `load()` quarantines the foreign file."""
+    # muted_at is only retained for a still-muted URN, so keep it permanently muted for that field;
+    # muted_until is dropped for permanently-muted URNs, so leave it unmuted there.
+    muted_urns = [CUSTOMERS_URN] if field == "muted_at" else []
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {},
+        "muted_urns": muted_urns,
+        field: {CUSTOMERS_URN: bad_value},
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces the clean, section-named ValueError (never a bool silently coerced to
+    # 0.0/1.0 and kept as a broken mute time).
+    with pytest.raises(ValueError, match=f"'{field}' time for .* must be a number, got bool"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines the foreign file and hands back a fresh, empty, usable store — with
+    # NO bool-coerced mute lingering to vanish-page.
+    store = BaselineStore.load(p)
+    assert store.muted_until == {}
+    assert store.muted_at == {}
+    assert store.recovered_from_corruption is True
+    assert not p.exists()
+
+
 def test_finite_mute_times_still_load(tmp_path):
     """The finite guard must not reject legitimate snoozes — a normal (finite, even negative or
     zero) mute time round-trips untouched, proving the guard rejects only NaN/Infinity."""
