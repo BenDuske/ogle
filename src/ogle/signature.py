@@ -218,6 +218,33 @@ class DatasetSignature:
                     f"schema_fields entries must be [path, type] arrays, got "
                     f"{type(pair).__name__} (refusing to char-split a truncated/foreign file)"
                 )
+        # Every per-field map must be a genuine JSON object. A hand-edited or foreign store can
+        # carry a JSON ARRAY where a `{path: value}` object belongs, and the two carriers fail in
+        # DIFFERENT — both wrong — ways downstream. The `dict(...)`-fed maps (null/unique fractions,
+        # means, stdevs, mins, maxes) SILENTLY coerce a list of `[k, v]` pairs into a mapping
+        # (`dict([["a",0.5]]) == {"a":0.5}`), forging per-field readings the scorer trusts — the
+        # exact silent-misread class every sibling guard here rejects. `field_quantiles` is worse:
+        # `_clean_quantiles` calls `.items()` on it, and a list has none → `AttributeError`, which
+        # is OUTSIDE `BaselineStore.load`'s (ValueError, KeyError, TypeError) recovery net, so a
+        # scheduled `ogle check` crash-loops on exactly the corrupt file the net exists to
+        # quarantine — going silently blind to drift. Reject a non-dict map up front with the
+        # standard ValueError contract so load() quarantines the foreign file and re-baselines
+        # LOUDLY. (A missing key is fine — the builder defaults it — so only a PRESENT non-dict trips.)
+        for map_key in (
+            "field_null_fractions",
+            "field_unique_fractions",
+            "field_means",
+            "field_stdevs",
+            "field_mins",
+            "field_maxes",
+            "field_quantiles",
+        ):
+            val = data.get(map_key)
+            if val is not None and not isinstance(val, dict):
+                raise ValueError(
+                    f"{map_key} must be a {{path: value}} object, got "
+                    f"{type(val).__name__} (refusing to coerce a foreign/truncated file)"
+                )
         return build_signature(
             urn=data["urn"],
             schema_fields=[tuple(pair) for pair in raw_fields],

@@ -574,6 +574,65 @@ def test_from_dict_accepts_both_list_and_tuple_schema_field_pairs():
     ]
 
 
+# ---- non-dict per-field maps: a JSON array where a {path: value} object belongs ----------------
+# A hand-edited/foreign store can carry a LIST where a per-field map should be an object, and the
+# two map families fail differently — both wrong. The dict(...)-fed maps SILENTLY coerce a list of
+# [k, v] pairs into a mapping (dict([["a",0.5]]) == {"a":0.5}), forging readings the scorer trusts;
+# field_quantiles is worse — `_clean_quantiles` calls `.items()`, and a list has none, raising
+# AttributeError OUTSIDE BaselineStore.load's (ValueError, KeyError, TypeError) net → crash-loop on
+# exactly the file the net exists to quarantine. `from_dict` must reject a present non-dict map.
+
+@pytest.mark.parametrize(
+    "map_key",
+    [
+        "field_null_fractions",
+        "field_unique_fractions",
+        "field_means",
+        "field_stdevs",
+        "field_mins",
+        "field_maxes",
+        "field_quantiles",
+    ],
+)
+@pytest.mark.parametrize("bad_val", [[["a", 0.5]], [], "abc", 0.5])
+def test_from_dict_rejects_non_dict_per_field_map(map_key, bad_val):
+    """A per-field map persisted as a JSON array/scalar must raise ValueError at load, so
+    BaselineStore.load quarantines the foreign file instead of silently coercing it (or, for
+    field_quantiles, crash-looping on an AttributeError the recovery net never catches)."""
+    persisted = {"urn": "urn:x", "schema_fields": [["a", "int"]], map_key: bad_val}
+    with pytest.raises(ValueError, match=f"{map_key} must be a"):
+        DatasetSignature.from_dict(persisted)
+
+
+def test_from_dict_non_dict_quantiles_survives_store_load(tmp_path):
+    """End-to-end: field_quantiles as a JSON array QUARANTINES, never crash-loops.
+
+    Regression guard for the AttributeError hole — `_clean_quantiles` calling `.items()` on a
+    list escaped BaselineStore.load's (ValueError, KeyError, TypeError) net. The from_dict guard
+    converts it to a caught ValueError so the operator's scheduled check re-baselines loudly."""
+    from ogle.store import BaselineStore, STORE_VERSION
+
+    p = tmp_path / "baselines.json"
+    p.write_text(
+        json.dumps(
+            {
+                "version": STORE_VERSION,
+                "baselines": {
+                    "urn:x": {
+                        "urn": "urn:x",
+                        "schema_fields": [["amount", "double"]],
+                        "field_quantiles": [["amount", [[0.25, 5.0], [0.75, 9.0]]]],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is True
+    assert store.get_baseline("urn:x") is None
+
+
 # ---- non-string schema-field path/type: the moment guards' schema-hash twin --------------------
 # A [path, type] pair whose halves are the right ARITY but the wrong TYPE (a bare number/null/nested
 # array in a hand-edited or foreign store) is invisible to both the char-split guard above (it IS a
