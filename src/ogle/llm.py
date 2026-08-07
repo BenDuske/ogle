@@ -108,10 +108,15 @@ def _anthropic_text(payload: dict) -> str:
     blocks = payload.get("content") if isinstance(payload, dict) else None
     if not isinstance(blocks, list):
         blocks = []
+    # ``b.get("text", "")`` returns the "" default only when the key is *absent*; a block
+    # ``{"type": "text", "text": null}`` (JSON null, which a proxy or a future response
+    # shape can emit) yields None, and ``"".join`` on it raises TypeError — throwing away
+    # every *other* valid text block and suppressing narration entirely. Keep only blocks
+    # whose text is actually a string, so one malformed block is skipped, not fatal.
     parts = [
-        b.get("text", "")
+        b["text"]
         for b in blocks
-        if isinstance(b, dict) and b.get("type") == "text"
+        if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
     ]
     return _strip_think("".join(parts))
 

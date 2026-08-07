@@ -195,6 +195,36 @@ def test_anthropic_narrator_tolerates_non_list_content(monkeypatch):
     assert llm.build_narrator("anthropic")("P") == ""
 
 
+def test_anthropic_narrator_skips_null_text_block_keeps_prose(monkeypatch):
+    # A block whose ``text`` is JSON null (present key, None value) must be skipped, not
+    # discard the sibling prose. ``b.get("text", "")`` returns None here (the "" default
+    # only fires on an absent key), so ``"".join`` would raise TypeError and suppress the
+    # whole narration — throwing away a perfectly good summary block.
+    _capture_urlopen(
+        monkeypatch,
+        {"content": [
+            {"type": "text", "text": "Real summary. "},
+            {"type": "text", "text": None},
+        ]},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llm.build_narrator("anthropic")("P") == "Real summary."
+
+
+def test_anthropic_narrator_skips_non_string_text_block(monkeypatch):
+    # A text block whose ``text`` is a non-string (number/list from a mangled body) is
+    # skipped rather than crashing the join; adjacent valid prose still comes through.
+    _capture_urlopen(
+        monkeypatch,
+        {"content": [
+            {"type": "text", "text": 42},
+            {"type": "text", "text": "Kept."},
+        ]},
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llm.build_narrator("anthropic")("P") == "Kept."
+
+
 def test_anthropic_narrator_raises_without_key(monkeypatch):
     # No transport call should even happen — the missing key raises first.
     def unexpected(req, timeout=None):
