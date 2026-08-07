@@ -5,6 +5,7 @@ Task #2 shape (`customers` feeds the deployed `churn_predictor`).
 """
 
 import json
+import os
 
 import pytest
 
@@ -904,18 +905,20 @@ def test_fsync_dir_swallows_fsync_failure(tmp_path, monkeypatch):
     # If the directory opens but the fsync itself errors (I/O fault on the dir handle), the
     # helper still returns cleanly and closes the fd — data is already durable, so a failed
     # dir-fsync must not surface as a save failure. Also proves the fd is always closed.
+    #
+    # os.open is stubbed to a sentinel fd so this reaches the fsync branch on EVERY platform
+    # (Windows won't open a real directory and would otherwise return before fsync ever runs,
+    # leaving the swallow branch unverified). The stub returns no real fd, so os.close is also
+    # stubbed to a recorder rather than the real close (closing a fake fd would raise).
+    SENTINEL_FD = 515151
     closed = []
-    real_close = store_mod.os.close
 
     def boom_fsync(_fd):
         raise OSError("dir fsync i/o error")
 
-    def traced_close(fd):
-        closed.append(fd)
-        return real_close(fd)
-
+    monkeypatch.setattr(store_mod.os, "open", lambda *_a, **_k: SENTINEL_FD)
     monkeypatch.setattr(store_mod.os, "fsync", boom_fsync)
-    monkeypatch.setattr(store_mod.os, "close", traced_close)
+    monkeypatch.setattr(store_mod.os, "close", lambda fd: closed.append(fd))
 
     try:
         store_mod._fsync_dir(tmp_path)  # must not raise
@@ -924,8 +927,35 @@ def test_fsync_dir_swallows_fsync_failure(tmp_path, monkeypatch):
         # before ever reaching fsync — nothing to assert about closing, and no raise expected.
         pytest.fail("_fsync_dir must never propagate an OSError")
 
-    # If the dir opened at all, the fd must have been closed despite the fsync error.
-    # (On a dir-open-refusing platform, closed stays empty and that's fine.)
+    # The fsync failed, but the fd it opened must still have been closed.
+    assert closed == [SENTINEL_FD], "dir fd must be closed even when its fsync errors"
+
+
+def test_fsync_dir_opens_fsyncs_and_closes_on_posix_like_platform(tmp_path, monkeypatch):
+    # The success path — open the dir, fsync THAT fd, then close it — is the whole point of
+    # the helper (it's what makes a completed rename durable). But on Windows (and network FS)
+    # os.open won't open a directory, so it returns early and this path never runs under the
+    # test platform, leaving the load-bearing branch unverified. Simulate a POSIX-like open by
+    # handing back a sentinel fd, and prove the contract holds regardless of the host OS:
+    # the dir is opened, the fsync targets the returned fd, and the fd is always closed.
+    SENTINEL_FD = 424242
+    opened = []
+    fsynced = []
+    closed = []
+
+    def fake_open(path, flags):
+        opened.append((str(path), flags))
+        return SENTINEL_FD
+
+    monkeypatch.setattr(store_mod.os, "open", fake_open)
+    monkeypatch.setattr(store_mod.os, "fsync", lambda fd: fsynced.append(fd))
+    monkeypatch.setattr(store_mod.os, "close", lambda fd: closed.append(fd))
+
+    store_mod._fsync_dir(tmp_path)
+
+    assert opened == [(str(tmp_path), os.O_RDONLY)], "must open the parent dir read-only"
+    assert fsynced == [SENTINEL_FD], "must fsync the fd the dir-open returned, not some other"
+    assert closed == [SENTINEL_FD], "must always close the dir fd it opened"
 
 
 def test_save_fsync_failure_spares_prior_good_file_and_leaves_no_tmp(tmp_path, monkeypatch):
