@@ -93,6 +93,32 @@ def _finite_epoch(value: object, *, context: str) -> float:
     return f
 
 
+def _nonneg_int(value: object, *, context: str) -> int:
+    """Coerce a persisted incident counter to a non-negative int, rejecting the bool case.
+
+    `count` (observation tally) and `datasets` (assets in the incident) are non-negative ints.
+    `bool` is an `int` subclass, so a bare `int(True)` is a silent `1` — a truncated/foreign
+    `{"count": true}` would forge a real "seen once" / "1 dataset" reading with NO exception, the
+    same silent-misread class `_finite_epoch` (timestamps) and signature.py's `row_count`/
+    `_require_finite_real` guards close. A str/None/NaN already raises ValueError/TypeError from
+    `int(...)`, which `load()`'s recovery net catches identically; only the in-type bool (and a
+    negative, which is visible nonsense but still not a valid tally) slip through, so reject both
+    with the same ValueError contract the sibling shape guards raise and let `load()` quarantine
+    the file. `context` names which field for the operator."""
+    if isinstance(value, bool):
+        raise ValueError(
+            f"baseline store {context} must be an integer, got bool "
+            f"(refusing to misread a truncated/foreign file)"
+        )
+    n = int(value)
+    if n < 0:
+        raise ValueError(
+            f"baseline store {context} must be >= 0, got {n} "
+            f"(refusing to misread a truncated/foreign file)"
+        )
+    return n
+
+
 def _fsync_dir(directory: Path) -> None:
     """Best-effort fsync of a directory so a completed rename is durable.
 
@@ -187,10 +213,14 @@ class _IncidentRecord:
         raw_owners = data.get("owners")
         raw_urns = data.get("urns")
         return cls(
-            count=int(data.get("count", 0)),
+            # count/datasets are non-negative ints. Route through the shared guard so a
+            # bool-laundered `{"count": true}` (int(True) == 1) quarantines via load() instead
+            # of silently reading as a real 1-observation / 1-dataset record — the counter twin
+            # of the last_seen/first_seen finite-epoch guard just below.
+            count=_nonneg_int(data.get("count", 0), context="incident record 'count'"),
             severity=data.get("severity"),
             title=data.get("title"),
-            datasets=int(data.get("datasets", 0)),
+            datasets=_nonneg_int(data.get("datasets", 0), context="incident record 'datasets'"),
             serving=bool(data.get("serving", False)),
             # last_seen/first_seen drive every age display, the recent/standing sorts, and the
             # --stale/--fresh/--standing windows + age gauges. A bare float() here would launder a

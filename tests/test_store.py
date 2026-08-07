@@ -1173,6 +1173,53 @@ def test_incident_record_from_dict_rejects_non_dict_directly():
             _IncidentRecord.from_dict(bad)
 
 
+@pytest.mark.parametrize("field", ["count", "datasets"])
+def test_incident_record_from_dict_rejects_bool_counter(field):
+    """`bool` is an `int` subclass, so a bare `int(True)` silently launders a truncated/foreign
+    `{"count": true}` / `{"datasets": true}` into a real 1-observation / 1-dataset reading with
+    NO exception — the exact silent-misread class the timestamp (`_finite_epoch`) and
+    signature.py `row_count` guards already close. It must raise a quarantine-able ValueError,
+    not launder to 1. A string counter already raises (verified alongside) so the net catches it;
+    the bool is the one that slips through."""
+    with pytest.raises(ValueError, match=f"incident record '{field}' must be an integer, got bool"):
+        _IncidentRecord.from_dict({field: True})
+    # A negative counter is visible nonsense but still not a valid tally — same guard rejects it.
+    with pytest.raises(ValueError, match=f"incident record '{field}' must be >= 0"):
+        _IncidentRecord.from_dict({field: -1})
+
+
+def test_load_recovers_from_bool_laundered_incident_counter(tmp_path):
+    """End-to-end twin of the non-dict-entry recovery: a `seen_incidents` entry whose `count`
+    is a JSON `true` (int(True) == 1) must quarantine like any other foreign file, not silently
+    persist a forged 1-observation incident."""
+    payload = {"version": 1, "baselines": {}, "seen_incidents": {"fp1": {"count": True}}}
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    # Strict mode surfaces the clean, field-named ValueError.
+    with pytest.raises(ValueError, match="incident record 'count' must be an integer, got bool"):
+        BaselineStore.load(p, recover_corrupt=False)
+    # Default mode quarantines and hands back a fresh, re-baselineable store.
+    store = BaselineStore.load(p)
+    assert len(store.seen_incidents) == 0
+    assert store.recovered_from_corruption is True
+    assert store.corrupt_backup_path == p.with_name(p.name + ".corrupt")
+    assert not p.exists()
+    # The recovered store is fully usable: a fresh incident records + reloads clean.
+    store.record_incident("fp", severity="high")
+    store.save()
+    assert BaselineStore.load(p).has_seen("fp")
+
+
+def test_incident_record_from_dict_still_accepts_valid_counters():
+    """Guard is bool/negative-only — legitimate int counters (incl. the 0 default and a
+    lenient float/str coercion the record already tolerated) still round-trip."""
+    assert _IncidentRecord.from_dict({"count": 3, "datasets": 2}).count == 3
+    assert _IncidentRecord.from_dict({"count": 3, "datasets": 2}).datasets == 2
+    assert _IncidentRecord.from_dict({}).count == 0  # default
+    assert _IncidentRecord.from_dict({"count": "5"}).count == 5  # lenient str coercion preserved
+    assert _IncidentRecord.from_dict({"count": 4.0}).count == 4  # lenient float coercion preserved
+
+
 @pytest.mark.parametrize("bad_value", [42, "urn:li:dataset:sales", True, {"a": "b"}, None])
 def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
     """`muted_urns` is the one mute section built with `set(...)` instead of `dict(...)`, and
