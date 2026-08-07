@@ -84,6 +84,19 @@ def test_ollama_narrator_strips_thinking_block(monkeypatch):
     assert out == "Schema drift on customers."
 
 
+def test_ollama_narrator_tolerates_non_object_body(monkeypatch):
+    # A proxy in front of Ollama can return a JSON array/string (error page) instead of the
+    # ``{"response": ...}`` object. The adapter must degrade to "" (narrate falls back to the
+    # deterministic report) rather than raise AttributeError on ``payload.get``.
+    _capture_urlopen(monkeypatch, ["unexpected", "array", "body"])
+    assert llm.build_narrator("ollama")("P") == ""
+
+
+def test_ollama_narrator_tolerates_bare_string_body(monkeypatch):
+    _capture_urlopen(monkeypatch, "gateway timeout")
+    assert llm.build_narrator("ollama:qwen3:latest")("P") == ""
+
+
 # ---- graceful fallback through narrate() ---------------------------------------------
 def _finding():
     return DriftFinding(
@@ -165,6 +178,21 @@ def test_anthropic_narrator_concatenates_text_blocks(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     out = llm.build_narrator("anthropic")("P")
     assert out == "Schema drift on customers. Page the owner."
+
+
+def test_anthropic_narrator_tolerates_non_object_body(monkeypatch):
+    # Same guard as the Ollama path: a non-object body (array/string from an error page)
+    # must yield "" via _anthropic_text, not an AttributeError on ``payload.get``.
+    _capture_urlopen(monkeypatch, ["not", "a", "messages", "object"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llm.build_narrator("anthropic")("P") == ""
+
+
+def test_anthropic_narrator_tolerates_non_list_content(monkeypatch):
+    # ``content`` present but not a list — coerce to empty rather than iterate a dict/str.
+    _capture_urlopen(monkeypatch, {"content": {"type": "text", "text": "x"}})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert llm.build_narrator("anthropic")("P") == ""
 
 
 def test_anthropic_narrator_raises_without_key(monkeypatch):

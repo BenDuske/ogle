@@ -86,7 +86,12 @@ def ollama_narrator(
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed host)
             payload = json.loads(resp.read().decode("utf-8"))
-        return _strip_think(payload.get("response") or "")
+        # ``/api/generate`` returns a JSON object, but a proxy/gateway in front of Ollama
+        # can hand back a non-object body (an error page that happens to be a JSON array
+        # or bare string). Guard the ``.get`` so that degrades to "no narration" —
+        # narrate() then uses the deterministic markdown — instead of an AttributeError.
+        text = payload.get("response") if isinstance(payload, dict) else None
+        return _strip_think(text or "")
 
     return _call
 
@@ -98,7 +103,11 @@ def _anthropic_text(payload: dict) -> str:
     prose. Strip ``<think>`` defensively too (Anthropic won't emit it, but the same
     reasoning-leak guard the Ollama path uses costs nothing here).
     """
-    blocks = payload.get("content") or []
+    # A non-object body (e.g. a gateway error page decoded to a JSON array) would make
+    # ``payload.get`` raise; treat it as no content so narrate() falls back cleanly.
+    blocks = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(blocks, list):
+        blocks = []
     parts = [
         b.get("text", "")
         for b in blocks
