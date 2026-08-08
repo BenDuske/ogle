@@ -46,3 +46,9 @@ demo.json
 
 # Backups
 .backup-*/
+
+# demo recording artifacts (audio/screen/renders — local only)
+demo-recording/audio/
+demo-recording/screen/
+demo-recording/*.mp4
+demo-recording/*.mov
