@@ -209,6 +209,8 @@ class _IncidentRecord:
             )
         ls = data.get("last_seen")
         fs = data.get("first_seen")
+        raw_sev = data.get("severity")
+        raw_title = data.get("title")
         raw_kinds = data.get("kinds")
         raw_owners = data.get("owners")
         raw_urns = data.get("urns")
@@ -218,8 +220,19 @@ class _IncidentRecord:
             # of silently reading as a real 1-observation / 1-dataset record — the counter twin
             # of the last_seen/first_seen finite-epoch guard just below.
             count=_nonneg_int(data.get("count", 0), context="incident record 'count'"),
-            severity=data.get("severity"),
-            title=data.get("title"),
+            # severity/title are human-facing provenance strings. A truncated/foreign file that
+            # still parses AND carries the right version can hand back a NON-string here (e.g.
+            # `{"title": 42}` or `{"severity": ["high"]}`) — and unlike the numeric fields there
+            # is no earlier guard, so the bad type would load clean (load()'s recovery net never
+            # trips) and then crash a DOWNSTREAM consumer: `ogle incidents --grep` does
+            # `(rec.get("title") or "").lower()`, and `.lower()` on an int raises AttributeError,
+            # which is NOT in load()'s catch net — the exact "survives one tier past the guard and
+            # crash-loops on a foreign file" failure the sibling shape guards exist to stop. Coerce
+            # to str-when-present (None stays None so the to_dict "emit only when set" contract and
+            # the legacy/untimed round-trip are preserved), mirroring the str() coercion the
+            # kinds/owners/urns lists get just below.
+            severity=str(raw_sev) if raw_sev is not None else None,
+            title=str(raw_title) if raw_title is not None else None,
             datasets=_nonneg_int(data.get("datasets", 0), context="incident record 'datasets'"),
             serving=bool(data.get("serving", False)),
             # last_seen/first_seen drive every age display, the recent/standing sorts, and the

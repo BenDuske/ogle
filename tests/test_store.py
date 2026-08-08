@@ -1250,6 +1250,56 @@ def test_incident_record_from_dict_still_accepts_valid_counters():
     assert _IncidentRecord.from_dict({"count": 4.0}).count == 4  # lenient float coercion preserved
 
 
+@pytest.mark.parametrize("field", ["title", "severity"])
+def test_incident_record_from_dict_coerces_nonstring_provenance(field):
+    """`severity`/`title` are human-facing provenance strings with no earlier numeric guard, so a
+    truncated/foreign file that still parses AND carries the right version can hand back a
+    non-string (`{"title": 42}`, `{"severity": ["high"]}`). Unlike the numeric fields it would
+    load clean and then crash a DOWNSTREAM consumer — `ogle incidents --grep` calls `.lower()` on
+    the title. `from_dict` must normalize it to str at the load boundary (the same str() coercion
+    kinds/owners/urns get), so no non-string ever escapes the record."""
+    rec = _IncidentRecord.from_dict({"count": 1, field: 42})
+    assert getattr(rec, field) == "42"
+    assert isinstance(getattr(rec, field), str)
+    rec_list = _IncidentRecord.from_dict({"count": 1, field: ["high"]})
+    assert isinstance(getattr(rec_list, field), str)
+
+
+def test_incident_record_from_dict_preserves_none_and_str_provenance():
+    """The coercion is present-only: a missing severity/title stays None (so to_dict's
+    "emit only when set" contract and the legacy round-trip hold), and a real string is
+    untouched."""
+    bare = _IncidentRecord.from_dict({"count": 1})
+    assert bare.severity is None and bare.title is None
+    assert "severity" not in bare.to_dict() and "title" not in bare.to_dict()
+    good = _IncidentRecord.from_dict({"count": 1, "severity": "high", "title": "orders drift"})
+    assert good.severity == "high" and good.title == "orders drift"
+
+
+def test_grep_survives_nonstring_title_from_foreign_store(tmp_path):
+    """End-to-end: a foreign store whose incident `title` parsed as a non-string used to load
+    clean (from_dict read it raw) and then crash `ogle incidents --grep` with an AttributeError
+    on `.lower()` — a crash NOT in load()'s catch net, surviving one tier past the guard. With
+    the load-boundary coercion the record loads with a str title and the grep consumer runs."""
+    from ogle.cli import _incident_matches_needle
+
+    payload = {
+        "version": 1,
+        "baselines": {},
+        "seen_incidents": {"fp1": {"count": 1, "title": 42, "severity": ["high"]}},
+    }
+    p = tmp_path / "store.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    store = BaselineStore.load(p)
+    assert store.recovered_from_corruption is False  # loads clean — not a quarantine case
+    rec = next(iter(store.seen_incidents.values()))
+    assert isinstance(rec.title, str) and isinstance(rec.severity, str)
+    d = rec.to_dict()
+    d["fingerprint"] = "fp1"
+    assert _incident_matches_needle(d, "42") is True  # no crash; matches the coerced title
+    assert _incident_matches_needle(d, "nope") is False
+
+
 @pytest.mark.parametrize("bad_value", [42, "urn:li:dataset:sales", True, {"a": "b"}, None])
 def test_load_recovers_from_muted_urns_that_is_not_a_list(tmp_path, bad_value):
     """`muted_urns` is the one mute section built with `set(...)` instead of `dict(...)`, and
