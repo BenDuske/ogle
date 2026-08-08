@@ -144,7 +144,7 @@ live path against the DataHub quickstart.
 |---|---|
 | Public repo | https://github.com/BenDuske/ogle |
 | **Apache 2.0** license | ✅ present at repo root |
-| Demo video (< 3 min, YouTube public/unlisted) | 🟡 script + Argo-driven recording pipeline ready — [`docs/DEMO-VIDEO-SCRIPT.md`](DEMO-VIDEO-SCRIPT.md) (two-track SCREEN/VOICE, narration via Ben's ElevenLabs voice clone); awaits render + upload |
+| Demo video (< 3 min, YouTube public/unlisted) | ✅ https://youtu.be/Cu0LiW99igI (2:06, Argo-driven render — see [`docs/DEMO-VIDEO-SCRIPT.md`](DEMO-VIDEO-SCRIPT.md) + [`demo-recording/build_video.sh`](../demo-recording/build_video.sh)) |
 | Text description | ✅ complete (Inspiration + technical story + What's next all drafted) |
 | Setup instructions in README | ✅ verified: keyless `ogle demo` Quickstart + live-DataHub Docker path, all commands runnable from a fresh clone |
 | Sample outputs in `examples/` | ✅ `examples/alerts/` + runnable `examples/demo/` fixtures |

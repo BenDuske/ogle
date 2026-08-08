@@ -9,6 +9,8 @@ so it doesn't spam.
 
 Built for the **DataHub Agent Hackathon** (Track: Production ML Agents).
 
+📺 **[2-minute demo video](https://youtu.be/Cu0LiW99igI)** — the full walk from a live drift alert to the tag landing back in DataHub.
+
 ## Why
 
 Every ML team lives one silent training-data change away from a bad model in prod. The
