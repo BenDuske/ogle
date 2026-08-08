@@ -2375,6 +2375,28 @@ def test_spread_shift_ci_none_under_same_guards_as_z():
     assert _spread_shift_ci(10.0, 20.0, None, 10_000, 1e-9) is None
 
 
+def test_spread_shift_z_none_when_se_underflows_zero_floor():
+    """SE below `zero_floor` -> None, not a z divided by a near-zero SE (which would explode
+    to a meaningless magnitude). Two ways in: a caller-configured large floor, and the real
+    astronomically-large-n path where SE = sqrt(1/(2(n_base-1))+1/(2(n_cur-1))) shrinks under
+    the default 1e-9 floor. Documented guard: "SE below zero_floor (interval collapses)."."""
+    # Explicit large floor: SE ~ sqrt(1/9999) ~ 0.01 sits below a 1.0 floor -> None.
+    assert _spread_shift_z(10.0, 20.0, 10_000, 10_000, 1.0) is None
+    # Realistic path: n so large SE underflows the default 1e-9 floor. Without the guard this
+    # would return a colossal, meaningless z instead of "indistinguishable / not comparable".
+    assert _spread_shift_z(10.0, 20.0, 10**19, 10**19, 1e-9) is None
+    # Just ABOVE the floor still returns a finite z (proves the guard is the SE, not the n).
+    assert _spread_shift_z(10.0, 20.0, 10_000, 10_000, 1e-9) is not None
+
+
+def test_spread_shift_ci_none_when_se_underflows_zero_floor():
+    """CI twin of the SE-underflow guard: a collapsed SE yields no band (None), never a
+    degenerate point interval built on a near-zero standard error."""
+    assert _spread_shift_ci(10.0, 20.0, 10_000, 10_000, 1.0) is None
+    assert _spread_shift_ci(10.0, 20.0, 10**19, 10**19, 1e-9) is None
+    assert _spread_shift_ci(10.0, 20.0, 10_000, 10_000, 1e-9) is not None
+
+
 def test_stdev_finding_carries_ci_and_annotates_it():
     """A flagged spread move with row counts reports ci_low/ci_high and annotates the band."""
     base = _sig(field_stdevs={"amount": 10.0}, row_count=10_000)
