@@ -37,12 +37,13 @@ done
 printf "file 's1-03.mp4'\nfile 's1-06.mp4'\nfile 's1-09.mp4'\n" > work/s1-list.txt
 ffmpeg -y -f concat -safe 0 -i work/s1-list.txt -c copy work/s1.mp4 > work/s1-concat.log 2>&1
 
+# CROP_TASKBAR: strip the 48px Windows taskbar off the bottom, then pad back to 1080 with black
+CROP_TB="crop=1920:1032:0:0,pad=1920:1080:0:0:color=black,setsar=1"
+
 # ---------- SCENE 2: ogle demo active (2-15s of raw = 13s) + freeze final frame to fill 40.22s ----------
-# Extract the active portion
-ffmpeg -y -ss 2 -to 15 -i "$RAW" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s2a.mp4 > work/s2a.log 2>&1
-# Extract the last frame at t=14.9s of raw as an image
-ffmpeg -y -ss 14.9 -i "$RAW" -frames:v 1 -q:v 2 work/s2-freeze.png > work/s2-freeze.log 2>&1
-# Freeze that image to fill remaining time (40.22 - 13 = 27.22s)
+ffmpeg -y -ss 2 -to 15 -i "$RAW" -vf "$CROP_TB" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s2a.mp4 > work/s2a.log 2>&1
+# Extract the last frame at t=14.9s of raw as an image (also crop the taskbar)
+ffmpeg -y -ss 14.9 -i "$RAW" -vf "$CROP_TB" -frames:v 1 -q:v 2 work/s2-freeze.png > work/s2-freeze.log 2>&1
 ffmpeg -y -loop 1 -t 27.22 -i work/s2-freeze.png \
   -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1" \
   -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} work/s2b.mp4 > work/s2b.log 2>&1
@@ -50,7 +51,7 @@ printf "file 's2a.mp4'\nfile 's2b.mp4'\n" > work/s2-list.txt
 ffmpeg -y -f concat -safe 0 -i work/s2-list.txt -c copy work/s2.mp4 > work/s2-concat.log 2>&1
 
 # ---------- SCENE 3: last 18s of Scene 3 recording (raw 40-58s, narrate+writeback visible) + screenshot 10 hold (10.24s) = 28.24s ----------
-ffmpeg -y -ss 40 -to 58 -i "$RAW" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s3a.mp4 > work/s3a.log 2>&1
+ffmpeg -y -ss 40 -to 58 -i "$RAW" -vf "$CROP_TB" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s3a.mp4 > work/s3a.log 2>&1
 ffmpeg -y -loop 1 -t 10.24 -i "$SHOT/10-churn-predictor-tagged.png" \
   -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1" \
   -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} work/s3b.mp4 > work/s3b.log 2>&1
@@ -58,7 +59,7 @@ printf "file 's3a.mp4'\nfile 's3b.mp4'\n" > work/s3-list.txt
 ffmpeg -y -f concat -safe 0 -i work/s3-list.txt -c copy work/s3.mp4 > work/s3-concat.log 2>&1
 
 # ---------- SCENE 4: 14.91s slice of the debounce sequence (raw 76-91s captures the 3 checks + exits) ----------
-ffmpeg -y -ss 76 -to 90.91 -i "$RAW" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s4.mp4 > work/s4.log 2>&1
+ffmpeg -y -ss 76 -to 90.91 -i "$RAW" -vf "$CROP_TB" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s4.mp4 > work/s4.log 2>&1
 
 # ---------- SCENE 5: Ogle promo image + small repo URL overlay (9.10s) ----------
 ffmpeg -y -loop 1 -t 9.10 -i "$SHOT/ogle-linkedin-promo.png" \
