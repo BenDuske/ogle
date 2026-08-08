@@ -157,6 +157,7 @@ exit-code highlight) absorb another 4–8 s of dead air — landing target is **
 ```bash
 ogle demo
 ogle demo --narrate --write-back --write-back-severity
+rm -f demo.json   # Scene 4 needs a FRESH store or the exit codes invert to 1→0→0
 ogle check --store demo.json --signatures examples/demo/healthy-signatures.json
 ogle check --store demo.json --signatures examples/demo/drifted-signatures.json
 ogle check --store demo.json --signatures examples/demo/drifted-signatures.json
