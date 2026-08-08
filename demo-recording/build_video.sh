@@ -16,10 +16,9 @@ FONT_SANS="/c/Windows/Fonts/segoeui.ttf"
 
 W=1920; H=1080; FPS=30
 
-# ---------- SCENE 0: title card (12.86s) ----------
-ffmpeg -y -f lavfi -i "color=c=black:s=${W}x${H}:d=12.86:r=${FPS}" \
-  -vf "drawtext=fontfile=${FONT_SANS}:text='OGLE':fontcolor=white:fontsize=180:x=(w-text_w)/2:y=(h-text_h)/2-80,\
-drawtext=fontfile=${FONT_SANS}:text='The ML lineage agent that just cant stop staring.':fontcolor=0xcccccc:fontsize=42:x=(w-text_w)/2:y=(h-text_h)/2+120" \
+# ---------- SCENE 0: Ogle promo image (12.86s) ----------
+ffmpeg -y -loop 1 -t 12.86 -i "$SHOT/ogle-linkedin-promo.png" \
+  -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=0x0a1929,setsar=1" \
   -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} work/s0.mp4 > work/s0.log 2>&1
 
 # ---------- SCENE 1: three DataHub screenshots, 6.89s each = 20.67s ----------
@@ -61,10 +60,10 @@ ffmpeg -y -f concat -safe 0 -i work/s3-list.txt -c copy work/s3.mp4 > work/s3-co
 # ---------- SCENE 4: 14.91s slice of the debounce sequence (raw 76-91s captures the 3 checks + exits) ----------
 ffmpeg -y -ss 76 -to 90.91 -i "$RAW" -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} -an work/s4.mp4 > work/s4.log 2>&1
 
-# ---------- SCENE 5: close card (9.10s) ----------
-ffmpeg -y -f lavfi -i "color=c=black:s=${W}x${H}:d=9.10:r=${FPS}" \
-  -vf "drawtext=fontfile=${FONT}:text='github.com/BenDuske/ogle':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2-40,\
-drawtext=fontfile=${FONT_SANS}:text='Apache 2.0':fontcolor=0xaaaaaa:fontsize=36:x=(w-text_w)/2:y=(h-text_h)/2+50" \
+# ---------- SCENE 5: Ogle promo image + small repo URL overlay (9.10s) ----------
+ffmpeg -y -loop 1 -t 9.10 -i "$SHOT/ogle-linkedin-promo.png" \
+  -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=0x0a1929,setsar=1,\
+drawtext=fontfile=${FONT}:text='github.com/BenDuske/ogle  •  Apache 2.0':fontcolor=0xdddddd:fontsize=32:x=(w-text_w)/2:y=h-90" \
   -c:v libx264 -preset medium -pix_fmt yuv420p -r ${FPS} work/s5.mp4 > work/s5.log 2>&1
 
 # ---------- CONCAT ALL VIDEO SCENES ----------
