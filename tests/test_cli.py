@@ -1144,6 +1144,45 @@ def test_unmute_not_muted_reports(tmp_path, capsys):
     assert "not muted" in capsys.readouterr().out
 
 
+def test_mute_save_failure_exits_two(tmp_path, capsys, monkeypatch):
+    # Unlike `check` — where the drift verdict already succeeded and the store save is a
+    # best-effort side-effect (warn on stderr, exit per the gate) — the WHOLE point of `mute`
+    # is to persist the mute. If the save can't land (disk full / permission denied), the
+    # command genuinely did nothing durable, so it must report the cause and exit 2, never a
+    # silent 0 that would leave the operator believing a false positive is quieted when it
+    # isn't. This pins the opposite-of-check contract for the mute side.
+    store = tmp_path / "baselines.json"
+
+    def _boom(self, path=None):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr("ogle.cli.BaselineStore.save", _boom)
+    rc = main(["mute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not save store" in err
+    assert "No space left on device" in err  # underlying cause surfaced for the operator
+
+
+def test_unmute_save_failure_exits_two(tmp_path, capsys, monkeypatch):
+    # Twin of the mute-side contract: un-muting is only real once it persists, so a failed
+    # save must exit 2 with the cause on stderr — never a silent 0 that implies drift can page
+    # again when the store still says muted.
+    store = tmp_path / "baselines.json"
+    main(["mute", CUSTOMERS_URN, "--store", str(store)])  # a real mute to lift
+    capsys.readouterr()
+
+    def _boom(self, path=None):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr("ogle.cli.BaselineStore.save", _boom)
+    rc = main(["unmute", CUSTOMERS_URN, "--store", str(store)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not save store" in err
+    assert "Read-only file system" in err
+
+
 def test_mute_json_receipt_for_permanent_mute(tmp_path, capsys):
     store = tmp_path / "baselines.json"
     rc = main(["mute", CUSTOMERS_URN, "--reason", "monday bounce", "--json", "--store", str(store)])
