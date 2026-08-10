@@ -78,6 +78,16 @@ evidence — and *remembers* past incidents and false positives so it gets sharp
 
 ## Quickstart
 
+### Install
+
+```bash
+# From a clone of this repo (Python 3.10+). Installs the `ogle` command.
+pip install -e .
+```
+
+This puts `ogle` on your PATH (a console-script entry point). Everything below —
+including the zero-setup `ogle demo` — assumes this one step is done.
+
 ### Against a live DataHub (Docker)
 
 ```bash
